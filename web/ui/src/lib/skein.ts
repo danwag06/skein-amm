@@ -19,7 +19,7 @@
  *   a lookup service's beat body is its own, skein-overlay 0.12.0).
  */
 import { encode, decode } from "cbor2";
-import { Utils } from "@bsv/sdk";
+import { AuthFetch, Utils, type WalletInterface } from "@bsv/sdk";
 import { liveUrl } from "./overlay";
 import { appName } from "./config";
 
@@ -31,6 +31,51 @@ export interface SignedPost {
 export function instanceBase(base: string): string {
   const name = appName(base);
   return name ? base.replace(new RegExp(`/${name}/?$`), "") : base;
+}
+
+/**
+ * The fetch an instance's BRC-104 client uses (skein `src/client/raw.ts`, copied: the pages do not
+ * depend on the skein package). `@bsv/sdk`'s AuthFetch keeps one session per ORIGIN and shakes
+ * hands at `<origin>/.well-known/auth`, which the router gives to the root instance; an instance
+ * under a path prefix (`<origin>/@<handle>`) takes its handshake at `<prefix>/.well-known/auth`
+ * (each instance holds its own sessions). So for a base with a prefix the handshake is sent there;
+ * every other request goes as it is. `fetchFn`: the browser's fetch, bound (it must be called on
+ * the window), unless a test passes its own.
+ */
+export function instanceFetch(base: string, fetchFn?: typeof fetch): typeof fetch {
+  const u = new URL(instanceBase(base));
+  const prefix = u.pathname.replace(/\/+$/, "");
+  const f = fetchFn ?? (((input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch);
+  if (!prefix) return f;
+  return ((input: string | URL | Request, init?: RequestInit) => {
+    const s = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const w = new URL(s);
+    if (w.origin === u.origin && w.pathname === "/.well-known/auth") w.pathname = `${prefix}/.well-known/auth`;
+    return f(input instanceof Request ? new Request(w, input) : w.href, init);
+  }) as typeof fetch;
+}
+
+/** The instance's key for its BRC-104 session: its origin and path prefix (`instanceBase`). */
+export function sessionKey(base: string): string {
+  return instanceBase(base).replace(/\/+$/, "");
+}
+
+/**
+ * The wallet's BRC-104 clients, one per instance (its origin + path prefix): `<origin>/amm` and
+ * `<origin>/@<tokenId>/amm` are two instances with two sessions. The same instance gets the same
+ * client back.
+ */
+export function authFetchPerInstance(wallet: WalletInterface, fetchFn?: typeof fetch): (base: string) => AuthFetch {
+  const clients = new Map<string, AuthFetch>();
+  return (base) => {
+    const key = sessionKey(base);
+    let af = clients.get(key);
+    if (!af) {
+      af = new AuthFetch(wallet, undefined, undefined, undefined, {}, instanceFetch(base, fetchFn));
+      clients.set(key, af);
+    }
+    return af;
+  };
 }
 
 /** dag-cbor (CDE: canonical key order, shortest forms) of a plain value. */

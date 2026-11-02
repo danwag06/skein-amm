@@ -238,14 +238,14 @@ const af = { fetch: (url: string, init?: { method?: string; headers?: Record<str
 beforeEach(() => {
   inst = instance();
   vi.stubGlobal("fetch", (url: string, init?: RequestInit) => route(url, init as never));
-  setExchangeContext({ base: BASE, wallet: null, af: null, identityKey: null, payouts: new PendingPayoutStore(null) });
+  setExchangeContext({ base: BASE, wallet: null, signedFor: null, identityKey: null, payouts: new PendingPayoutStore(null) });
 });
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
-const connect = (rows?: WalletRows) => setExchangeContext({ wallet: fakeWallet(rows), af: af as never, identityKey: ME });
+const connect = (rows?: WalletRows) => setExchangeContext({ wallet: fakeWallet(rows), signedFor: () => af as never, identityKey: ME });
 
 describe("exchange.ts, wired", () => {
   it("hostedTokens: the registered 1Color tokens, priced from ls_amm_<assetId>'s beats over the live validators (each validator's own report first); a token no beat reports, from this skein's listing", async () => {
@@ -338,7 +338,7 @@ describe("exchange.ts, wired", () => {
         return { accepted: true };
       },
     } as unknown as WalletInterface;
-    setExchangeContext({ wallet, af: af as never, identityKey: ME });
+    setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
     const q = await quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, allowPartial: false });
     expect(q.legs.map((l) => l.amountIn)).toEqual([50_000n]);
     // Nothing in the swap basket: one module send of exactly the leg's amount, before the leg.

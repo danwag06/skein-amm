@@ -4,6 +4,24 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.27.1 (2026-11-02)
+
+- One BRC-104 session per instance (David, 2026-11-02: "fix the page").
+  The pages built ONE `AuthFetch` and used it for every base; the SDK's
+  AuthFetch keeps one session per origin and shakes hands at
+  `<origin>/.well-known/auth`, which the router gives to the root instance
+  (swap), so every signed request to a token instance
+  (`<origin>/@<tokenId>/amm/...`: lookup, the pool's output, `amm.pool.terms`,
+  `amm.pool.affirm`, `amm.swap.terms`, the relay) came back unsigned and the
+  wallet refused it ("without valid BSV authentication"). Pool deploy,
+  Recover and Close were broken on every exchange since tokens became their
+  own instances (0.17.0). Now `src/lib/skein.ts` `authFetchPerInstance`
+  keeps one AuthFetch per instance (origin + `/@<handle>` prefix), and a
+  prefixed instance's handshake goes to `<origin>/@<handle>/.well-known/auth`
+  (the fetch wrapper copied from skein's `src/client/raw.ts`; no skein
+  dependency). Every token-instance call takes its own instance's client;
+  swap's (claim, admin messages, its token list) its own. Pages only.
+
 ## 0.27.0 (2026-10-30)
 
 - Your tokens: one first-visit approval covers the list (David,

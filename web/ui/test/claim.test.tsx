@@ -39,7 +39,7 @@ function buttons(node: ReactNode): ReactElement<{ onClick: () => void; "aria-lab
 }
 
 beforeEach(() => {
-  ex.setExchangeContext({ base: `${ORIGIN}/amm`, wallet: {} as never, af: { fetch: vi.fn() } as never, identityKey: ME });
+  ex.setExchangeContext({ base: `${ORIGIN}/amm`, wallet: {} as never, signedFor: () => ({ fetch: vi.fn() }) as never, identityKey: ME });
   sendMessage.mockClear();
 });
 afterEach(() => vi.unstubAllGlobals());

@@ -63,13 +63,13 @@
  * themselves.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AuthFetch, Beef, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import { Beef, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
 import type { PoolState, Plan } from "@amm-poc/matching-engine";
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
 import { deployQuery, outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
 import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB, REFRESH_MS, appName, tokenBase } from "../lib/config";
 import { ammLookupService, fetchLive, lookup, lookupPoolOutput, parseOutputList, parseTokenTopic, queryPools, type LiveAnswer, type SignedFetch, type TokenTopic } from "../lib/overlay";
-import { instanceBase, readBeats, readDefaults, readDiscovery, readSpend, readTokenList, readTokens, sendMessage, type Beat, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "../lib/skein";
+import { authFetchPerInstance, instanceBase, readBeats, readDefaults, readDiscovery, readSpend, readTokenList, readTokens, sendMessage, type Beat, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "../lib/skein";
 import { liveSenders, pricesFromBeats, depthOf, type TokenPrice } from "../market/prices";
 import { buildPlanRequest, goneFromLookup, quote as planQuote } from "../market/plan";
 import { validatorStatus } from "../market/view";
@@ -356,23 +356,32 @@ interface ExchangeContext {
   /** The config instance's AMM base URL (src/lib/config.ts): the pages' own. */
   base: string;
   wallet: WalletInterface | null;
-  /** The wallet's BRC-104 client. */
-  af: Signed | null;
+  /**
+   * The wallet's BRC-104 client for an instance base (0.27.1: one session per instance — the swap
+   * instance at `<origin>/amm` and each token instance at `<origin>/@<tokenId>/amm` hold their own
+   * sessions; src/lib/skein.ts `authFetchPerInstance`).
+   */
+  signedFor: ((base: string) => Signed) | null;
   identityKey: string | null;
   /** The pending payouts' store (localStorage). */
   payouts: PendingPayoutStore;
 }
 
-const context: ExchangeContext = { base: AMM_OVERLAY, wallet: null, af: null, identityKey: null, payouts: new PendingPayoutStore() };
+const context: ExchangeContext = { base: AMM_OVERLAY, wallet: null, signedFor: null, identityKey: null, payouts: new PendingPayoutStore() };
 
 /** Set what the functions below reach (the wallet and its client: `useSession`; a test: anything). */
 export function setExchangeContext(c: Partial<ExchangeContext>): void {
   Object.assign(context, c);
 }
 
-function needWallet(): { wallet: WalletInterface; af: Signed } {
-  if (!context.wallet || !context.af) throw new Error("Connect a wallet first");
-  return { wallet: context.wallet, af: context.af };
+function needWallet(): { wallet: WalletInterface; signedFor: (base: string) => Signed } {
+  if (!context.wallet || !context.signedFor) throw new Error("Connect a wallet first");
+  return { wallet: context.wallet, signedFor: context.signedFor };
+}
+
+/** The connected wallet's client for `base`'s instance; null with no wallet (reads then go unsigned). */
+function signed(base: string): Signed | null {
+  return context.signedFor ? context.signedFor(base) : null;
 }
 
 const listeners = new Set<() => void>();
@@ -534,10 +543,10 @@ export function useSession(): Session {
   const { openConnectDialog } = useConnectDialog();
   const status = w.status === "connected" && w.identityKey ? "connected" : w.status === "disconnected" ? "disconnected" : "connecting";
   const wallet = (w.wallet as WalletInterface | null | undefined) ?? null;
-  const afRef = useRef<{ wallet: WalletInterface | null; af: Signed | null }>({ wallet: null, af: null });
-  if (afRef.current.wallet !== wallet) afRef.current = { wallet, af: wallet ? (new AuthFetch(wallet) as unknown as Signed) : null };
+  const afRef = useRef<{ wallet: WalletInterface | null; signedFor: ((base: string) => Signed) | null }>({ wallet: null, signedFor: null });
+  if (afRef.current.wallet !== wallet) afRef.current = { wallet, signedFor: wallet ? (authFetchPerInstance(wallet) as unknown as (base: string) => Signed) : null };
   const connected = status === "connected";
-  setExchangeContext({ wallet: connected ? wallet : null, af: connected ? afRef.current.af : null, identityKey: connected ? w.identityKey : null });
+  setExchangeContext({ wallet: connected ? wallet : null, signedFor: connected ? afRef.current.signedFor : null, identityKey: connected ? w.identityKey : null });
   // Connect as 0.8's <ConnectButton/> did: the wallet's own connect, which
   // auto-detects an injected BRC-100 wallet (Yours). The connect dialog lists
   // only `providers` configured on WalletProvider, and none are, so opening it
@@ -592,9 +601,9 @@ export async function isRoot(identityKey: string | null): Promise<boolean> {
  * a few reads until it shows) and tells the pages.
  */
 export async function claimExchange(): Promise<boolean> {
-  const { af } = needWallet();
+  const { signedFor } = needWallet();
   const { identity } = await claimStatus();
-  await sendMessage(af, context.base, identity, "claim", {});
+  await sendMessage(signedFor(context.base), context.base, identity, "claim", {});
   let root = false;
   for (let i = 0; i < 20 && !root; i++) {
     root = await isRoot(context.identityKey);
@@ -633,7 +642,7 @@ async function liveFor(t: HostedTopic): Promise<{ beats: Beat[]; live: Set<strin
 
 /** This skein's own listing of a token, its live pools summed: the fallback when no beat reports the token. */
 async function localPrice(t: HostedTopic, dec: number): Promise<TokenPrice> {
-  const [pools, live] = await Promise.all([queryPools(context.af, t.base, t.tokenId), fetchLive(t.base, t.topic)]);
+  const [pools, live] = await Promise.all([queryPools(signed(t.base), t.base, t.tokenId), fetchLive(t.base, t.topic)]);
   const usable = pools.filter((p) => validatorStatus(p.validatorIdentityKey, live).live);
   const sats = usable.reduce((a, p) => a + p.bsvReserve, 0n);
   const tokens = usable.reduce((a, p) => a + p.tokenReserve, 0n);
@@ -732,7 +741,7 @@ export function useHostedTokens(): { tokens: HostedToken[] | null; error: string
 export async function tokenPools(tokenId: TokenId): Promise<PoolView[]> {
   const topic = `tm_color_${sdkTokenId(tokenId)}`;
   const base = await tokenBaseOf(tokenId);
-  const [pools, live] = await Promise.all([queryPools(context.af, base, tokenId), fetchLive(base, topic)]);
+  const [pools, live] = await Promise.all([queryPools(signed(base), base, tokenId), fetchLive(base, topic)]);
   return pools.map((p) => ({
     outpoint: outpointText(p.outpoint),
     tokenId,
@@ -750,8 +759,9 @@ export async function tokenPools(tokenId: TokenId): Promise<PoolView[]> {
  * signed call), and then no pool is hidden.
  */
 export async function marketMinimum(tokenId: TokenId): Promise<number | null> {
-  if (!context.af) return null;
-  return (await swapTerms(context.af, await tokenBaseOf(tokenId))).minCommissionBps;
+  if (!context.signedFor) return null;
+  const base = await tokenBaseOf(tokenId);
+  return (await swapTerms(context.signedFor(base), base)).minCommissionBps;
 }
 
 /**
@@ -775,7 +785,7 @@ export function belowMinimumText(n: number): string {
 export async function swapPools(tokenId: TokenId): Promise<{ pools: PoolView[]; hidden: number }> {
   const topic = `tm_color_${sdkTokenId(tokenId)}`;
   const base = await tokenBaseOf(tokenId);
-  const [pools, live, min] = await Promise.all([queryPools(context.af, base, tokenId), fetchLive(base, topic), marketMinimum(tokenId)]);
+  const [pools, live, min] = await Promise.all([queryPools(signed(base), base, tokenId), fetchLive(base, topic), marketMinimum(tokenId)]);
   const { listed, hidden } = atMarketMinimum(pools, min);
   return {
     pools: listed.map((p) => ({
@@ -808,7 +818,7 @@ export async function quoteSwap(req: QuoteRequest): Promise<Quote> {
   if (req.amountIn <= 0n) throw new Error("Enter an amount");
   const topic = `tm_color_${sdkTokenId(req.tokenId)}`;
   const base = await tokenBaseOf(req.tokenId);
-  const [all, live, meta, min] = await Promise.all([queryPools(context.af, base, req.tokenId), fetchLive(base, topic), tokenMeta(), marketMinimum(req.tokenId)]);
+  const [all, live, meta, min] = await Promise.all([queryPools(signed(base), base, req.tokenId), fetchLive(base, topic), tokenMeta(), marketMinimum(req.tokenId)]);
   const { listed: pools, hidden } = atMarketMinimum(all, min);
   if (pools.length === 0 && hidden > 0) throw new Error(`No pool to swap against: ${belowMinimumText(hidden)}`);
   const dec = meta.get(req.tokenId)?.dec ?? 0;
@@ -861,11 +871,12 @@ export async function quoteSwap(req: QuoteRequest): Promise<Quote> {
  * fresh lookup stops the swap unless partial fills are allowed.
  */
 export async function executeSwap(quote: Quote): Promise<SwapResult> {
-  const { wallet, af } = needWallet();
+  const { wallet, signedFor } = needWallet();
   const p = planned.get(quote);
   if (!p) throw new Error("Quote again: this quote was not planned here");
   const tokenId = quote.request.tokenId;
   const base = await tokenBaseOf(tokenId);
+  const af = signedFor(base);
   const fresh = await queryPools(af, base, tokenId);
   const gone = goneFromLookup(p.plan, fresh);
   if (gone.length > 0 && !quote.request.allowPartial) throw new Error(`${gone.map(outpointText).join(", ")} ${gone.length === 1 ? "was" : "were"} spent since the quote: quote again`);
@@ -975,7 +986,7 @@ const loaded = new Map<string, LoadedPosition>();
 
 /** The connected wallet's open positions: its pool rows (`amm-pools`) read from the chain state (src/lp/positions.ts). */
 export async function myPositions(): Promise<Position[]> {
-  const { wallet, af } = needWallet();
+  const { wallet, signedFor } = needWallet();
   const [poolRows, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), tokenMeta()]);
   const rows = positionRowsOf(poolRows);
   const out: Position[] = [];
@@ -986,7 +997,7 @@ export async function myPositions(): Promise<Position[]> {
     let base: string;
     try {
       base = await tokenBaseOf(row.tokenId);
-      pos = await loadPosition(af, base, row);
+      pos = await loadPosition(signedFor(base), base, row);
     } catch {
       continue;
     }
@@ -1028,8 +1039,9 @@ function fee(x: unknown, name: string): number {
 
 /** `amm.pool.terms` of a token's instance (0.17.0): its validator, its peer ID and its terms (an error "no validator here" when none are set). */
 async function rawTerms(tokenId: TokenId): Promise<RawTerms> {
-  const { af } = needWallet();
-  const t = (await callApp(af, await tokenBaseOf(tokenId), "amm.pool.terms", {})) as Record<string, unknown>;
+  const { signedFor } = needWallet();
+  const base = await tokenBaseOf(tokenId);
+  const t = (await callApp(signedFor(base), base, "amm.pool.terms", {})) as Record<string, unknown>;
   const bytes = readBytes(t.validator);
   const hex = bytes ? Utils.toHex(bytes) : "";
   if (!/^[0-9a-f]{66}$/.test(hex)) throw new Error("amm.pool.terms: no validator identity");
@@ -1065,7 +1077,8 @@ export async function validatorTerms(tokenId: TokenId): Promise<ValidatorTerms |
  * signed read of its token list. The recipient of root's messages.
  */
 export async function instanceIdentity(base?: string): Promise<string> {
-  const { af } = needWallet();
+  const { signedFor } = needWallet();
+  const af = signedFor(base ?? context.base);
   const res = base
     ? await af.fetch(callUrl(base), {
         method: "POST",
@@ -1087,13 +1100,13 @@ export async function instanceIdentity(base?: string): Promise<string> {
  * position row (`amm-pools`).
  */
 export async function deployPosition(req: DeployRequest): Promise<DeployResult> {
-  const { wallet, af } = needWallet();
+  const { wallet, signedFor } = needWallet();
   if (req.tokens <= 0n || req.sats <= 0n) throw new Error("Both amounts must be more than 0");
   const [terms, held, meta, base] = await Promise.all([rawTerms(req.tokenId), heldOutputs(wallet), tokenMeta(), tokenBaseOf(req.tokenId)]);
   const m = meta.get(req.tokenId) ?? (await deployMeta(req.tokenId));
   const d = await deployPool({
     wallet,
-    af,
+    af: signedFor(base),
     base,
     tokenId: req.tokenId,
     tokens: req.tokens,
@@ -1145,7 +1158,7 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
  * then works as for any position.
  */
 export async function recoverPosition(outpoint: string): Promise<RecoverResult> {
-  const { wallet, af } = needWallet();
+  const { wallet, signedFor } = needWallet();
   const [rows, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), tokenMeta()]);
   const { base, tokenId } = await baseHolding(outpoint);
   const r = await recoverPoolRow({
@@ -1153,7 +1166,7 @@ export async function recoverPosition(outpoint: string): Promise<RecoverResult> 
     outpoint,
     rows,
     spendOf: (o) => readSpend(base, o),
-    outputOf: (o) => colorOutput(af, base, tokenId, o),
+    outputOf: (o) => colorOutput(signedFor(base), base, tokenId, o),
     metaOf: async (tokenId) => meta.get(tokenId) ?? (await deployMeta(tokenId)),
   });
   emit();
@@ -1228,9 +1241,10 @@ export async function myTokens(): Promise<WalletToken[]> {
  * wallet's balance.
  */
 export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; amount: bigint; internalized: boolean; errors: string[] }> {
-  const { wallet, af } = needWallet();
+  const { wallet, signedFor } = needWallet();
   const meta = await tokenMeta();
-  const r = await moveBack({ wallet, af, base: await tokenBaseOf(tokenId), tokenId, meta: { sym: symOf(meta, tokenId) }, satsPerKb: FEE_RATE_SATS_PER_KB, payouts: context.payouts });
+  const base = await tokenBaseOf(tokenId);
+  const r = await moveBack({ wallet, af: signedFor(base), base, tokenId, meta: { sym: symOf(meta, tokenId) }, satsPerKb: FEE_RATE_SATS_PER_KB, payouts: context.payouts });
   emit();
   return { txid: r.txid, amount: r.amount, internalized: r.internalized, errors: r.errors };
 }
@@ -1301,7 +1315,7 @@ export interface EnableSent {
  * deploy).
  */
 export async function enableToken(tokenId: TokenId): Promise<EnableSent> {
-  const { af, wallet } = needWallet();
+  const { signedFor, wallet } = needWallet();
   const id = parseOutpoint(sdkTokenId(tokenId).replace("_", "."));
   if (!id) throw new Error(`not a token id: ${tokenId}`);
   const canonical = tokenIdText(id);
@@ -1314,7 +1328,7 @@ export async function enableToken(tokenId: TokenId): Promise<EnableSent> {
     from = d.from;
   }
   const me = await instanceIdentity();
-  await sendMessage(af, context.base, me, `${app()}/admin`, { fn: "enable", args: { tokenId: canonical, ...(beef ? { beef: Uint8Array.from(beef) } : {}) } });
+  await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "enable", args: { tokenId: canonical, ...(beef ? { beef: Uint8Array.from(beef) } : {}) } });
   emit();
   return { beefFrom: from };
 }
@@ -1390,9 +1404,9 @@ export async function tokensToEnable(): Promise<EnableCandidate[]> {
 
 /** Disables a token (0.17.0): root's `{fn: "disable", args: {tokenId}}` to `<app>/admin`; its instance stopped. */
 export async function disableToken(tokenId: TokenId): Promise<void> {
-  const { af } = needWallet();
+  const { signedFor } = needWallet();
   const me = await instanceIdentity();
-  await sendMessage(af, context.base, me, `${app()}/admin`, { fn: "disable", args: { tokenId: sdkTokenId(tokenId) } });
+  await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "disable", args: { tokenId: sdkTokenId(tokenId) } });
   emit();
 }
 
@@ -1409,9 +1423,9 @@ export async function defaults(): Promise<Defaults> {
 }
 
 async function sendDefaults(args: Record<string, unknown>): Promise<void> {
-  const { af } = needWallet();
+  const { signedFor } = needWallet();
   const me = await instanceIdentity();
-  await sendMessage(af, context.base, me, `${app()}/admin`, { fn: "defaults", args });
+  await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "defaults", args });
   emit();
 }
 
@@ -1455,9 +1469,9 @@ export async function discoveryState(): Promise<Discovery> {
  * submit its deploy there.
  */
 export async function setDiscovery(on: boolean): Promise<void> {
-  const { af } = needWallet();
+  const { signedFor } = needWallet();
   const me = await instanceIdentity();
-  await sendMessage(af, context.base, me, `${app()}/admin`, { fn: "discovery", args: { on } });
+  await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "discovery", args: { on } });
   emit();
 }
 
