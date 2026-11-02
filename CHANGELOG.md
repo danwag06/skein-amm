@@ -4,6 +4,17 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.28.1 (2026-11-02)
+
+- Deploy a position fills the other side at the market rate (David,
+  2026-11-02). With a market price for the token (the "market price now"
+  number), typing in Tokens fills Sats = tokens × price (whole sats,
+  rounded) and typing in Sats fills Tokens = sats ÷ price (the token's
+  decimals, rounded at the last place). The field typed last is the
+  source; both stay editable. Changing the token (or the market price
+  arriving) re-derives from the source. No pools: no filling, as before.
+  `src/ox/deployFill.ts`, `test/deployFill.test.ts`.
+
 ## 0.28.0 (2026-11-02)
 
 - The claim grants the configure right, not root (David, 2026-11-02: "The

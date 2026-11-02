@@ -225,7 +225,11 @@ counterparty}`).
   the token list (`/color/tokens`), else `ls_color` BRC-207 `color-admission` (`topic: "tm_color"`) at the host root (0.20.1), else
   a deploy the wallet holds. Beside it, what `amm-swap` holds, with Move
   back.
-- **Deploy a position** (0.13.0). The LP key: a BRC-29 key to self under a
+- **Deploy a position** (0.13.0). At a market price (0.28.1), the
+  amount typed last (Tokens or Sats) is the source and the other follows
+  at the "market price now" rate: sats = tokens × price rounded to whole
+  sats, tokens = sats ÷ price in the token's decimals; no pools, no
+  filling. The LP key: a BRC-29 key to self under a
   fresh random keyID (derivationPrefix base64("amm-lp"), derivationSuffix
   16 random bytes), kept in this browser (localStorage,
   `PendingDeployStore`) until the row is filed. `amm.pool.terms`;

@@ -4,7 +4,7 @@
  * Closing asks for bsvFee, the miner fee left from the pool. Deploying takes
  * the validator's fees as they are (read-only).
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Id } from "../components/Id";
 import {
   closePosition,
@@ -20,6 +20,7 @@ import {
   type Session,
 } from "../data/exchange";
 import { fmtAmount, fmtPrice, fmtSats, parseInput } from "./format";
+import { followAmount, type DeploySource } from "./deployFill";
 import { LiveDot, NeedWallet, Notice, TokenMark } from "./bits";
 import { routeHref } from "./route";
 
@@ -141,6 +142,7 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
   const [pick, setPick] = useState<string>("");
   const [tokensText, setTokensText] = useState("");
   const [satsText, setSatsText] = useState("");
+  const [source, setSource] = useState<DeploySource | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ outpoint: string; warnings?: string[] } | null>(null);
@@ -157,6 +159,27 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
   const satsBad = satsText.trim() !== "" && sats === null;
   const off = opening !== null && market !== null ? (opening - market) / market : null;
 
+  // 0.28.1: at a market price, the field typed last is the source and the other follows.
+  function typed(field: DeploySource, text: string) {
+    setSource(field);
+    if (field === "tokens") setTokensText(text);
+    else setSatsText(text);
+    const other = followAmount(field, text, market, dec);
+    if (other === null) return;
+    if (field === "tokens") setSatsText(other);
+    else setTokensText(other);
+  }
+  // A changed token (or its market price arriving) re-derives from the source field.
+  const tokenId = token?.tokenId;
+  useEffect(() => {
+    if (source === null) return;
+    const other = followAmount(source, source === "tokens" ? tokensText : satsText, market, dec);
+    if (other === null) return;
+    if (source === "tokens") setSatsText(other);
+    else setTokensText(other);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokenId, market, dec]);
+
   async function deploy() {
     if (!token || !tokens || !sats) return;
     setBusy(true);
@@ -167,6 +190,7 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
       setDone({ outpoint: r.outpoint, ...(r.warnings ? { warnings: r.warnings } : {}) });
       setTokensText("");
       setSatsText("");
+      setSource(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -210,14 +234,14 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
       <div className="two">
         <div className="field">
           <label htmlFor="dep-tokens">Tokens</label>
-          <input id="dep-tokens" inputMode="decimal" value={tokensText} onChange={(e) => setTokensText(e.target.value)} aria-invalid={tokensBad || undefined} aria-describedby="dep-tokens-help" />
+          <input id="dep-tokens" inputMode="decimal" value={tokensText} onChange={(e) => typed("tokens", e.target.value)} aria-invalid={tokensBad || undefined} aria-describedby="dep-tokens-help" />
           <span id="dep-tokens-help" className={`help ${tokensBad ? "bad" : ""}`}>
             {token ? `Wallet: ${fmtAmount(token.balance, token.dec)} ${token.sym}` : " "}
           </span>
         </div>
         <div className="field">
           <label htmlFor="dep-sats">Sats</label>
-          <input id="dep-sats" inputMode="numeric" value={satsText} onChange={(e) => setSatsText(e.target.value)} aria-invalid={satsBad || undefined} />
+          <input id="dep-sats" inputMode="numeric" value={satsText} onChange={(e) => typed("sats", e.target.value)} aria-invalid={satsBad || undefined} />
         </div>
       </div>
       <p className="fg2 small price-line">
