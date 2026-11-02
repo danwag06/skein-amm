@@ -4,6 +4,21 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.28.2 (2026-11-02)
+
+- The pages keep no liveness window of their own (David, 2026-11-02:
+  one judgement, made by the instance). The token instance's
+  `GET <base>/.live/<topic>` already returns only the beats inside its
+  window (`config.overlay.market.window`); the pages re-filtered that list
+  against a hardcoded 40 s (`LIVE_WINDOW_MS`, from the 30 s beat days), so
+  with the 2-minute beat the Swap page said no validator had beaten though
+  the instance reported it live. `LIVE_WINDOW_MS` and every `windowMs`
+  parameter are gone (`parseLiveBeats`, `noLiveness`, `mergeLive`,
+  `fetchLive`, `fetchLiveByToken`); `LiveAnswer` has no `windowMs`; every
+  beat the read returns is `live` (`at`, `ageMs` kept for "seen N s ago").
+  The planner's message is "no pool's validator is live on this token".
+  `src/lib/overlay.ts`, `src/market/plan.ts`, `test/swap.test.ts`.
+
 ## 0.28.1 (2026-11-02)
 
 - Deploy a position fills the other side at the market rate (David,

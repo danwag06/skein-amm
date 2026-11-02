@@ -145,13 +145,6 @@ export function parseOutputList(answer: unknown): LookupOutput[] {
     .map((o) => ({ beef: o.beef as number[], outputIndex: o.outputIndex as number }));
 }
 
-/**
- * The liveness window, ms: a validator whose last beat is older is not offered
- * (the app's `config.overlay.market.window`, 40 s against a 30 s beat; the
- * instance's own read already keeps only the beats within its window).
- */
-export const LIVE_WINDOW_MS = 40_000;
-
 /** A validator seen beating on a token's `tm_color_<txid>_0-live` (the runtime's liveness read). */
 export interface LiveValidator {
   identityKey: string;
@@ -160,13 +153,15 @@ export interface LiveValidator {
   /** The beat's time, ms epoch. */
   at: number;
   ageMs: number;
-  /** The beat is within the window. */
+  /**
+   * Always true for a beat the read returned: the instance's own window
+   * (`config.overlay.market.window`) is the one judgement; the pages keep none.
+   */
   live: boolean;
 }
 
 export interface LiveAnswer {
   now: number;
-  windowMs: number;
   validators: LiveValidator[];
   /** False when the instance keeps no liveness for the topic (404: not a market for it). */
   kept: boolean;
@@ -188,9 +183,10 @@ export function liveUrl(base: string, liveTopic: string): string {
  * David 2026-10-06: "the frame carries the sender's identity key and the gossip message the peer
  * id"): the validator's identity is `sender` (the host verified the beat's signature against it)
  * and its peer ID `from`. An entry without both is skipped; the latest beat per identity is kept;
- * `live` when within `windowMs` of `now`.
+ * every beat the read returns is `live` (the read keeps only the beats within the instance's
+ * window; the pages apply no window of their own). `ageMs` is shown, never judged.
  */
-export function parseLiveBeats(answer: unknown, now: number, windowMs: number = LIVE_WINDOW_MS): LiveAnswer {
+export function parseLiveBeats(answer: unknown, now: number): LiveAnswer {
   const byKey = new Map<string, LiveValidator>();
   for (const x of Array.isArray(answer) ? (answer as Record<string, unknown>[]) : []) {
     if (!x || typeof x !== "object" || typeof x.sender !== "string" || !/^[0-9a-fA-F]{66}$/.test(x.sender)) continue;
@@ -200,21 +196,21 @@ export function parseLiveBeats(answer: unknown, now: number, windowMs: number = 
     const prev = byKey.get(identityKey);
     if (prev && prev.at >= at) continue;
     const ageMs = Math.max(0, now - at);
-    byKey.set(identityKey, { identityKey, peerId: x.from, at, ageMs, live: ageMs <= windowMs });
+    byKey.set(identityKey, { identityKey, peerId: x.from, at, ageMs, live: true });
   }
-  return { now, windowMs, validators: [...byKey.values()].sort((p, q) => q.at - p.at), kept: true };
+  return { now, validators: [...byKey.values()].sort((p, q) => q.at - p.at), kept: true };
 }
 
 /** No liveness kept for the topic (the read's 404). */
-export function noLiveness(now: number, windowMs: number = LIVE_WINDOW_MS): LiveAnswer {
-  return { now, windowMs, validators: [], kept: false };
+export function noLiveness(now: number): LiveAnswer {
+  return { now, validators: [], kept: false };
 }
 
 /** Several topics' answers as one: the latest beat per identity. */
-export function mergeLive(answers: LiveAnswer[], now: number = Date.now(), windowMs: number = LIVE_WINDOW_MS): LiveAnswer {
+export function mergeLive(answers: LiveAnswer[], now: number = Date.now()): LiveAnswer {
   const byKey = new Map<string, LiveValidator>();
   for (const a of answers) for (const v of a.validators) if (!byKey.has(v.identityKey) || byKey.get(v.identityKey)!.at < v.at) byKey.set(v.identityKey, v);
-  return { now, windowMs, validators: [...byKey.values()].sort((p, q) => q.at - p.at), kept: answers.some((a) => a.kept) };
+  return { now, validators: [...byKey.values()].sort((p, q) => q.at - p.at), kept: answers.some((a) => a.kept) };
 }
 
 // ---------------------------------------------------------------------------
@@ -295,24 +291,23 @@ export async function lookupPoolOutput(af: SignedFetch | null, base: string, tok
 export async function fetchLive(
   base: string,
   topic: string,
-  windowMs: number = LIVE_WINDOW_MS,
   fetchFn: (url: string, init?: RequestInit) => Promise<Pick<Response, "ok" | "status" | "json" | "text">> = fetch,
 ): Promise<LiveAnswer> {
   const url = liveUrl(base, liveTopicOf(topic));
   const res = await fetchFn(url, { headers: { accept: "application/json" } });
   const now = Date.now();
-  if (res.status === 404) return noLiveness(now, windowMs);
+  if (res.status === 404) return noLiveness(now);
   if (!res.ok) throw new Error(`GET ${url}: ${res.status} ${(await res.text()).slice(0, 200)}`);
-  return parseLiveBeats(await res.json(), now, windowMs);
+  return parseLiveBeats(await res.json(), now);
 }
 
 /** `fetchLive` for each token topic: tokenId → its answer (or the error reading it). */
-export async function fetchLiveByToken(base: string, topics: TokenTopic[], windowMs: number = LIVE_WINDOW_MS): Promise<Map<string, LiveAnswer | Error>> {
+export async function fetchLiveByToken(base: string, topics: TokenTopic[]): Promise<Map<string, LiveAnswer | Error>> {
   const out = new Map<string, LiveAnswer | Error>();
   await Promise.all(
     topics.map(async (t) => {
       try {
-        out.set(t.tokenId, await fetchLive(base, t.topic, windowMs));
+        out.set(t.tokenId, await fetchLive(base, t.topic));
       } catch (e) {
         out.set(t.tokenId, e instanceof Error ? e : new Error(String(e)));
       }

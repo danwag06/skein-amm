@@ -172,7 +172,7 @@ export interface Beat {
   from: string;
 }
 
-/** `GET <base>/.live/<topic>`: the beats within the window, newest first; [] when the skein keeps no liveness for it (404). */
+/** `GET <base>/.live/<topic>`: the beats within the instance's own window (`config.overlay.market.window`), newest first; [] when the skein keeps no liveness for it (404). */
 export async function readBeats(base: string, topic: string, fetchFn: typeof fetch = fetch): Promise<Beat[]> {
   const res = await fetchFn(liveUrl(base, topic), { headers: { accept: "application/json" } });
   if (res.status === 404) return [];

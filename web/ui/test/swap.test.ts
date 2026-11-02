@@ -16,8 +16,8 @@ import { BRC29, brc29Side, isBrc29 } from "./brc29Wallet";
 import { PendingPayoutStore, internalizeNow, type KV } from "../src/wallet/pendingPayouts";
 import { PoolTemplate, decodeOneColor } from "../src/pool";
 import {
-  LIVE_WINDOW_MS,
   liveTopicOf,
+  mergeLive,
   liveUrl,
   noLiveness,
   parseLiveBeats,
@@ -101,18 +101,17 @@ describe("market view from the instance's answers", () => {
     expect(failed[0]!.liveError).toBe("GET …/.live/…: 500");
   });
 
-  it("the liveness read (GET <base>/.live/tm_color_<txid>_0-live): each body decoded to {identityKey, peerId}; within the window, live", () => {
+  it("the liveness read (GET <base>/.live/tm_color_<txid>_0-live): each body decoded to {identityKey, peerId}; every beat the read returns is live", () => {
     expect(liveUrl("http://a.localhost:8100/amm/", liveTopicOf(`tm_color_${TXID}_0`))).toBe(`http://a.localhost:8100/amm/.live/tm_color_${TXID}_0-live`);
     expect(live.kept).toBe(true);
-    expect(live.windowMs).toBe(LIVE_WINDOW_MS);
-    expect(live.windowMs).toBe(40_000);
+    expect("windowMs" in live).toBe(false);
     expect(live.validators).toEqual([
       { identityKey: "03cdee31ef0446ffb95aeae00353d9ab4c26a8555d597a9930b0ddd4f4cc1ae0d0", peerId: PEER, at: 1790844738661, ageMs: 28147, live: true },
     ]);
     const id = live.validators[0]!.identityKey;
     expect(validatorStatus(id.toUpperCase(), live)).toMatchObject({ live: true, seen: true, peerId: PEER });
-    // Past the window: seen, not live.
-    expect(parseLiveBeats(liveRead, 1790844738661 + 40_001).validators[0]).toMatchObject({ live: false, ageMs: 40_001 });
+    // A beat 200 s old that the read returned: live (the instance's window is the one judgement); its age kept.
+    expect(parseLiveBeats(liveRead, 1790844738661 + 200_000).validators[0]).toMatchObject({ live: true, ageMs: 200_000 });
     // The latest beat per identity; newest first.
     const k2 = "02" + "22".repeat(32);
     const two = parseLiveBeats([beatEntry(k2, PEER, 900), beatEntry(id, PEER, 800), beatEntry(id, PEER, 950)], 1000);
@@ -124,7 +123,12 @@ describe("market view from the instance's answers", () => {
     expect(odd.validators).toEqual([]);
     expect(parseLiveBeats({ not: "an array" }, 1000).validators).toEqual([]);
     // 404: the instance keeps no liveness for the topic.
-    expect(noLiveness(5)).toEqual({ now: 5, windowMs: 40_000, validators: [], kept: false });
+    expect(noLiveness(5)).toEqual({ now: 5, validators: [], kept: false });
+    // Several topics' answers as one: the latest beat per identity.
+    const merged = mergeLive([parseLiveBeats([beatEntry(id, PEER, 800), beatEntry(k2, PEER, 900)], 1000), parseLiveBeats([beatEntry(id, PEER, 950)], 1000), noLiveness(1000)], 1000);
+    expect(merged.kept).toBe(true);
+    expect(merged.validators.map((x) => [x.identityKey, x.at, x.live])).toEqual([[id, 950, true], [k2, 900, true]]);
+    expect(mergeLive([noLiveness(1000)], 1000).kept).toBe(false);
   });
 
   it("marginal price is exact bigint arithmetic", () => {
@@ -153,7 +157,7 @@ describe("plan display", () => {
   // poolA and poolB share a validator, live on the token.
   const live = liveFor([poolA.validatorIdentityKey]);
 
-  it("the planner considers only the pools whose validator is in the liveness read, within the window", () => {
+  it("the planner considers only the pools whose validator is in the liveness read", () => {
     const poolC: PoolState = { ...poolA, outpoint: `${"cc".repeat(32)}_0`, validatorIdentityKey: "03" + "33".repeat(32) };
     expect(livePools([poolA, poolB, poolC], live).map((p) => p.outpoint)).toEqual([poolA.outpoint, poolB.outpoint]);
     expect(livePools([poolA], null)).toEqual([]);
@@ -163,12 +167,12 @@ describe("plan display", () => {
     expect(req.request.inventory[0]!.lastSeen).toBe(live.validators[0]!.at);
     expect(quote(req.request, live, 0).plan.legs.every((l) => l.outpoint !== poolC.outpoint)).toBe(true);
     // Only poolC: nothing to plan, and why.
-    expect(buildPlanRequest(TOKEN_ID, form, [poolC], live, 0)).toEqual({ ok: false, error: "no pool's validator has beaten within 40 s on this token" });
+    expect(buildPlanRequest(TOKEN_ID, form, [poolC], live, 0)).toEqual({ ok: false, error: "no pool's validator is live on this token" });
     expect(buildPlanRequest(TOKEN_ID, form, [poolA], null, 0)).toEqual({ ok: false, error: "no liveness read for this token: no pool can be planned" });
     expect(buildPlanRequest(TOKEN_ID, form, [poolA], noLiveness(0), 0)).toMatchObject({ ok: false, error: expect.stringMatching(/keeps no liveness/) });
-    // Its beat older than the window: not planned.
-    const stale = parseLiveBeats([beatEntry(poolA.validatorIdentityKey, PEER, 0)], 40_001);
-    expect(buildPlanRequest(TOKEN_ID, form, [poolA], stale, 0).ok).toBe(false);
+    // A beat 200 s old that the read returned: planned (the pages keep no window of their own).
+    const old = parseLiveBeats([beatEntry(poolA.validatorIdentityKey, PEER, 0)], 200_000);
+    expect(buildPlanRequest(TOKEN_ID, form, [poolA], old, 0).ok).toBe(true);
     // The leg's validator carries the peer ID the swap names.
     expect(quote(req.request, live, 0).view.legs[0]!.validator).toMatchObject({ live: true, peerId: PEER });
   });

@@ -32,7 +32,8 @@ export type PlanInput = { ok: true; request: PlanRequest } | { ok: false; error:
 
 /**
  * The pools the planner may use (0.4.0, shruggr/skein#120): those whose validator is in the token's
- * liveness read (`GET <base>/.live/tm_color_<txid>_0-live`) within the window. No read, none.
+ * liveness read (`GET <base>/.live/tm_color_<txid>_0-live`), which holds only the beats within the
+ * instance's own window. No read, none.
  */
 export function livePools(pools: PoolState[], live: LiveAnswer | null): PoolState[] {
   if (!live) return [];
@@ -74,7 +75,7 @@ export function buildPlanRequest(
         ? "no liveness read for this token: no pool can be planned"
         : !live.kept
           ? "this instance keeps no liveness for this token (its market role is off for it): no validator is known live"
-          : `no pool's validator has beaten within ${Math.round(live.windowMs / 1000)} s on this token`,
+          : "no pool's validator is live on this token",
     };
   }
   const fixedCost: FixedCost = { minerFeeSats: LEG_MINER_FEE_SATS };

@@ -19,7 +19,7 @@ export interface TokenMeta {
 
 export interface ValidatorStatus {
   identityKey: string;
-  /** Its last beat on the token's `-live` topic is within the window. */
+  /** The token's liveness read returned a beat from it (the instance's window; the pages keep none). */
   live: boolean;
   /** Present in the token's liveness read at all. */
   seen: boolean;
