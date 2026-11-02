@@ -763,12 +763,24 @@ terms are root's message to `/@<tokenId>` (no page for it).
   before 0.21.0 serves `ls_amm` until its config names the new name (an
   install with `--config`, then a disable and enable for its `topics`); a
   token no beat reports is priced from this skein's own listing.
-- **Root, as the page sees it** (0.26.0). `isRoot`: the host's `GET
-  <origin>/skeins?key=<wallet key>` names swap's identity. While nobody
-  holds root (`GET <swap>/.well-known/skein` → `claimed: false`, skein
-  0.1.2), Settings shows one card, "Claim this exchange": the wallet's
-  own message in box `claim` to swap; the kernel makes its sender root
-  and refuses any later claim.
+- **The admin, as the page sees it** (0.28.0; open-exchange 0.5.0). swap is
+  born owned by the host's key (root). `isRoot` (the name kept): the
+  wallet is swap's claimant (`GET <swap>/amm/admin` → `{claimant, since}`)
+  or holds root on swap (the host's `GET <origin>/skeins?key=<wallet key>`
+  names swap's identity). While `/amm/admin` names nobody, Settings shows
+  the card "Claim this exchange" (alone for a non-admin, above the admin
+  cards for root): the wallet's `{fn: "claim"}` in box `amm/claim` to swap;
+  swap records the first claim and the host grants its sender the role
+  `amm.admin` (not root); a later claim is refused. A swap with no
+  `/amm/admin` (pages before open-exchange 0.5.0): claimed as its
+  `/.well-known/skein` says.
+- **Positions from the deploy history** (0.28.0). `listOutputs` answers
+  spendable outputs only, so a pool output the LP's own wallet spent (a swap
+  against its own pool) left no row: Positions also read the wallet's
+  `listActions({labels: ["amm-pool-deploy"], includeOutputs: true})` and
+  take every output filed in `amm-pools` as a pool row, deduped with the
+  basket's, each followed by `/spends` as before; Recover tries those rows'
+  LP keys before the keyIDs kept in the browser.
 - **Pending payouts.** A payout the wallet did not take in at once (sats or
   tokens, or a Move back not yet admitted) is kept in the browser
   (`wallet/pendingPayouts.ts`); 0.8.1's Pending payouts page, which retried

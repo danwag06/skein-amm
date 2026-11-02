@@ -4,6 +4,28 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.28.0 (2026-11-02)
+
+- The claim grants the configure right, not root (David, 2026-11-02: "The
+  end user, the one connecting with their wallet, is the one who is able to
+  configure and enable. The host is the host."; open-exchange 0.5.0: swap
+  is born owned by the host's key). `claimStatus` reads swap's
+  `GET <base>/admin` (`{claimant?, since?}`; a swap without it: its
+  `/.well-known/skein` `claimed`, as before); `claimExchange` sends
+  `{fn: "claim"}` in the swap app's box `amm/claim` to swap's identity (was
+  the kernel's box `claim`, `{}`); `isRoot` (name kept) = the wallet is the
+  claimant, or the host's `/skeins?key=` lists swap. Settings: the claim
+  card while `/admin` names nobody — alone for anyone else, above the admin
+  cards for root; the not-admin line and the lead say admin, not root.
+- Positions and Recover see pools whose output the wallet already marked
+  spent (the LP swapped against its own pool): `historyPoolRows` reads
+  `listActions({labels: ["amm-pool-deploy"], includeOutputs: true})` and
+  takes every output filed in `amm-pools` as a pool row, deduped with the
+  basket's (`mergePoolRows`), each followed by `/spends` as before (closed
+  pools stay out; two rows that reach the same pool list it once). Recover
+  tries those rows' LP keys before the keyIDs kept in this browser. Pages
+  only.
+
 ## 0.27.1 (2026-11-02)
 
 - One BRC-104 session per instance (David, 2026-11-02: "fix the page").

@@ -8,16 +8,24 @@
  * current output (each swap's continuation), or closed (by the LP or by the
  * validator, docs/AMM.md "The validator's Close").
  *
+ * 0.28.0: the rows also come from the wallet's HISTORY (`historyPoolRows`):
+ * `listOutputs` answers spendable outputs only, so a pool output the wallet
+ * itself spent (the LP swapped against its own pool) left no row and the
+ * position vanished; the deploys' actions (label `amm-pool-deploy`) still
+ * carry the output filed in `amm-pools` with its customInstructions. Both
+ * sets, deduped by outpoint, are followed by `/spends` as before.
+ *
  * The current output's BEEF comes from the token's 1Color lookup
  * (0.20.1: BRC-207's `color-spendability` at `ls_color_<tokenId>`: the
  * output if admitted and unspent, with its BEEF; `ls_color {txid,
  * outputIndex}` until 0.19.0).
  */
-import { Transaction, type WalletProtocol } from "@bsv/sdk";
+import { Transaction, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
 import { PoolTemplate, type Pool } from "../pool";
 import { lookup, parseOutputList, type LookupOutput, type SignedFetch } from "../lib/overlay";
 import { readSpend, type Spend } from "../lib/skein";
 import { colorQuery, parseOutpoint, tokenIdText } from "../lib/tokenId";
+import { POOLS_BASKET } from "../wallet/color";
 import { isPoolRow } from "./poolRows";
 import type { BasketRow } from "./poolDeploy";
 
@@ -38,6 +46,50 @@ export interface PositionRow {
   dec?: number;
   lpKey: LpKeyRef;
   validatorIdentity?: string;
+}
+
+/** The label a pool deploy (and a Recover) gives its action (src/lp/poolDeploy.ts). */
+export const POOL_DEPLOY_LABEL = "amm-pool-deploy";
+
+/**
+ * The pool rows of the wallet's deploy actions (0.28.0): every output of an action labelled
+ * `amm-pool-deploy` filed in `amm-pools` as a pool row (tag `amm-pool` or op `amm-pool` in its
+ * customInstructions), spent or not. `listActions` with `includeOutputs` (and, where the wallet
+ * takes it, `includeCustomInstructions`), paged; a wallet that refuses the read: none.
+ */
+export async function historyPoolRows(wallet: WalletInterface): Promise<BasketRow[]> {
+  const out: BasketRow[] = [];
+  const limit = 1000;
+  try {
+    for (let offset = 0; offset < 100_000; offset += limit) {
+      const r = await wallet.listActions({ labels: [POOL_DEPLOY_LABEL], includeOutputs: true, includeCustomInstructions: true, limit, offset } as Parameters<WalletInterface["listActions"]>[0]);
+      for (const a of r.actions ?? []) {
+        for (const o of a.outputs ?? []) {
+          if (o.basket !== POOLS_BASKET) continue;
+          const row: BasketRow = { outpoint: `${a.txid}.${o.outputIndex}`, satoshis: o.satoshis, ...(o.tags ? { tags: o.tags } : {}), ...(o.customInstructions ? { customInstructions: o.customInstructions } : {}) };
+          if (isPoolRow(row)) out.push(row);
+        }
+      }
+      if ((r.actions?.length ?? 0) < limit || offset + limit >= (r.totalActions ?? 0)) break;
+    }
+  } catch {
+    /* no history read: the basket's rows alone */
+  }
+  return out;
+}
+
+/** Rows deduped by outpoint (`<txid>.<vout>`), the first kept (the basket's before the history's). */
+export function mergePoolRows(...sets: BasketRow[][]): BasketRow[] {
+  const seen = new Set<string>();
+  const out: BasketRow[] = [];
+  for (const r of sets.flat()) {
+    const op = parseOutpoint(r.outpoint);
+    const k = op ? `${op.txid}.${op.vout}` : r.outpoint;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
 }
 
 /** The wallet's pool rows (`isPoolRow`). */

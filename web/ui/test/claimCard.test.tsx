@@ -1,4 +1,4 @@
-/** Settings while nobody holds root on swap (0.26.0): the claim card alone, in place of the not-root line and the root cards. */
+/** Settings while swap is unclaimed (0.26.0; 0.28.0: swap's /admin names nobody): the claim card alone for a non-admin; above the admin cards for root. */
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -17,13 +17,26 @@ describe("Settings by claim status", () => {
     expect(html).toContain("Claim this exchange");
     expect(html).toContain(CLAIM_TEXT);
     expect(html.match(/<button/g)).toHaveLength(1);
-    expect(html).not.toContain("not root on this skein");
+    expect(html).not.toContain("not this exchange");
     expect(html).not.toContain("Enable a token");
   });
-  it("claimed:true and not root → today's line, no claim card", () => {
+  it("claimed:false and root (the host's key, the rack's granted key) → the claim card above the admin cards", () => {
+    claimed = false;
+    const html = renderToStaticMarkup(<Settings session={session} root={true} />);
+    expect(html).toContain("Claim this exchange");
+    expect(html).toContain("Enable a token");
+    expect(html.indexOf("Claim this exchange")).toBeLessThan(html.indexOf("Enable a token"));
+  });
+  it("claimed:true and root/admin → the admin cards, no claim card", () => {
+    claimed = true;
+    const html = renderToStaticMarkup(<Settings session={session} root={true} />);
+    expect(html).not.toContain("Claim this exchange");
+    expect(html).toContain("Enable a token");
+  });
+  it("claimed:true and not the admin → the not-admin line, no claim card", () => {
     claimed = true;
     const html = renderToStaticMarkup(<Settings session={session} root={false} />);
-    expect(html).toContain("not root on this skein");
+    expect(html).toContain("not this exchange");
     expect(html).not.toContain("Claim this exchange");
   });
 });

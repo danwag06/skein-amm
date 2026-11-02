@@ -11,7 +11,10 @@
  *      does), its BEEF from the token's 1Color lookup (`ls_color {txid,
  *      outputIndex}`, as Close takes it), decoded with `PoolTemplate`: the
  *      asset id, the LpPubKey, the validator and the fees.
- *   2. The LP key. A pool from 0.13.0 on (layout 2) has a random keyID, on no
+ *   2. The LP key. First (0.28.0) the LP keys of the wallet's own deploy
+ *      history (`history`: src/lp/positions.ts `historyPoolRows`, the pool
+ *      rows of its `amm-pool-deploy` actions, spent ones too), each tried
+ *      against the LpPubKey. Then: a pool from 0.13.0 on (layout 2) has a random keyID, on no
  *      chain: the deploy kept it in this browser until its row was filed
  *      (src/lp/poolDeploy.ts `PendingDeployStore`); each kept keyID is tried
  *      (`getPublicKey`, BRC-29 to self) against the LpPubKey. A pool before
@@ -42,6 +45,7 @@ import { parseOutpoint, sdkTokenId, tokenIdOfWire } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
 import { LP_KEY_PROTOCOL, PendingDeployStore, legacyLpKeyId, lpKeyId, poolCustomInstructions, type BasketFiling, type BasketRow } from "./poolDeploy";
 import { POOL_TAG, isPoolRow } from "./poolRows";
+import { positionRowsOf } from "./positions";
 
 export class RecoverError extends Error {
   constructor(message: string) {
@@ -154,6 +158,8 @@ export interface RecoverInput {
   outputOf: (outpoint: string) => Promise<LookupOutput>;
   /** Symbol and decimals: the token list, else the discovery lookup `ls_color` at the host root. */
   metaOf: (tokenId: string) => Promise<{ sym?: string; dec?: number } | null>;
+  /** 0.28.0: the pool rows of the wallet's deploy history (spent ones too), whose LP keys are tried first. */
+  history?: BasketRow[];
   /** Layout 2: the LP keyIDs this browser kept (default: `PendingDeployStore`). */
   pending?: PendingDeployStore;
 }
@@ -199,9 +205,19 @@ export async function recoverPosition(i: RecoverInput): Promise<RecoveredPositio
 
   // 2. The LP key.
   let lp: { protocolID: WalletProtocol; keyID: string; keyInput: string } | null = null;
-  if (pool.version === 2) {
+  const want = PublicKey.fromString(pool.state.lpPubKey).toString();
+  for (const h of positionRowsOf(i.history ?? [])) {
+    if (h.lpKey.counterparty !== "self") continue;
+    const { publicKey } = await i.wallet.getPublicKey({ protocolID: h.lpKey.protocolID, keyID: h.lpKey.keyID, counterparty: "self", forSelf: true });
+    if (PublicKey.fromString(publicKey).toString() === want) {
+      lp = { protocolID: h.lpKey.protocolID, keyID: h.lpKey.keyID, keyInput: "" };
+      break;
+    }
+  }
+  if (lp) {
+    /* the deploy history's key */
+  } else if (pool.version === 2) {
     const pending = i.pending ?? new PendingDeployStore();
-    const want = PublicKey.fromString(pool.state.lpPubKey).toString();
     for (const d of pending.list()) {
       const { publicKey } = await i.wallet.getPublicKey({ protocolID: LP_KEY_PROTOCOL, keyID: d.keyID, counterparty: "self", forSelf: true });
       if (PublicKey.fromString(publicKey).toString() === want) {

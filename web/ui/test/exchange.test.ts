@@ -208,6 +208,8 @@ interface WalletRows {
   held?: unknown[];
   balances?: Record<string, string>;
   swaps?: unknown[];
+  /** 0.28.0: the wallet's actions labelled amm-pool-deploy (listActions with includeOutputs). */
+  actions?: unknown[];
 }
 /** Every basket the fake wallet was asked to list, in order (0.27.0: myTokens reads no `p color balance`). */
 let walletReads: string[] = [];
@@ -224,8 +226,9 @@ function fakeWallet(rows: WalletRows = {}, sats: number[] = [1_000, 2_500]): Wal
       if (rows.deploy && args.basket === rows.deploy.basket) return { totalOutputs: 1, outputs: [{ outpoint: rows.deploy.outpoint, satoshis: 1, spendable: true }], BEEF: rows.deploy.beef };
       return { totalOutputs: 0, outputs: [] };
     },
-    async listActions() {
-      return { totalActions: 0, actions: [] };
+    async listActions(args: { labels?: string[] }) {
+      const a = args.labels?.includes("amm-pool-deploy") ? (rows.actions ?? []) : [];
+      return { totalActions: a.length, actions: a };
     },
     async getPublicKey() {
       return { publicKey: ME };
@@ -395,6 +398,38 @@ describe("exchange.ts, wired", () => {
     inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
     expect(await myPositions()).toEqual([]);
     await expect(closePosition({ outpoint: `${swap1.id("hex")}.0`, bsvFee: 0n })).rejects.toThrow(/No such position/);
+  });
+
+  it("myPositions (0.28.0): a pool whose filed output the wallet itself spent (listOutputs has no row) is found in its deploy history (listActions amm-pool-deploy) and listed at its current output; a filed row for the same pool is not listed twice", async () => {
+    const pd = poolDeploy.id("hex");
+    const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
+    const deployAction = {
+      txid: pd,
+      satoshis: 0,
+      status: "completed",
+      isOutgoing: true,
+      description: "AMM pool deploy: TST",
+      labels: ["amm-pool-deploy"],
+      version: 1,
+      lockTime: 0,
+      outputs: [
+        { outputIndex: 0, satoshis: v.pool0.bsv, spendable: false, basket: "amm-pools", tags: ["amm-pool"], customInstructions: ci, outputDescription: "AMM pool: TST / BSV" },
+        { outputIndex: 1, satoshis: 5, spendable: false, basket: "default", tags: [], outputDescription: "change" },
+      ],
+    };
+    connect({ pools: [], actions: [deployAction] });
+    inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, spentBy: swap1.id("hex"), current: `${swap1.id("hex")}.0`, hops: 1, closed: false };
+    inst.color[`${swap1.id("hex")}.0`] = { type: "output-list", outputs: [{ beef: atomic(swap1, [fund, tokenDeploy, poolDeploy]), outputIndex: 0 }] };
+    const want = [{ outpoint: `${swap1.id("hex")}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true } }];
+    expect(await myPositions()).toEqual(want);
+    // A filed row (a Recover of the current output) beside the history's: one position.
+    connect({ pools: [{ outpoint: `${swap1.id("hex")}.0`, satoshis: v.pool1.bsv, tags: ["amm-pool"], customInstructions: ci }], actions: [deployAction] });
+    inst.spends[`${swap1.id("hex")}.0`] = { outpoint: `${swap1.id("hex")}.0`, current: `${swap1.id("hex")}.0`, hops: 0, closed: false };
+    expect(await myPositions()).toEqual(want);
+    // Closed: gone, as for a filed row.
+    connect({ pools: [], actions: [deployAction] });
+    inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
+    expect(await myPositions()).toEqual([]);
   });
 
   it("market terms (0.16.0): amm.swap.terms's minCommissionBps; swapPools lists the pools at or above it and counts the rest; quoteSwap plans over the listed ones only; no wallet, no minimum known, nothing hidden", async () => {

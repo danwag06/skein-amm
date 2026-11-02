@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { PoolTemplate, oneColorValuePrefix, poolArtifactV1 } from "../src/pool";
 import { deriveValidatorPubKey } from "../src/lib/keys";
 import { PendingDeployStore, legacyLpKeyId, lpKeyId, poolCustomInstructions, type BasketRow } from "../src/lp/poolDeploy";
+import { historyPoolRows, mergePoolRows } from "../src/lp/positions";
 import { RECOVER_TEXT, keyInputCandidates, parsePoolOutpoint, recoverPosition, type RecoverInput } from "../src/lp/recover";
 import type { Spend } from "../src/lib/skein";
 import type { LookupOutput } from "../src/lib/overlay";
@@ -267,5 +268,54 @@ describe("recover a position (0.13.0: a layout-2 pool)", () => {
     const { wallet, calls } = fakeWallet();
     await expect(recoverPosition({ ...input(wallet, `${tx.id("hex")}.0`, [tx]), pending: memStore() })).rejects.toThrow(RECOVER_TEXT.notKept);
     expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
+  });
+});
+
+describe("recover a position (0.28.0): the LP key from the wallet's deploy history", () => {
+  const keyID = "YW1tLWxwIGtleSBoaXN0";
+  const lp = side.publicKey({ protocolID: BRC29, keyID, counterparty: "self", forSelf: true });
+
+  it("listOutputs empty (the wallet spent the pool output), listActions holds the deploy's pool output: its keyID found, nothing kept in this browser needed", async () => {
+    const tx = deployTxV2(lp);
+    const ci = poolCustomInstructions({ tokenId: TOKEN_ID, sym: "TST", dec: 0, protocolID: BRC29, keyID, args: ARGS, validatorIdentity: v.identity, nonce: v.nonce });
+    const { wallet: base, calls } = fakeWallet();
+    const wallet = {
+      ...base,
+      async listOutputs() {
+        return { totalOutputs: 0, outputs: [] };
+      },
+      async listActions(a: { labels?: string[]; includeOutputs?: boolean }) {
+        calls.push({ method: "listActions", args: a });
+        return {
+          totalActions: 1,
+          actions: [{ txid: tx.id("hex"), labels: ["amm-pool-deploy"], outputs: [
+            { outputIndex: 0, satoshis: 1_000_000, spendable: false, basket: "amm-pools", tags: ["amm-pool"], customInstructions: ci },
+            { outputIndex: 1, satoshis: 3, spendable: true, basket: "default", tags: [] },
+          ] }],
+        };
+      },
+    } as unknown as WalletInterface;
+    const history = await historyPoolRows(wallet);
+    expect(history.map((r) => r.outpoint)).toEqual([`${tx.id("hex")}.0`]);
+    expect(calls.find((c) => c.method === "listActions")!.args).toMatchObject({ labels: ["amm-pool-deploy"], includeOutputs: true });
+    expect(mergePoolRows([{ outpoint: `${tx.id("hex")}_0`, satoshis: 1 }], history)).toHaveLength(1);
+    const pending = memStore();
+    const r = await recoverPosition({ ...input(wallet, `${tx.id("hex")}.0`, [tx]), history, pending });
+    expect(r.filed).toBe(true);
+    expect(r.lpKey).toEqual({ protocolID: BRC29, keyID, counterparty: "self" });
+    expect(r.keyInput).toBe("");
+    expect(JSON.parse(r.filing.customInstructions).keyID).toBe(keyID);
+  });
+
+  it("a history row whose key is not the pool's: no match there, then the browser's kept keyIDs (none): refused", async () => {
+    const tx = deployTxV2(lp);
+    const ci = poolCustomInstructions({ tokenId: TOKEN_ID, protocolID: BRC29, keyID: "b3RoZXIga2V5", args: ARGS, validatorIdentity: v.identity });
+    const { wallet } = fakeWallet();
+    await expect(recoverPosition({ ...input(wallet, `${tx.id("hex")}.0`, [tx]), history: [{ outpoint: `${"cd".repeat(32)}.0`, satoshis: 1, tags: ["amm-pool"], customInstructions: ci }], pending: memStore() })).rejects.toThrow(RECOVER_TEXT.notKept);
+  });
+
+  it("a wallet that refuses listActions: no history rows", async () => {
+    const wallet = { async listActions() { throw new Error("denied"); } } as unknown as WalletInterface;
+    expect(await historyPoolRows(wallet)).toEqual([]);
   });
 });

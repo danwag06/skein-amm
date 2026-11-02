@@ -1,8 +1,9 @@
 /**
- * The claim (0.26.0): while nobody holds root on the swap instance, Settings shows ONE card,
- * "Claim this exchange"; its button sends the wallet's own message in box `claim` to swap's
- * identity (what `skein claim` sends); after it the root cards render. `isRoot` is real: the
- * host's `/skeins?key=` names swap's identity. The host's reads are a mocked `fetch`.
+ * The claim (0.26.0; 0.28.0: swap is born owned by the host's key, the claim is the swap app's): while
+ * swap's `GET <base>/admin` names nobody, Settings shows the card "Claim this exchange"; its button sends
+ * `{fn: "claim"}` in the swap app's box `amm/claim` to swap's identity; the host grants the claimant
+ * amm.admin and `/admin` names it; after it the admin cards render. `isRoot` (may configure) = the
+ * claimant, or root on swap by the host's `/skeins?key=`. The host's reads are a mocked `fetch`.
  */
 import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -19,12 +20,13 @@ const ME = `03${"a1".repeat(32)}`;
 const OTHER = `02${"b2".repeat(32)}`;
 const ORIGIN = "https://ox.test";
 
-/** The host: swap's card and /skeins, root held by `roots`. */
-function host(roots: string[]) {
+/** The host: swap's card (claimed: the host's key holds root), its /amm/admin (`st.claimant`), and /skeins (root held by `st.roots`). `st.noAdmin`: a swap older than 0.5.0 (no /admin read). */
+function host(st: { roots: string[]; claimant?: string; noAdmin?: boolean }) {
   return vi.fn(async (input: string | URL | Request) => {
     const u = new URL(String(input));
-    if (u.pathname === "/.well-known/skein") return Response.json({ handle: "swap", identity: SWAP, origin: ORIGIN, claimed: roots.length > 0 });
-    if (u.pathname === "/skeins") return Response.json(roots.includes(u.searchParams.get("key") ?? "") ? [{ handle: "swap", identity: SWAP, url: ORIGIN }] : []);
+    if (u.pathname === "/.well-known/skein") return Response.json({ handle: "swap", identity: SWAP, origin: ORIGIN, claimed: st.noAdmin ? st.roots.length > 0 : true });
+    if (u.pathname === "/amm/admin" && !st.noAdmin) return Response.json(st.claimant ? { claimant: st.claimant, since: 1 } : {});
+    if (u.pathname === "/skeins") return Response.json(st.roots.includes(u.searchParams.get("key") ?? "") ? [{ handle: "swap", identity: SWAP, url: ORIGIN }] : []);
     return new Response("not found", { status: 404 });
   });
 }
@@ -44,13 +46,17 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-describe("isRoot (0.26.0: the host's /skeins?key=)", () => {
-  it("true when /skeins?key=<me> names swap's identity", async () => {
-    vi.stubGlobal("fetch", host([ME]));
+describe("isRoot (0.28.0: swap's claimant, or root by the host's /skeins?key=)", () => {
+  it("true when /skeins?key=<me> names swap's identity (root: the host's key, the rack's granted key)", async () => {
+    vi.stubGlobal("fetch", host({ roots: [ME] }));
     expect(await ex.isRoot(ME)).toBe(true);
   });
-  it("false when it does not (another key is root), and with no key", async () => {
-    vi.stubGlobal("fetch", host([OTHER]));
+  it("true when swap's /admin names me (the claimant, granted amm.admin; not root)", async () => {
+    vi.stubGlobal("fetch", host({ roots: [OTHER], claimant: ME }));
+    expect(await ex.isRoot(ME)).toBe(true);
+  });
+  it("false when neither (another key is root and the claimant), and with no key", async () => {
+    vi.stubGlobal("fetch", host({ roots: [OTHER], claimant: OTHER }));
     expect(await ex.isRoot(ME)).toBe(false);
     expect(await ex.isRoot(null)).toBe(false);
   });
@@ -60,11 +66,17 @@ describe("isRoot (0.26.0: the host's /skeins?key=)", () => {
   });
 });
 
-describe("claimStatus: swap's /.well-known/skein", () => {
-  it("unclaimed and claimed, with swap's identity", async () => {
-    vi.stubGlobal("fetch", host([]));
+describe("claimStatus: swap's /amm/admin (its identity from /.well-known/skein)", () => {
+  it("unclaimed and claimed (the claimant named), with swap's identity", async () => {
+    vi.stubGlobal("fetch", host({ roots: [OTHER] }));
     expect(await ex.claimStatus()).toEqual({ claimed: false, identity: SWAP });
-    vi.stubGlobal("fetch", host([OTHER]));
+    vi.stubGlobal("fetch", host({ roots: [OTHER], claimant: ME }));
+    expect(await ex.claimStatus()).toEqual({ claimed: true, identity: SWAP, claimant: ME });
+  });
+  it("a swap with no /admin read (older pages): claimed as /.well-known/skein says", async () => {
+    vi.stubGlobal("fetch", host({ roots: [], noAdmin: true }));
+    expect(await ex.claimStatus()).toEqual({ claimed: false, identity: SWAP });
+    vi.stubGlobal("fetch", host({ roots: [OTHER], noAdmin: true }));
     expect(await ex.claimStatus()).toEqual({ claimed: true, identity: SWAP });
   });
 });
@@ -77,11 +89,11 @@ describe("Settings: Claim this exchange", () => {
     expect(buttons(ClaimCard({ busy: false, error: null, onClaim: () => {} })).map((b) => b.props["aria-label"])).toEqual(["Claim"]);
   });
 
-  it("clicking Claim sends box `claim` to swap's identity; after it this wallet is root", async () => {
-    const roots: string[] = [];
-    vi.stubGlobal("fetch", host(roots));
+  it("clicking Claim sends {fn: \"claim\"} in box amm/claim to swap's identity; after it this wallet may configure (not root)", async () => {
+    const st: { roots: string[]; claimant?: string } = { roots: [OTHER] };
+    vi.stubGlobal("fetch", host(st));
     sendMessage.mockImplementationOnce(async () => {
-      roots.push(ME); // the kernel grants root to the claim's sender
+      st.claimant = ME; // swap records the claim; the host grants amm.admin
       return "id";
     });
     let job: Promise<unknown> | undefined;
@@ -90,7 +102,7 @@ describe("Settings: Claim this exchange", () => {
     expect(await job).toBe(true);
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const [, base, recipient, box, body] = sendMessage.mock.calls[0]!;
-    expect([base, recipient, box, body]).toEqual([`${ORIGIN}/amm`, SWAP, "claim", {}]);
+    expect([base, recipient, box, body]).toEqual([`${ORIGIN}/amm`, SWAP, "amm/claim", { fn: "claim" }]);
     expect(await ex.isRoot(ME)).toBe(true);
   });
 
@@ -99,12 +111,12 @@ describe("Settings: Claim this exchange", () => {
     expect(html).not.toContain("Claim this exchange");
     expect(html).toContain("Enable a token");
     expect(html).toContain("Discovery");
-    expect(html).not.toContain("not root on this skein");
+    expect(html).not.toContain("not this exchange");
   });
 
-  it("not root (claim status not yet read, or claimed by another): today's line, no root cards", () => {
+  it("not the admin (claim status not yet read, or claimed by another): the not-admin line, no admin cards", () => {
     const html = renderToStaticMarkup(<Settings session={session} root={false} />);
-    expect(html).toContain("The connected wallet is not root on this skein. Settings are root&#x27;s.");
+    expect(html).toContain("The connected wallet is not this exchange&#x27;s admin. Settings are the admin&#x27;s.");
     expect(html).not.toContain("Enable a token");
   });
 });

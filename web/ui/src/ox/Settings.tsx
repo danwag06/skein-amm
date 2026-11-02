@@ -1,6 +1,7 @@
 /**
- * Settings, root of the swap instance only (Open Exchange, shruggr/open-exchange#1)
- * (while nobody holds root, one card instead: Claim this exchange, 0.26.0):
+ * Settings, the exchange's admin (or root on swap) only (Open Exchange, shruggr/open-exchange#1)
+ * (0.28.0: swap is born owned by the host's key; while nobody has claimed it, the card Claim this
+ * exchange — above the admin cards for root, alone for anyone else; the claimant becomes the admin):
  * Enable a token — one list of the tokens on discovery and in the connected
  * wallet not on this exchange's list yet, one Enable per token; the deploy's
  * BEEF from the wallet's module basket, else from discovery (2026-10-31: no
@@ -40,9 +41,11 @@ import {
 import { NeedWallet, Notice, TokenName } from "./bits";
 
 /** The claim card's sentence (0.26.0). */
-export const CLAIM_TEXT = "Nobody holds root on this exchange yet. The wallet that claims it becomes root: it enables tokens and sets terms.";
+export const CLAIM_TEXT = "Nobody has claimed this exchange yet. The wallet that claims it becomes its admin: it enables tokens and sets terms.";
+/** The line a connected wallet that is not the admin sees. */
+export const NOT_ADMIN_TEXT = "The connected wallet is not this exchange's admin. Settings are the admin's.";
 
-/** "Claim this exchange" (0.26.0): shown to a connected wallet while nobody holds root on swap; one button. */
+/** "Claim this exchange" (0.26.0; 0.28.0: while swap's /admin names nobody): one button. */
 export function ClaimCard({ busy, error, onClaim }: { busy: boolean; error: string | null; onClaim: () => void }) {
   return (
     <section className="panel stack-sm" aria-labelledby="claim-h">
@@ -428,23 +431,25 @@ export function Settings({ session, root }: { session: Session; root: boolean })
   const reg = useRegisteredTokens(connected && root);
   const defs = useDefaults(connected && root);
   const disc = useDiscovery(connected && root);
-  const claim = useClaimStatus(connected && !root);
+  const claim = useClaimStatus(connected);
+  const unclaimed = claim.data?.claimed === false;
   return (
     <>
       <div className="stack-xs">
         <h1 className="page-title">Settings</h1>
-        <p className="lead lead-tight">Root only. Each token enabled here runs as its own instance: a market, and a validator once it has terms.</p>
+        <p className="lead lead-tight">The exchange&apos;s admin only. Each token enabled here runs as its own instance: a market, and a validator once it has terms.</p>
       </div>
       {!connected ? (
         <NeedWallet session={session} what="this exchange's settings" />
-      ) : !root && claim.data?.claimed === false ? (
+      ) : !root && unclaimed ? (
         <ClaimSection />
       ) : !root ? (
         <section className="panel">
-          <p className="fg2">The connected wallet is not root on this skein. Settings are root&apos;s.</p>
+          <p className="fg2">{NOT_ADMIN_TEXT}</p>
         </section>
       ) : (
         <>
+          {unclaimed && <ClaimSection />}
           <DefaultTermsCard defaults={defs} />
           <DefaultMarketCard defaults={defs} />
           <DiscoveryCard discovery={disc} />

@@ -84,7 +84,7 @@ import { buildInventory, decodeTokenRow, deployIcon } from "../lp/inventory";
 import { imageDataUrl } from "../lp/images";
 import { deployPool } from "../lp/poolDeploy";
 import { PoolTemplate } from "../pool";
-import { colorOutput, positionRowsOf, loadPosition, type LoadedPosition } from "../lp/positions";
+import { colorOutput, historyPoolRows, mergePoolRows, positionRowsOf, loadPosition, type LoadedPosition } from "../lp/positions";
 import { recoverPosition as recoverPoolRow } from "../lp/recover";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "../wallet/color";
 import { completeClose, prepareClose, submitToOverlay } from "../lp/close";
@@ -559,13 +559,19 @@ export function useSession(): Session {
   return { status, identityKey: connected ? w.identityKey : null, connect, disconnect: w.disconnect };
 }
 
-/** Whether anyone holds root on the swap instance yet, and its identity (skein's `GET <instance>/.well-known/skein`, 0.26.0). */
+/**
+ * Whether the exchange is claimed, its admin, and swap's identity (0.28.0: swap is born owned by the
+ * host's key, so `/.well-known/skein`'s `claimed` is always true; the claim is the swap app's own record,
+ * `GET <base>/admin` → `{claimant?, since?}`). `identity` from `/.well-known/skein` (the claim's recipient).
+ * A swap with no `/admin` read (pages older than open-exchange 0.5.0): `claimed` as `/.well-known/skein` says.
+ */
 export interface ClaimStatus {
   claimed: boolean;
   identity: string;
+  claimant?: string;
 }
 
-/** The swap instance's card: `GET <its origin>/.well-known/skein` (the host's read, unsigned). */
+/** swap's card (`GET <its origin>/.well-known/skein`) and its claim (`GET <base>/admin`), both unsigned. */
 export async function claimStatus(): Promise<ClaimStatus> {
   const url = `${instanceBase(context.base)}/.well-known/skein`;
   const res = await fetch(url, { headers: { accept: "application/json" } });
@@ -573,18 +579,24 @@ export async function claimStatus(): Promise<ClaimStatus> {
   const v = (await res.json()) as { claimed?: unknown; identity?: unknown };
   const identity = String(v.identity ?? "").toLowerCase();
   if (!/^0[23][0-9a-f]{64}$/.test(identity)) throw new Error(`GET ${url}: no identity`);
-  return { claimed: v.claimed === true, identity };
+  const a = await fetch(`${context.base}/admin`, { headers: { accept: "application/json" } }).catch(() => undefined);
+  if (!a?.ok) return { claimed: v.claimed === true, identity };
+  const adm = (await a.json().catch(() => ({}))) as { claimant?: unknown };
+  const claimant = typeof adm.claimant === "string" && /^0[23][0-9a-f]{64}$/i.test(adm.claimant) ? adm.claimant.toLowerCase() : undefined;
+  return claimant ? { claimed: true, identity, claimant } : { claimed: false, identity };
 }
 
 /**
- * Whether this identity holds the role `root` on the swap instance (0.26.0): the host's `GET
- * <host root>/skeins?key=<identityKey>` (the instances that key is root on) names swap's identity.
- * False when either read fails.
+ * Whether this identity may configure the exchange (0.28.0; the name kept from 0.26.0): it is swap's
+ * claimant (`GET <base>/admin`, granted amm.admin by the host), or it holds root on swap (the host's
+ * `GET <host root>/skeins?key=<identityKey>` names swap's identity: the host's key, or a key the host
+ * granted root, as on the rack). False when the reads fail.
  */
 export async function isRoot(identityKey: string | null): Promise<boolean> {
   if (!identityKey) return false;
   try {
-    const { identity } = await claimStatus();
+    const { identity, claimant } = await claimStatus();
+    if (claimant && claimant === identityKey.toLowerCase()) return true;
     const res = await fetch(`${hostRoot()}/skeins?key=${encodeURIComponent(identityKey)}`, { headers: { accept: "application/json" } });
     if (!res.ok) return false;
     const held = (await res.json()) as Array<{ identity?: string }>;
@@ -595,22 +607,22 @@ export async function isRoot(identityKey: string | null): Promise<boolean> {
 }
 
 /**
- * Claims the swap instance with the connected wallet (0.26.0): the wallet's own message in box
- * `claim` to swap's identity — what `skein claim` sends; the kernel grants root to its sender if
- * nobody holds it yet, and refuses it otherwise. Then reads `isRoot` again (the claim is a step:
- * a few reads until it shows) and tells the pages.
+ * Claims the exchange with the connected wallet (0.28.0): the wallet's message `{fn: "claim"}` in the
+ * swap app's box `amm/claim` to swap's identity; the first claim is recorded (swap's `/admin` names
+ * its sender) and the host grants it the role amm.admin; a later one is refused. Then reads `isRoot`
+ * again (a few reads until it shows) and tells the pages.
  */
 export async function claimExchange(): Promise<boolean> {
   const { signedFor } = needWallet();
   const { identity } = await claimStatus();
-  await sendMessage(signedFor(context.base), context.base, identity, "claim", {});
+  await sendMessage(signedFor(context.base), context.base, identity, `${app()}/claim`, { fn: "claim" });
   let root = false;
   for (let i = 0; i < 20 && !root; i++) {
     root = await isRoot(context.identityKey);
     if (!root) await new Promise((r) => setTimeout(r, 250));
   }
   emit();
-  if (!root) throw new Error("The claim was sent, but this wallet is not root: someone else may have claimed this exchange first.");
+  if (!root) throw new Error("The claim was sent, but this wallet is not the admin: someone else may have claimed this exchange first.");
   return root;
 }
 
@@ -984,11 +996,11 @@ export async function walletSats(): Promise<bigint> {
 /** The positions last loaded, by the pool's current outpoint (`<txid>.<vout>`): what `closePosition` closes. */
 const loaded = new Map<string, LoadedPosition>();
 
-/** The connected wallet's open positions: its pool rows (`amm-pools`) read from the chain state (src/lp/positions.ts). */
+/** The connected wallet's open positions: its pool rows (`amm-pools`, and 0.28.0 its deploy history's, spent ones too) read from the chain state (src/lp/positions.ts). */
 export async function myPositions(): Promise<Position[]> {
   const { wallet, signedFor } = needWallet();
-  const [poolRows, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), tokenMeta()]);
-  const rows = positionRowsOf(poolRows);
+  const [poolRows, history, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), tokenMeta()]);
+  const rows = positionRowsOf(mergePoolRows(poolRows, history));
   const out: Position[] = [];
   loaded.clear();
   const lives = new Map<string, Promise<LiveAnswer | null>>();
@@ -1002,6 +1014,7 @@ export async function myPositions(): Promise<Position[]> {
       continue;
     }
     if (!pos.current || !pos.pool || pos.sats === undefined) continue;
+    if (loaded.has(pos.current)) continue; // two rows followed to the same pool (a filed row and a history row)
     loaded.set(pos.current, pos);
     const topic = `tm_color_${sdkTokenId(row.tokenId)}`;
     if (!lives.has(topic)) lives.set(topic, fetchLive(base, topic).catch(() => null));
@@ -1159,12 +1172,13 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
  */
 export async function recoverPosition(outpoint: string): Promise<RecoverResult> {
   const { wallet, signedFor } = needWallet();
-  const [rows, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), tokenMeta()]);
+  const [rows, history, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), tokenMeta()]);
   const { base, tokenId } = await baseHolding(outpoint);
   const r = await recoverPoolRow({
     wallet,
     outpoint,
     rows,
+    history,
     spendOf: (o) => readSpend(base, o),
     outputOf: (o) => colorOutput(signedFor(base), base, tokenId, o),
     metaOf: async (tokenId) => meta.get(tokenId) ?? (await deployMeta(tokenId)),

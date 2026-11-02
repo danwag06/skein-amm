@@ -67,7 +67,7 @@ function Wallet({ session }: { session: Session }) {
 
 /**
  * The main nav of a connected wallet. A root-only link shows for root, and
- * (0.27.0) for any wallet while the exchange is unclaimed (swap's
+ * (0.27.0) for any wallet while the exchange is unclaimed (0.28.0: swap's `/admin` names nobody; was swap's
  * `.well-known/skein` says `claimed: false`), since the claim card is on
  * Settings; hidden while that read is pending or failed.
  */
