@@ -8,10 +8,10 @@
  *     wallet-built send through the module: one 1Color value output per leg
  *     not covered by what `amm-swap` already holds, each exactly the leg's
  *     amount in (the pool takes no token change, so a leg needs inputs that
- *     sum to its amount exactly), locked to a fresh key under `[2, "amm
+ *     sum to its amount exactly), locked to a key derived from the leg's pool outpoint (`swapKeyID`) under `[2, "amm
  *     swap"]` (counterparty self), the plan naming them a transfer out; and
  *     (0.29.0) one P2PKH sats output per leg not covered (the leg's exact
- *     sats, `swapFunding`), to a fresh key of the same protocol, filed in
+ *     sats, `swapFunding`), to that outpoint's `:sats` key, filed in
  *     `amm-swap` by the createAction itself (customInstructions `{sats: true,
  *     assetId, protocolID, keyID, counterparty}`). The module passes the sats outputs
  *     through, selects the token inputs, adds change, asks once, signs and
@@ -40,7 +40,7 @@
 import { Beef, P2PKH, PublicKey, Transaction, Utils, type InternalizeOutput, type WalletInterface } from "@bsv/sdk";
 import { colorReceiptInstructions } from "@1sat/actions";
 import { decodeOneColor } from "../pool";
-import { sdkTokenId, tokenIdOfWire } from "../lib/tokenId";
+import { parseOutpoint, sdkTokenId, tokenIdOfWire } from "../lib/tokenId";
 import type { SignedFetch } from "../lib/overlay";
 import { basketBeef, basketRows } from "../lp/wallet";
 import { tokenP2pkhScript } from "../lp/poolDeploy";
@@ -58,8 +58,17 @@ function describe(text: string): string {
   return text.length <= 50 ? text : `${text.slice(0, 49)}…`;
 }
 
-function randomHex(bytes = 8): string {
-  return Utils.toHex(Array.from(crypto.getRandomValues(new Uint8Array(bytes))));
+/**
+ * The keyID of a staged `amm-swap` output (0.29.2, David Case 2026-11-02: derived, not random):
+ * `amm-swap-<txid>.<vout>` for a leg's token row and `amm-swap-<txid>.<vout>:sats` for its sats
+ * row, `<txid>.<vout>` the leg's pool outpoint as quoted (`leg.outpoint`, `_` written `.`).
+ * Protocol `[2, "amm swap"]`, counterparty self, as before. A leg refused and retried against the
+ * same pool outpoint stages to the same key again, which is fine.
+ */
+export function swapKeyID(poolOutpoint: string, kind: "token" | "sats"): string {
+  const op = parseOutpoint(poolOutpoint);
+  if (!op) throw new Error(`not a pool outpoint: ${poolOutpoint}`);
+  return `${SWAP_KEY_PREFIX}${op.txid}.${op.vout}${kind === "sats" ? ":sats" : ""}`;
 }
 
 /** The `amm-swap` outputs of `tokenId` the legs can spend. */
@@ -108,18 +117,25 @@ export interface SentToSwapBasket {
   errors: string[];
 }
 
-/** What one send stages: a token output per amount, then a sats output per amount. */
-export interface SwapStage {
-  tokens: bigint[];
-  sats: number[];
+/** A staged sats output: the leg's exact sats, keyed by the leg's pool outpoint (`swapKeyID`). */
+export interface StagedSats {
+  satoshis: number;
+  /** The leg's pool outpoint, `<txid>_<vout>` or `<txid>.<vout>`. */
+  pool: string;
 }
 
-/** Fresh "amm swap" keys for `sats` and their outputs, filed in `amm-swap` by the createAction itself. */
-async function satsOutputs(wallet: WalletInterface, sats: number[], sym: string, assetId: string) {
+/** What one send stages: a token output per leg (its amount in), then a sats output per leg. */
+export interface SwapStage {
+  tokens: { amount: bigint; pool: string }[];
+  sats: StagedSats[];
+}
+
+/** The "amm swap" keys (`swapKeyID`) for `sats` and their outputs, filed in `amm-swap` by the createAction itself. */
+async function satsOutputs(wallet: WalletInterface, sats: StagedSats[], sym: string, assetId: string) {
   return await Promise.all(
-    sats.map(async (satoshis) => {
+    sats.map(async ({ satoshis, pool }) => {
       if (!Number.isSafeInteger(satoshis) || satoshis <= 0) throw new Error("nothing to send to the swap basket");
-      const keyID = `${SWAP_KEY_PREFIX}${randomHex()}`;
+      const keyID = swapKeyID(pool, "sats");
       const { publicKey } = await wallet.getPublicKey({ protocolID: SWAP_PROTOCOL, keyID, counterparty: "self", forSelf: true });
       const lockingScript = new P2PKH().lock(PublicKey.fromString(publicKey).toAddress()).toHex();
       return {
@@ -156,7 +172,7 @@ function satsHeld(final: Transaction, txid: string, keys: Awaited<ReturnType<typ
 
 /**
  * "In" (see the module comment): one module send of `stage.tokens` (each one
- * output) to fresh `amm-swap` keys, filed in `amm-swap`, and of `stage.sats`
+ * output) to `amm-swap` keys derived from each leg's pool (`swapKeyID`), filed in `amm-swap`, and of `stage.sats`
  * (each one output) after them. Throws when the wallet refuses or fails the
  * send; filing and the page's own submit are reported in `errors`.
  */
@@ -169,12 +185,12 @@ export async function sendToSwapBasket(
   submit: (topic: string, beef: number[]) => Promise<{ steak?: Steak }> = (topic, beef) => submitToOverlay(base, topic, beef),
 ): Promise<SentToSwapBasket> {
   const amounts = stage.tokens;
-  if (amounts.length === 0 || amounts.some((a) => a <= 0n)) throw new Error("nothing to send to the swap basket");
+  if (amounts.length === 0 || amounts.some((a) => a.amount <= 0n)) throw new Error("nothing to send to the swap basket");
   const assetId = sdkTokenId(tokenId);
   const sym = meta.sym ?? "token";
   const keys = await Promise.all(
-    amounts.map(async (amount) => {
-      const keyID = `${SWAP_KEY_PREFIX}${randomHex()}`;
+    amounts.map(async ({ amount, pool }) => {
+      const keyID = swapKeyID(pool, "token");
       const { publicKey } = await wallet.getPublicKey({ protocolID: SWAP_PROTOCOL, keyID, counterparty: "self", forSelf: true });
       return { amount, keyID, publicKey, lockingScript: tokenP2pkhScript(assetId, amount, publicKey) };
     }),
@@ -228,10 +244,10 @@ export interface SentSats {
 
 /**
  * The sats-only send (0.29.0): one plain createAction (no `p color` labels: the module is not in
- * the path) with one P2PKH output per amount to a fresh "amm swap" key, filed in `amm-swap`; the
+ * the path) with one P2PKH output per amount to the leg's "amm swap" `:sats` key (`swapKeyID`), filed in `amm-swap`; the
  * wallet funds it, adds change and broadcasts. Throws when the wallet refuses or fails it.
  */
-export async function sendSatsToSwapBasket(wallet: WalletInterface, tokenId: string, sats: number[], meta: { sym?: string } = {}): Promise<SentSats> {
+export async function sendSatsToSwapBasket(wallet: WalletInterface, tokenId: string, sats: StagedSats[], meta: { sym?: string } = {}): Promise<SentSats> {
   if (sats.length === 0) throw new Error("nothing to send to the swap basket");
   const sym = meta.sym ?? "token";
   const keys = await satsOutputs(wallet, sats, sym, sdkTokenId(tokenId));

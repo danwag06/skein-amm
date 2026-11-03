@@ -4,6 +4,20 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.2 (2026-11-02)
+
+- **The `amm-swap` staging keys are derived, not random** (David). In the
+  swap-basket send (the module send and the plain sats send) each staged
+  output's keyID comes from its leg's pool outpoint as quoted
+  (`leg.outpoint`, `<txid>_<vout>` written `<txid>.<vout>`): the token row
+  `amm-swap-<txid>.<vout>`, the sats row `amm-swap-<txid>.<vout>:sats`
+  (`swapKeyID`); protocol `[2, "amm swap"]` and counterparty self as before;
+  customInstructions carry the keyID as before. A leg refused and retried
+  against the same pool outpoint stages to the same key again.
+  `SwapStage` is `{tokens: {amount, pool}[], sats: {satoshis, pool}[]}`;
+  `sendSatsToSwapBasket` takes `{satoshis, pool}[]`.
+- vitest 203.
+
 ## 0.29.1 (2026-11-02)
 
 Pages only (web/ui). David's corrections to 0.29.0, decided 2026-11-02.

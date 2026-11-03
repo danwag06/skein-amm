@@ -937,7 +937,7 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
   const shortSats = staged.filter((x) => !x.sats);
   let sent: number[] | undefined;
   if (shortTokens.length > 0) {
-    const s = await sendToSwapBasket(wallet, base, tokenId, { tokens: shortTokens.map((x) => x.r.leg.amountIn), sats: shortSats.map((x) => x.planned.funding.satoshis) }, { sym: p.sym });
+    const s = await sendToSwapBasket(wallet, base, tokenId, { tokens: shortTokens.map((x) => ({ amount: x.r.leg.amountIn, pool: x.r.leg.outpoint })), sats: shortSats.map((x) => ({ satoshis: x.planned.funding.satoshis, pool: x.r.leg.outpoint })) }, { sym: p.sym });
     sent = s.tx;
     const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
     shortTokens.forEach((x, n) => {
@@ -951,7 +951,7 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
       else x.r.result.error ??= `the swap basket send has no sats output for this leg${why}`;
     });
   } else if (shortSats.length > 0) {
-    const s = await sendSatsToSwapBasket(wallet, tokenId, shortSats.map((x) => x.planned.funding.satoshis), { sym: p.sym });
+    const s = await sendSatsToSwapBasket(wallet, tokenId, shortSats.map((x) => ({ satoshis: x.planned.funding.satoshis, pool: x.r.leg.outpoint })), { sym: p.sym });
     sent = s.tx;
     const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
     shortSats.forEach((x, n) => {

@@ -16,7 +16,7 @@ import { colorReceiptInstructions } from "@1sat/actions";
 import { ColorPlan, colorProtocolID } from "@bsv/color-permission-module";
 import { describe, expect, it } from "vitest";
 import { brc29Side, type KeyArgs } from "./brc29Wallet";
-import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapSatsHoldings, swapTotals } from "../src/market/activeSwap";
+import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapKeyID, swapSatsHoldings, swapTotals } from "../src/market/activeSwap";
 import { satsInputsOf, selectExactSatsInput, spendValid, tokenInputsOf } from "../src/market/swapAction";
 import { tokenP2pkhScript } from "../src/lp/poolDeploy";
 import { PendingPayoutStore, internalizeNow, type KV } from "../src/wallet/pendingPayouts";
@@ -30,6 +30,9 @@ const TOKEN = `${tokenDeploy.id("hex")}_0`;
 const TOPIC = `tm_color_${TOKEN}`;
 const side = brc29Side(key(60));
 const SWAP: [2, string] = [2, "amm swap"];
+/** Two legs' pool outpoints as quoted (0.29.2: the staging keys derive from them). */
+const P1 = `${"a1".repeat(32)}_0`;
+const P2 = `${"b2".repeat(32)}_0`;
 
 /** An `amm-swap` row of `amount`, its source transaction, under keyID `keyID`. */
 function swapRow(amount: bigint, keyID: string) {
@@ -137,11 +140,13 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
   it("tokens + sats: keys under [2, \"amm swap\"] (self, a fresh keyID each); the plan a transfer out; the sats outputs after the tokens, filed in amm-swap by the createAction (sats: true); the page's submit; each token output filed with its key", async () => {
     const { wallet, calls } = fakeWallet();
     const submitted: string[] = [];
-    const s = await sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [30n, 12n], sats: [41, 37] }, { sym: "TST" }, async (topic) => (submitted.push(topic), {}));
+    const s = await sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [{ amount: 30n, pool: P1 }, { amount: 12n, pool: P2 }], sats: [{ satoshis: 41, pool: P1 }, { satoshis: 37, pool: P2 }] }, { sym: "TST" }, async (topic) => (submitted.push(topic), {}));
     const keys = calls.filter((c) => c.method === "getPublicKey").map((c) => c.args as KeyArgs);
     expect(keys.map((k) => [k.protocolID, k.counterparty, k.forSelf])).toEqual(Array(4).fill([SWAP, "self", true]));
     expect(new Set(keys.map((k) => k.keyID)).size).toBe(4);
-    for (const k of keys) expect(k.keyID).toMatch(/^amm-swap-[0-9a-f]{16}$/);
+    // 0.29.2: derived from each leg's pool outpoint (as quoted, `_` → `.`): the token row's, then the sats row's `:sats`.
+    expect(keys.map((k) => k.keyID)).toEqual([`amm-swap-${P1.replace("_", ".")}`, `amm-swap-${P2.replace("_", ".")}`, `amm-swap-${P1.replace("_", ".")}:sats`, `amm-swap-${P2.replace("_", ".")}:sats`]);
+    expect(swapKeyID(P1, "token")).toBe(keys[0]!.keyID);
 
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.inputs).toBeUndefined(); // the module selects the token inputs; the wallet funds the sats
@@ -187,13 +192,15 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
 
   it("sats only (a sats-in swap, or tokens already staged): a plain createAction, no p color labels, the sats outputs filed in amm-swap; nothing submitted, nothing internalized", async () => {
     const { wallet, calls } = fakeWallet();
-    const s = await sendSatsToSwapBasket(wallet, TOKEN, [20_123, 9], { sym: "TST" });
+    const s = await sendSatsToSwapBasket(wallet, TOKEN, [{ satoshis: 20_123, pool: P1 }, { satoshis: 9, pool: P2 }], { sym: "TST" });
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.labels).toEqual(["amm-swap"]);
     expect(create.inputs).toBeUndefined();
     expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
     expect(create.outputs!.map((o) => [o.satoshis, o.basket, JSON.parse(o.customInstructions!).sats])).toEqual([[20_123, "amm-swap", true], [9, "amm-swap", true]]);
     expect(s.sats.map((h) => [h.outpoint, h.satoshis])).toEqual([[`${s.txid}.0`, 20_123], [`${s.txid}.1`, 9]]);
+    expect(s.sats.map((h) => h.keyID)).toEqual([swapKeyID(P1, "sats"), swapKeyID(P2, "sats")]);
+    expect(JSON.parse(create.outputs![1]!.customInstructions!).keyID).toBe(`amm-swap-${P2.replace("_", ".")}:sats`);
     expect(s.errors).toEqual([]);
     expect(calls.some((c) => c.method === "internalizeAction" || c.method === "signAction")).toBe(false);
     // The legs find them (exact amounts only: a leg has no change).
@@ -211,7 +218,7 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
     (wallet as unknown as { createAction: () => Promise<never> }).createAction = async () => {
       throw new Error("BRC-207: the user declined the color_send request");
     };
-    await expect(sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [5n], sats: [3] }, {}, async () => ({}))).rejects.toThrow(/declined/);
+    await expect(sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [{ amount: 5n, pool: P1 }], sats: [{ satoshis: 3, pool: P1 }] }, {}, async () => ({}))).rejects.toThrow(/declined/);
     expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 });
