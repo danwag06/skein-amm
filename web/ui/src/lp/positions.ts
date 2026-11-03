@@ -8,7 +8,10 @@
  * current output (each swap's continuation), or closed (by the LP or by the
  * validator, docs/AMM.md "The validator's Close").
  *
- * 0.28.0: the rows also come from the wallet's HISTORY (`historyPoolRows`):
+ * 0.29.3: the deploy HISTORY is the first source (`historyPoolRows`): each
+ * `amm-pool-deploy` action's label `amm-lp <hex>` names its LP keyID and its
+ * output's script is the pool (no customInstructions needed: BRC-100's
+ * listActions does not answer them). 0.28.0: the rows also come from the wallet's HISTORY (`historyPoolRows`):
  * `listOutputs` answers spendable outputs only, so a pool output the wallet
  * itself spent (the LP swapped against its own pool) left no row and the
  * position vanished; the deploys' actions (label `amm-pool-deploy`) still
@@ -20,14 +23,14 @@
  * output if admitted and unspent, with its BEEF; `ls_color {txid,
  * outputIndex}` until 0.19.0).
  */
-import { Transaction, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
+import { Transaction, Utils, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
 import { PoolTemplate, type Pool } from "../pool";
 import { lookup, parseOutputList, type LookupOutput, type SignedFetch } from "../lib/overlay";
 import { readSpend, type Spend } from "../lib/skein";
-import { colorQuery, parseOutpoint, tokenIdText } from "../lib/tokenId";
+import { colorQuery, parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
-import { isPoolRow } from "./poolRows";
-import type { BasketRow } from "./poolDeploy";
+import { POOL_TAG, isPoolRow } from "./poolRows";
+import { LP_KEY_PROTOCOL, lpKeyIdOfLabels, poolCustomInstructions, type BasketRow } from "./poolDeploy";
 
 /** The wallet key that is a pool's LpPubKey (a BRC-29 key to self, or a pre-BRC-29 1Sat key). */
 export interface LpKeyRef {
@@ -62,11 +65,27 @@ export async function historyPoolRows(wallet: WalletInterface): Promise<BasketRo
   const limit = 1000;
   try {
     for (let offset = 0; offset < 100_000; offset += limit) {
-      const r = await wallet.listActions({ labels: [POOL_DEPLOY_LABEL], includeOutputs: true, includeCustomInstructions: true, limit, offset } as Parameters<WalletInterface["listActions"]>[0]);
+      const r = await wallet.listActions({ labels: [POOL_DEPLOY_LABEL], includeLabels: true, includeOutputs: true, includeOutputLockingScripts: true, includeCustomInstructions: true, limit, offset } as Parameters<WalletInterface["listActions"]>[0]);
       for (const a of r.actions ?? []) {
+        // 0.29.3: the LP keyID from the action's own label (`amm-lp <hex>`), the pool from its output's script.
+        const keyID = lpKeyIdOfLabels(a.labels);
         for (const o of a.outputs ?? []) {
+          const outpoint = `${a.txid}.${o.outputIndex}`;
+          const pool = keyID && o.lockingScript ? PoolTemplate.decode(o.lockingScript) : null;
+          if (pool && keyID) {
+            const tokenId = sdkTokenId(tokenIdOfWire(Utils.toArray(pool.args.assetId, "hex")));
+            out.push({
+              outpoint,
+              satoshis: o.satoshis,
+              lockingScript: o.lockingScript!,
+              tags: [POOL_TAG],
+              customInstructions: poolCustomInstructions({ tokenId, protocolID: LP_KEY_PROTOCOL, keyID, args: pool.args, validatorIdentity: pool.state.validatorIdentity, ...(pool.state.nonce ? { nonce: pool.state.nonce } : {}) }),
+            });
+            continue;
+          }
+          // A wallet that answers the output's customInstructions (0.28.0): the filed row as it is.
           if (o.basket !== POOLS_BASKET) continue;
-          const row: BasketRow = { outpoint: `${a.txid}.${o.outputIndex}`, satoshis: o.satoshis, ...(o.tags ? { tags: o.tags } : {}), ...(o.customInstructions ? { customInstructions: o.customInstructions } : {}) };
+          const row: BasketRow = { outpoint, satoshis: o.satoshis, ...(o.tags ? { tags: o.tags } : {}), ...(o.customInstructions ? { customInstructions: o.customInstructions } : {}) };
           if (isPoolRow(row)) out.push(row);
         }
       }

@@ -69,11 +69,6 @@ export const P2PKH_UNLOCK_LENGTH = 108;
 /** How long the relay may take (the swap's `expires`). */
 export const SWAP_TTL_MS = 2 * 60_000;
 
-/** BRC-100 descriptions are 5-50 characters. */
-function describe(text: string): string {
-  return text.length <= 50 ? text : `${text.slice(0, 49)}…`;
-}
-
 const toHex = (b: number[]) => Utils.toHex(b);
 
 export class LegShapeError extends Error {
@@ -687,29 +682,15 @@ function internalizeOutputOf(o: SwapPayout): InternalizeOutput {
 }
 
 /**
- * The pending-payout records of the swap's outputs to the taker (the payout,
- * and the taker's own commission): sats with their BRC-29 remittance, tokens
- * with their module receipt (0.12.0). Written before the swap is submitted;
- * their txid is provisional: the validator's signature changes it.
+ * The unfinished-step entries of the swap's outputs to the taker (the payout, and the taker's own
+ * commission): 0.29.3, no key material — `{id, kind: "swap", txid, vout, tokenId, base, createdAt,
+ * final: false}`, the keys re-derived from the final transaction (src/wallet/pendingPayouts.ts).
+ * Written before the swap is submitted; their txid is provisional: the validator's signature
+ * changes it.
  */
-export function pendingSwapPayouts(p: PreparedSwap, tokenId: string, now = Date.now()): PendingPayout[] {
+export function pendingSwapPayouts(p: PreparedSwap, tokenId: string, base: string, now = Date.now()): PendingPayout[] {
   const txid = p.swap.id("hex");
-  const out: PendingPayout[] = [];
-  for (const [o, description] of [[p.payout, "AMM swap payout"], [p.commission.payout, "AMM swap commission"]] as const) {
-    if (!o) continue;
-    out.push({
-      id: payoutId(txid, o.outputIndex),
-      kind: "swap",
-      txid,
-      vout: o.outputIndex,
-      satoshis: o.satoshis,
-      lockingScript: o.lockingScript,
-      ...(o.kind === "brc29" ? { remittance: o.remittance } : { receipt: o.receipt }),
-      final: false,
-      tokenId,
-      description,
-      createdAt: now,
-    });
-  }
-  return out;
+  return [p.payout, p.commission.payout]
+    .filter((o): o is SwapPayout => o !== undefined)
+    .map((o) => ({ id: payoutId(txid, o.outputIndex), kind: "swap" as const, txid, vout: o.outputIndex, tokenId, base, createdAt: now, final: false }));
 }

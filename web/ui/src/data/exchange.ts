@@ -77,7 +77,7 @@ import { RelayError, SWAP_TERMS_FN, callApp, callUrl, readBytes, swapTerms, type
 import { pendingSwapPayouts, planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlannedLeg, type SatsInput, type TokenInput } from "../market/swapAction";
 import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapTotals } from "../market/activeSwap";
 import { relaySwap, type SwapOutcome } from "../market/swapFlow";
-import { PendingPayoutStore } from "../wallet/pendingPayouts";
+import { PendingPayoutStore, internalizeNow, onPendingPayoutsChange, type PendingPayout } from "../wallet/pendingPayouts";
 import { formatAmount } from "../lp/amounts";
 import { basketRows } from "../lp/wallet";
 import { buildInventory, decodeTokenRow, deployIcon } from "../lp/inventory";
@@ -87,7 +87,7 @@ import { PoolTemplate } from "../pool";
 import { colorOutput, historyPoolRows, mergePoolRows, positionRowsOf, loadPosition, type LoadedPosition } from "../lp/positions";
 import { recoverPosition as recoverPoolRow } from "../lp/recover";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "../wallet/color";
-import { awaitAdmitted, completeClose, prepareClose, submitToOverlay } from "../lp/close";
+import { prepareClose, submitToOverlay } from "../lp/close";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -973,7 +973,7 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
     }
     try {
       const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, ...(tokens ? { tokenInputs: tokens } : {}), satsInput: sats, ...(holdingBeef ? { holdingBeef } : {}), planned, satsPerKb: FEE_RATE_SATS_PER_KB });
-      const pending = pendingSwapPayouts(prepared, tokenId);
+      const pending = pendingSwapPayouts(prepared, tokenId, base);
       for (const x of pending) context.payouts.save(x);
       running.push(
         relaySwap({ wallet, authFetch: af, base }, prepared, peerId)
@@ -1019,7 +1019,7 @@ const loaded = new Map<string, LoadedPosition>();
 export async function myPositions(): Promise<Position[]> {
   const { wallet, signedFor } = needWallet();
   const [poolRows, history, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), tokenMeta()]);
-  const rows = positionRowsOf(mergePoolRows(poolRows, history));
+  const rows = positionRowsOf(mergePoolRows(history, poolRows));
   const out: Position[] = [];
   loaded.clear();
   const lives = new Map<string, Promise<LiveAnswer | null>>();
@@ -1156,7 +1156,7 @@ export async function deployPosition(req: DeployRequest): Promise<DeployResult> 
  * wallet (its own action pays the miner fee); submitted to this skein's overlay.
  */
 export async function closePosition(req: CloseRequest): Promise<CloseResult> {
-  const { wallet, signedFor } = needWallet();
+  const { wallet } = needWallet();
   let pos = loaded.get(req.outpoint);
   if (!pos) {
     await myPositions();
@@ -1172,13 +1172,8 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
     poolOutput: pos.output,
     lpKey: pos.row.lpKey,
   });
-  const base = await tokenBaseOf(pos.row.tokenId);
-  const steak = await submitToOverlay(base, prepared.topic, prepared.beef);
-  // The module takes the tokens in only once the topic admits them (0.29.0: waited for here, as Move back does).
-  if (!(steak.steak?.[prepared.topic]?.outputsToAdmit.includes(prepared.receipt.outputIndex) ?? false)) {
-    await awaitAdmitted(signedFor(base), base, sdkTokenId(pos.row.tokenId), prepared.txid, prepared.receipt.outputIndex).catch(() => false);
-  }
-  await completeClose(wallet, prepared, context.payouts);
+  // The page's own submit (the wallet's module submitted at its overlay too; its failure does not undo the close).
+  await submitToOverlay(await tokenBaseOf(pos.row.tokenId), prepared.topic, prepared.beef).catch(() => undefined);
   loaded.delete(req.outpoint);
   emit();
   return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount };
@@ -1268,19 +1263,18 @@ export async function myTokens(): Promise<WalletToken[]> {
 }
 
 /**
- * "Move back" (src/market/activeSwap.ts): every `amm-swap` output of the
- * token to a module receiving key of the user's own, submitted to this
- * skein's token topic and taken in through the module. The recovery path
- * for a swap that got stuck, and how a closed position's tokens reach the
- * wallet's balance.
+ * "Move back" (src/market/activeSwap.ts; 0.29.3: a module plan): every `amm-swap` row of the
+ * token (and its staged sats) spent in one action whose one output the wallet's module files
+ * into the token's balance in the same call; submitted to this skein's token topic too. The
+ * recovery path for a swap that got stuck.
  */
-export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; amount: bigint; internalized: boolean; errors: string[] }> {
-  const { wallet, signedFor } = needWallet();
+export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; amount: bigint; errors: string[] }> {
+  const { wallet } = needWallet();
   const meta = await tokenMeta();
   const base = await tokenBaseOf(tokenId);
-  const r = await moveBack({ wallet, af: signedFor(base), base, tokenId, meta: { sym: symOf(meta, tokenId) }, payouts: context.payouts });
+  const r = await moveBack({ wallet, base, tokenId, meta: { sym: symOf(meta, tokenId) } });
   emit();
-  return { txid: r.txid, amount: r.amount, internalized: r.internalized, errors: r.errors };
+  return { txid: r.txid, amount: r.amount, errors: r.errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,6 +1553,49 @@ export function useData<T>(load: () => Promise<T>, deps: unknown[], enabled = tr
 
 export const useMyPositions = (enabled: boolean) => useData(myPositions, [], enabled);
 export const useMyTokens = (enabled: boolean) => useData(myTokens, [], enabled);
+
+// ---------------------------------------------------------------------------
+// Unfinished steps (0.29.3)
+// ---------------------------------------------------------------------------
+
+/** One unfinished step as the Your tokens page lists it. */
+export interface Unfinished {
+  id: string;
+  kind: PendingPayout["kind"];
+  tokenId: TokenId;
+  txid: string;
+  /** false while the swap's txid is provisional. */
+  final: boolean;
+  createdAt: number;
+}
+
+/** The browser's unfinished steps (src/wallet/pendingPayouts.ts), oldest first. */
+export function unfinished(): Unfinished[] {
+  return context.payouts.list().map((p) => ({ id: p.id, kind: p.kind, tokenId: p.tokenId, txid: p.txid, final: p.final, createdAt: p.createdAt }));
+}
+
+/** The unfinished steps, kept current as entries are written and cleared (this tab and others). */
+export function useUnfinished(): Unfinished[] {
+  const [list, setList] = useState<Unfinished[]>(() => unfinished());
+  useEffect(() => onPendingPayoutsChange(() => setList(unfinished())), []);
+  return list;
+}
+
+/**
+ * "Finish" one step: the final transaction from the token's instance, the key re-derived (or, for an
+ * entry from before 0.29.3, its own bytes), the wallet's take-in; the entry cleared only when the
+ * wallet accepted. Throws the reason otherwise (the entry stays).
+ */
+export async function finishUnfinished(id: string): Promise<{ accepted: boolean; txid: string }> {
+  const { wallet, signedFor } = needWallet();
+  const p = context.payouts.get(id);
+  if (!p) throw new Error("Already finished");
+  const base = p.base ?? (await tokenBaseOf(p.tokenId));
+  const r = await internalizeNow(wallet, context.payouts, signedFor(base), base, p);
+  if (!r.accepted) throw new Error("The wallet did not accept the output");
+  emit();
+  return r;
+}
 /** A token's validator terms (0.17.0: its own instance's), none while no token is picked. */
 export const useValidatorTerms = (tokenId: TokenId | undefined) =>
   useData(() => (tokenId ? validatorTerms(tokenId) : Promise.resolve(null)), [tokenId]);

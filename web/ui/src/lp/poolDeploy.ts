@@ -7,8 +7,11 @@
  *
  *   1. The LP key: a BRC-29 key to self under a fresh random keyID
  *      (`newLpKey`: derivationPrefix base64("amm-lp"), derivationSuffix 16
- *      random bytes), kept in the position row (and, until the row is filed,
- *      in this browser: `PendingDeployStore`, so Recover can find it).
+ *      random bytes), kept in the position row and (0.29.3, David) in the
+ *      deploy's own action as the label `amm-lp <the suffix's 16 bytes, hex>`
+ *      (`lpKeyLabel`), written in the same createAction that makes the
+ *      transaction: the deploy history alone gives it back (`lpKeyIdOfLabels`;
+ *      Recover and Positions read it first). Nothing is kept in the browser.
  *   2. `amm.pool.terms` (the validator and its fees), then `amm.pool.affirm
  *      {pool, satoshis}`: the proposed pool output, its ValidatorPubKey,
  *      Nonce and Affirmation still to come (33 zero bytes, 32 zero bytes,
@@ -36,7 +39,6 @@
  *    derivation the page checks.
  */
 import { P2PKH, PublicKey, Transaction, Utils, type CreateActionOutput, type InternalizeOutput, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
-import type { ColorRemittance } from "@bsv/color-permission-module";
 import { PoolTemplate, RESCINDED_KEY, decodeOneColor, oneColorValuePrefix, type PoolArgs, type PoolFields } from "../pool";
 import { deriveFirstValidatorPubKey } from "../lib/keys";
 import { priceOf } from "../market/view";
@@ -64,6 +66,29 @@ const toHex = (b: number[] | Uint8Array) => Utils.toHex(Array.from(b));
 
 function describe(text: string): string {
   return text.length <= 50 ? text : `${text.slice(0, 49)}…`;
+}
+
+/** The prefix of the deploy action's LP key label (0.29.3): `amm-lp <hex>`. */
+export const LP_KEY_LABEL_PREFIX = "amm-lp ";
+
+/**
+ * The deploy action's label naming its LP keyID (0.29.3): `amm-lp ` and the derivationSuffix's
+ * bytes in lowercase hex (labels are lowercased by the wallet, base64 is not case-safe): 7 + 32
+ * characters for a 16-byte suffix, far under BRC-100's 300. The module ignores it (not `p color`).
+ */
+export function lpKeyLabel(keyID: string): string {
+  const suffix = keyID.split(" ")[1];
+  if (keyID.split(" ")[0] !== LP_DERIVATION_PREFIX || !suffix) throw new PoolDeployError(`not a deploy LP keyID: ${keyID}`);
+  return `${LP_KEY_LABEL_PREFIX}${toHex(Utils.toArray(suffix, "base64"))}`;
+}
+
+/** The LP keyID an action's labels name (`lpKeyLabel`), or null. */
+export function lpKeyIdOfLabels(labels: string[] | undefined): string | null {
+  for (const l of labels ?? []) {
+    const m = /^amm-lp ([0-9a-f]{2,128})$/.exec(l);
+    if (m && m[1]!.length % 2 === 0) return `${LP_DERIVATION_PREFIX} ${Utils.toBase64(Utils.toArray(m[1]!, "hex"))}`;
+  }
+  return null;
 }
 
 /** A new pool's LP key derivation (0.13.0): derivationPrefix base64("amm-lp"), derivationSuffix 16 random bytes, base64. */
@@ -268,55 +293,6 @@ export async function newLpKey(wallet: WalletInterface): Promise<{ protocolID: W
   return { protocolID, keyID, publicKey };
 }
 
-/** A deploy's LP key kept in this browser until its row is filed (Recover's fallback: a 0.13.0 pool's LP keyID is on no chain). */
-export interface PendingDeploy {
-  keyID: string;
-  lpPubKey: string;
-  tokenId: string;
-  createdAt: number;
-}
-
-export const PENDING_DEPLOYS_KEY = "skein-amm.pending-deploys.v1";
-
-/** The browser's record of deploys whose row is not filed yet (localStorage; every access may fail: then nothing is kept). */
-export class PendingDeployStore {
-  constructor(private readonly kv: { getItem(k: string): string | null; setItem(k: string, v: string): void } | null = defaultKV()) {}
-
-  list(): PendingDeploy[] {
-    try {
-      const raw = this.kv?.getItem(PENDING_DEPLOYS_KEY);
-      const v = raw ? JSON.parse(raw) : [];
-      return Array.isArray(v) ? (v as PendingDeploy[]) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  private write(all: PendingDeploy[]): void {
-    try {
-      this.kv?.setItem(PENDING_DEPLOYS_KEY, JSON.stringify(all));
-    } catch {
-      /* not kept */
-    }
-  }
-
-  save(d: PendingDeploy): void {
-    this.write([...this.list().filter((x) => x.keyID !== d.keyID), d]);
-  }
-
-  remove(keyID: string): void {
-    this.write(this.list().filter((x) => x.keyID !== keyID));
-  }
-}
-
-function defaultKV(): { getItem(k: string): string | null; setItem(k: string, v: string): void } | null {
-  try {
-    return typeof localStorage === "undefined" ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
-
 export class DeployShapeError extends Error {
   constructor(message: string) {
     super(message);
@@ -348,8 +324,6 @@ export interface DeployPoolInput {
   meta?: { sym?: string; dec?: number };
   /** The submit to this skein (default: `POST <base>/submit`, plain fetch). */
   submit?: (topic: string, beef: number[]) => Promise<{ steak?: unknown }>;
-  /** Where the LP key waits until the row is filed (default: this browser's). */
-  pending?: PendingDeployStore;
 }
 
 export interface DeployedPool {
@@ -400,12 +374,10 @@ export async function deployPool(i: DeployPoolInput): Promise<DeployedPool> {
 
   // 3. The deploy: the pool alone; the module selects the token inputs and adds their change.
   const sym = meta.sym ?? "token";
-  const pending = i.pending ?? new PendingDeployStore();
-  pending.save({ keyID: lpKey.keyID, lpPubKey: lpKey.publicKey, tokenId: sdkId, createdAt: Date.now() });
   const outputs: CreateActionOutput[] = [{ lockingScript, satoshis: Number(plan.sats), outputDescription: describe(`AMM pool: ${sym} / BSV`) }];
   const createArgs = {
     description: describe(`AMM pool deploy: ${sym}`),
-    labels: [...transferPlanLabels(sdkId), "amm-pool-deploy"],
+    labels: [...transferPlanLabels(sdkId), "amm-pool-deploy", lpKeyLabel(lpKey.keyID)],
     outputs,
     options: { randomizeOutputs: false, acceptDelayedBroadcast: false },
   };
@@ -446,7 +418,6 @@ export async function deployPool(i: DeployPoolInput): Promise<DeployedPool> {
   try {
     const r = await wallet.internalizeAction({ tx, outputs: [row], description: describe(`AMM pool deploy: ${sym}`), labels: ["amm-pool-deploy"] });
     out.filed = r.accepted;
-    if (r.accepted) pending.remove(lpKey.keyID);
   } catch (err) {
     out.errors.push(`internalizeAction: ${err instanceof Error ? err.message : String(err)}`);
   }

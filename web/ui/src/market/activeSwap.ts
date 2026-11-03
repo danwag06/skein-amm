@@ -26,29 +26,31 @@
  *     wallet marks them spent when it takes the accepted swap in (0.29.0: no
  *     relinquishOutput). An output a failed leg did not spend stays for a
  *     later swap.
- *   - **Move back** (`moveBack`, the recovery path; 0.29.0: one wallet
- *     createAction): every `amm-swap` token output of the token, and
- *     (0.29.1) the sats rows staged for its legs (their `assetId`), as an
- *     explicit input (its source transaction in `inputBEEF`, unlocked by the
- *     page at signAction), one output to a NEW module receiving key (sender:
- *     the user's own identity) carrying the receipt as its customInstructions;
- *     the wallet funds the fee, takes the sats rows into its change, adds change, broadcasts and records it; then
- *     submitted to this skein's token topic and taken in through the module
- *     (`internalizeAction`, basket insertion into `p color <assetTag>`, the
- *     receipt).
+ *   - **Move back** (`moveBack`, the recovery path; 0.29.3: a module plan,
+ *     David Case 2026-11-02): ONE createAction through the wallet's BRC-207
+ *     module, a `p color plan` transfer: every `amm-swap` token output of the
+ *     token and (0.29.1) the sats rows staged for its legs (their `assetId`)
+ *     as explicit inputs (their source transactions in `inputBEEF`) — to the
+ *     module FOREIGN inputs (not in a `p color` basket): the token rows
+ *     checked admitted and unspent on the token's overlay, the sats rows
+ *     adding nothing; one output, the whole amount to a NEW module receiving
+ *     key of the user's own, the plan's owned output 0 (the module checks it
+ *     pays the remittance's key and files it in `p color <assetTag>` with its
+ *     custody in the same call). The page unlocks its inputs at signAction;
+ *     the wallet funds the fee and takes the sats rows into its change; the
+ *     module approves and submits, the wallet broadcasts. The page submits it
+ *     to this skein's token topic too. Nothing is taken in afterwards and
+ *     nothing is kept in the browser.
  */
 import { Beef, P2PKH, PublicKey, Transaction, Utils, type InternalizeOutput, type WalletInterface } from "@bsv/sdk";
-import { colorReceiptInstructions } from "@1sat/actions";
 import { decodeOneColor } from "../pool";
 import { parseOutpoint, sdkTokenId, tokenIdOfWire } from "../lib/tokenId";
-import type { SignedFetch } from "../lib/overlay";
 import { basketBeef, basketRows } from "../lp/wallet";
 import { tokenP2pkhScript } from "../lp/poolDeploy";
-import { awaitAdmitted, steakText, submitToOverlay, type Steak } from "../lp/close";
-import { SWAP_BASKET, SWAP_PROTOCOL, newReceivingKey, swapInstructions, swapSatsInstructions, receiptOutput, runTokenAction, transferPlanLabels } from "../wallet/color";
+import { steakText, submitToOverlay, type Steak } from "../lp/close";
+import { SWAP_BASKET, SWAP_PROTOCOL, newReceivingKey, swapInstructions, swapSatsInstructions, runTokenAction, transferPlanLabels } from "../wallet/color";
 import { identityKeyOf } from "../wallet/brc29";
 import { inputIndexOf, runAppSignedAction, type Spends } from "../wallet/action";
-import { payoutId, type PendingPayoutStore } from "../wallet/pendingPayouts";
 import { P2PKH_UNLOCK_LENGTH, satsInputsOf, signP2pkhWithWallet, spendValid, tokenInputsOf, type SatsInput, type TokenInput } from "./swapAction";
 
 /** The keyID prefix of an `amm-swap` key (`SWAP_PROTOCOL`, counterparty self). */
@@ -267,7 +269,6 @@ export interface MovedBack {
   /** The transaction as the wallet's AtomicBEEF. */
   beef: number[];
   submitted: string;
-  internalized: boolean;
   errors: string[];
 }
 
@@ -285,21 +286,18 @@ export async function swapBasketSpends(wallet: WalletInterface, tx: Transaction,
 }
 
 /**
- * "Move back" (see the module comment). Throws before anything is broadcast
- * (no outputs, a wallet refusal, an input that does not validate: the action
- * is aborted); after the wallet's broadcast, errors are collected and an
- * unfiled receipt is kept as a pending payout (src/wallet/pendingPayouts.ts)
- * for a later retry.
+ * "Move back" (see the module comment; 0.29.3: a module plan). Throws before anything is
+ * broadcast (no outputs, a wallet or module refusal, an input that does not validate: the action
+ * is aborted). The module files the output in `p color <assetTag>` with its custody in the same
+ * createAction: no take-in afterwards, nothing kept in the browser. The page's own submit to this
+ * skein's token topic (the module submitted at the wallet's overlay too) is reported in `errors`.
  */
 export async function moveBack(i: {
   wallet: WalletInterface;
-  af: SignedFetch | null;
   base: string;
   tokenId: string;
   meta?: { sym?: string };
-  payouts?: PendingPayoutStore;
   submit?: (topic: string, beef: number[]) => Promise<{ steak?: Steak }>;
-  admitted?: (txid: string, vout: number) => Promise<boolean>;
 }): Promise<MovedBack> {
   const { wallet } = i;
   const assetId = sdkTokenId(i.tokenId);
@@ -314,6 +312,7 @@ export async function moveBack(i: {
   const sources = await swapHoldingBeef(wallet);
   for (const h of [...holdings, ...satsRows]) if (!sources.findTxid(h.txid)) throw new Error(`the wallet's BEEF lacks the swap basket output ${h.outpoint}`);
 
+  // The output: the whole amount to a module receiving key of the user's own, the plan's owned output 0.
   const me = await identityKeyOf(wallet);
   const key = await newReceivingKey(wallet, assetId, me);
   const lockingScript = tokenP2pkhScript(assetId, amount, key.publicKey);
@@ -326,49 +325,18 @@ export async function moveBack(i: {
         ...holdings.map((h) => ({ outpoint: h.outpoint, unlockingScriptLength: P2PKH_UNLOCK_LENGTH, inputDescription: describe(`${sym} in the swap basket`) })),
         ...satsRows.map((h) => ({ outpoint: h.outpoint, unlockingScriptLength: P2PKH_UNLOCK_LENGTH, inputDescription: describe(`Sats staged for a ${sym} swap`) })),
       ],
-      outputs: [{ lockingScript, satoshis: 1, outputDescription: describe(`${sym} back to your wallet`), customInstructions: colorReceiptInstructions(key.receipt) }],
-      labels: ["amm-swap"],
+      outputs: [{ lockingScript, satoshis: 1, outputDescription: describe(`${sym} back to your wallet`) }],
+      labels: [...transferPlanLabels(assetId, { ownedOutputs: [{ outputIndex: 0, ...key.receipt }] }), "amm-swap"],
       options: { randomizeOutputs: false, acceptDelayedBroadcast: false },
     },
     (tx) => swapBasketSpends(wallet, tx, [...holdings, ...satsRows], "move back"),
   );
-  const out: MovedBack = { txid, amount, beef, submitted: "not submitted", internalized: false, errors: [] };
-  let steak: { steak?: Steak } = {};
+  const out: MovedBack = { txid, amount, beef, submitted: "not submitted", errors: [] };
   try {
-    steak = await (i.submit ?? ((t: string, b: number[]) => submitToOverlay(i.base, t, b)))(topic, beef);
-    out.submitted = steakText(steak);
+    out.submitted = steakText(await (i.submit ?? ((t: string, b: number[]) => submitToOverlay(i.base, t, b)))(topic, beef));
   } catch (err) {
     out.submitted = "the submit failed";
     out.errors.push(`submit: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  // The module takes in only an admitted, unspent output.
-  const took = steak.steak?.[topic]?.outputsToAdmit.includes(0) ?? false;
-  const admitted = took || (await (i.admitted ?? ((t: string, v: number) => awaitAdmitted(i.af, i.base, assetId, t, v)))(txid, 0).catch(() => false));
-  const pending = {
-    id: payoutId(txid, 0),
-    kind: "move-back" as const,
-    txid,
-    vout: 0,
-    satoshis: 1,
-    lockingScript,
-    receipt: key.receipt,
-    final: true,
-    tokenId: assetId,
-    atomicBeef: Utils.toHex(beef),
-    description: describe(`AMM move back: ${sym}`),
-    createdAt: Date.now(),
-  };
-  i.payouts?.save(pending);
-  if (!admitted) out.errors.push("the token topic has not admitted the move back yet: your wallet takes it in on a retry");
-  else {
-    try {
-      const r = await wallet.internalizeAction({ tx: beef, outputs: [receiptOutput(0, key.receipt)], description: describe(`AMM move back: ${sym}`), labels: ["amm-swap"] });
-      out.internalized = r.accepted;
-      if (r.accepted) i.payouts?.remove(pending.id);
-    } catch (err) {
-      out.errors.push(`internalizeAction: ${err instanceof Error ? err.message : String(err)}`);
-    }
   }
   return out;
 }

@@ -231,8 +231,9 @@ counterparty}`).
   sats, tokens = sats ÷ price in the token's decimals; no pools, no
   filling. The LP key: a BRC-29 key to self under a
   fresh random keyID (derivationPrefix base64("amm-lp"), derivationSuffix
-  16 random bytes), kept in this browser (localStorage,
-  `PendingDeployStore`) until the row is filed. `amm.pool.terms`;
+  16 random bytes), named in the deploy's own action by the label `amm-lp
+  <the suffix's 16 bytes, hex>` (0.29.3; labels are lowercased by the wallet,
+  hence hex), nothing kept in the browser. `amm.pool.terms`;
   `amm.pool.affirm {pool, satoshis}` → `{validatorPubKey, nonce,
   signature}`, checked and written into the pool's state; one
   `createAction`: outputs [the pool] (a transfer to a foreign script), no
@@ -272,48 +273,57 @@ counterparty}`).
   `<txid>_<vout>`, the deploy's or a later continuation), follows it to its
   current output (`GET <base>/spends`), reads that output's BEEF from
   BRC-207's `color-spendability` at `ls_color_<tokenId>` (0.20.1; `ls_color {txid, outputIndex}` before) and decodes the pool. Its LP keyID is random and on no
-  chain, so the keyIDs of the wallet's deploy history (0.28.0), then those
-  this browser kept for deploys whose row was not filed, are tried; none:
-  "not kept in this browser", nothing filed. Each candidate is checked with
+  chain, so the keyIDs of the wallet's deploy history are tried (0.29.3: the
+  `amm-lp <hex>` label of each `amm-pool-deploy` action, read with
+  `listActions({labels: ["amm-pool-deploy"], includeLabels, includeOutputs,
+  includeOutputLockingScripts})`, the pool from the output's script; the
+  first source for Positions too); none: "not in this wallet's deploy
+  history", nothing filed. Each candidate is checked with
   `getPublicKey` against the pool's LpPubKey. On a match it files the
   current output in `amm-pools` with `internalizeAction` (basket
   insertion, tag `amm-pool`, the deploy's `poolCustomInstructions`, label
   `amm-pool-deploy`). A pool the wallet already files is left alone.
   (0.29.1: the pre-0.13.0 LP keys, `lpKeyId` / `legacyLpKeyId`, are gone.)
   The row is then an ordinary position: Close as below.
-- **Close** (0.13.0: `Close(lpSig)`, outputs free; 0.29.1: ONE path). ONE
-  wallet createAction — the pool an explicit input (`inputBEEF` the lookup's,
-  `unlockingScriptLength` the call's), the outputs below with the payout's
-  remittance and the receipt as their customInstructions; the wallet pays
-  the fee and adds change; the page fills the pool input (`callUnlock` + the
-  LP's `createSignature` over the wallet's transaction) at signAction; no
-  funding transaction, no fee from the pool. Every sat of the pool to the LP key, a BRC-29 wallet
-  payment to self; every token, one sat, to a NEW module receiving key of
-  the user's own (`newReceivingKey`, sender the user's identity), taken in
-  through the module with its receipt (a second `internalizeAction`; kept in
-  pending payouts if the module does not take it at once). No `amm-swap`,
-  no Move back. No relinquishOutput: the wallet marks the pool row spent
-  itself. A
-  rescinded pool is shown as such and closes as any.
-- **Move back** (Your tokens; 0.29.0: ONE wallet createAction). Every
-  `amm-swap` token output of the token, and (0.29.1) the sats rows staged
-  for its legs (their `assetId`; the wallet's change takes their sats), an explicit input (`inputBEEF` from
-  the basket, the page's unlocks at signAction), one output to a module
-  receiving key of the user's own (sender: the user's identity) carrying the
-  receipt as its customInstructions, no basket; the wallet funds the fee,
-  adds change, broadcasts and marks the inputs spent; then submitted to
-  `tm_color_<assetId>` and taken in through the module. No relinquishOutput.
-  A swap that got stuck comes back this way.
+- **Close** (0.13.0: `Close(lpSig)`, outputs free; 0.29.1: ONE path; 0.29.3: a
+  module plan). ONE createAction through the wallet's BRC-207 module: a `p
+  color plan` transfer whose owned output 0 is every token, one sat, to a NEW
+  module receiving key of the user's own (`newReceivingKey`, sender the
+  user's identity) — the module checks it pays the remittance's key and files
+  it in `p color <assetTag>` with its custody in the same call; the pool an
+  explicit input (`inputBEEF` the lookup's, `unlockingScriptLength` the
+  call's), to the module a FOREIGN token input checked admitted and unspent
+  on the token's overlay. No payout output: the pool's sats go to the
+  wallet's change. The page fills the pool input (`callUnlock` + the LP's
+  `createSignature` over the wallet's transaction) at signAction; the module
+  approves and submits, the wallet broadcasts and marks the pool row spent.
+  Nothing is taken in afterwards, nothing kept in the browser. A rescinded
+  pool is shown as such and closes as any.
+- **Move back** (Your tokens; 0.29.3: a module plan, the same shape). Every
+  `amm-swap` token row of the token and the sats rows staged for its legs
+  (their `assetId`) explicit FOREIGN inputs (`inputBEEF` from the basket,
+  the page's unlocks at signAction); one output, the whole amount to a module
+  receiving key of the user's own, the plan's owned output 0, filed by the
+  module; the wallet's change takes the sats. Then the page's own submit to
+  `tm_color_<assetId>`. A swap that got stuck comes back this way.
 - **Payout keys** (0.29.1): a swap leg's payout key (the BRC-29 sats payment,
   or the BRC-207 receipt for tokens) and the taker's own commission key are
   derived from the leg's first staged `amm-swap` input `<txid>.<vout>`
   (tokens in: its first token row; sats in: its sats row):
   derivationSuffix = base64(sha256(UTF-8 of that text)), derivationPrefix =
   base64("amm swap") for the payout, base64("amm swap commission") for the
-  commission; the pending-payout records are written as before.
-- **Pending payouts** (`wallet/pendingPayouts.ts`) keep both kinds: a
-  BRC-29 remittance or a module receipt, retried with the final
-  transaction's BEEF.
+  commission.
+- **Unfinished steps** (`wallet/pendingPayouts.ts`, 0.29.3): a to-do list in
+  the browser, no key material. Only swaps write it, one entry per payout
+  output: `{id, kind: "swap", txid (provisional until final), vout, tokenId,
+  base, createdAt, final}`, written before the relay, cleared when the wallet
+  accepted the take-in. Your tokens shows an "Unfinished" card while the list
+  is not empty, one "Finish" per entry: the final transaction from the token
+  instance's pools, the key re-derived from its inputs and checked against
+  the output, the take-in; on failure the error inline, the entry kept; no
+  automatic retry. Entries from before 0.29.3 (with their receipt or
+  remittance, script and AtomicBEEF) are listed and finished once with their
+  own bytes.
 - **Manifest** (`www/manifest.json`, `web/ui/public/manifest.json`):
   baskets `amm-swap`, `amm-pools`, `p color assets` (0.29.0: no `1sat-deposit`); protocols BRC-29 to self,
   `[2, "amm swap"]` to self, identity, AuthFetch's two, the action labels;
@@ -751,10 +761,10 @@ terms are root's message to `/@<tokenId>` (no page for it).
   are not listed, and the validator does not sign its swaps (`not_a_pool`)
   or rescind it. The pages close and recover it (the contract's own Close,
   the LP key from its deploy's input 0).
-- **Recovering a 0.13.0 pool from another browser.** Its LP keyID is random
-  and kept only in its row (and in the deploying browser until the row is
-  filed): a deploy whose filing failed can be recovered only in that
-  browser. The validator can still Rescind it.
+- **Recovering a 0.13.0 pool from another wallet.** Its LP keyID is random
+  and named only in the deploying wallet (its row, and since 0.29.3 its
+  deploy action's `amm-lp` label): another wallet cannot recover it. The
+  validator can still Rescind it.
 
 - **A paused submission asks nobody** (skein-overlay 0.20.0, the settled
   sync design): it resumes when its parent arrives by any path — a later
@@ -803,12 +813,10 @@ terms are root's message to `/@<tokenId>` (no page for it).
   `listActions({labels: ["amm-pool-deploy"], includeOutputs: true})` and
   take every output filed in `amm-pools` as a pool row, deduped with the
   basket's, each followed by `/spends` as before; Recover tries those rows'
-  LP keys before the keyIDs kept in the browser.
-- **Pending payouts.** A payout the wallet did not take in at once (sats or
-  tokens, or a Move back not yet admitted) is kept in the browser
-  (`wallet/pendingPayouts.ts`); 0.8.1's Pending payouts page, which retried
-  them, is gone with the old pages, and the Open Exchange pages have no
-  place for it.
+  LP keys (0.29.3: from the action's `amm-lp` label; nothing in the browser).
+- **Unfinished steps.** A swap payout the wallet did not take in at once is
+  listed in the browser (`wallet/pendingPayouts.ts`, no key material since
+  0.29.3) and finished from Your tokens' "Unfinished" card.
 - **Spends the chain app records of a transaction never submitted to the
   topic** (a pool spent by a transaction that bypassed the overlay): the
   listing does not fold them out (skein-overlay 0.12.1 "Beats"); the LP's

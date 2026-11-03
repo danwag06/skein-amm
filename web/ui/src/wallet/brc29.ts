@@ -93,11 +93,6 @@ export async function newBrc29Payout(
   return { remittance, publicKey, lockingScript: p2pkhHexOf(publicKey) };
 }
 
-/** The payout output's customInstructions: the remittance, so the wallet's own record of the action carries it. */
-export function paymentCustomInstructions(r: PaymentRemittance): string {
-  return JSON.stringify({ protocol: WALLET_PAYMENT, derivationPrefix: r.derivationPrefix, derivationSuffix: r.derivationSuffix, senderIdentityKey: r.senderIdentityKey });
-}
-
 /**
  * The final step: the wallet takes the payout in. `atomicBeef` is the
  * AtomicBEEF of the final transaction (all signatures in).

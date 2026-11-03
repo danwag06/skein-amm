@@ -12,14 +12,12 @@
  * suite: see the 0.29.0 CHANGELOG entry.)
  */
 import { BigNumber, Beef, ECDSA, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
-import { colorReceiptInstructions } from "@1sat/actions";
 import { ColorPlan, colorProtocolID } from "@bsv/color-permission-module";
 import { describe, expect, it } from "vitest";
 import { brc29Side, type KeyArgs } from "./brc29Wallet";
 import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapKeyID, swapSatsHoldings, swapTotals } from "../src/market/activeSwap";
 import { satsInputsOf, selectExactSatsInput, spendValid, tokenInputsOf } from "../src/market/swapAction";
 import { tokenP2pkhScript } from "../src/lp/poolDeploy";
-import { PendingPayoutStore, internalizeNow, type KV } from "../src/wallet/pendingPayouts";
 import v from "./fixtures/amm-topic-vectors.json";
 
 const key = (n: number) => new PrivateKey(n.toString(16).padStart(2, "0").repeat(32), 16);
@@ -131,10 +129,6 @@ function satsRow(satoshis: number, keyID: string, assetId = TOKEN) {
   };
 }
 
-const memKV = (): KV => {
-  const m = new Map<string, string>();
-  return { getItem: (k) => m.get(k) ?? null, setItem: (k, val) => void m.set(k, val) };
-};
 
 describe("into the swap basket (0.29.0): ONE send per swap — the module send with the tokens AND the legs' sats, or a plain sats send", () => {
   it("tokens + sats: keys under [2, \"amm swap\"] (self, a fresh keyID each); the plan a transfer out; the sats outputs after the tokens, filed in amm-swap by the createAction (sats: true); the page's submit; each token output filed with its key", async () => {
@@ -223,22 +217,19 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
   });
 });
 
-describe("move back (0.29.0): ONE wallet createAction — every amm-swap output of the token an explicit input, one output to a module receiving key of the user's own", () => {
-  it("createAction {inputBEEF, inputs (108-byte unlocks), one 1Color output carrying the receipt, no basket} → signAction with the page's unlocks; the wallet funds it; submitted; taken in with the receipt; no relinquishOutput", async () => {
+describe("move back (0.29.3): ONE module plan — every amm-swap row of the token a (foreign) explicit input, one output to a module receiving key of the user's own as the plan's owned output", () => {
+  it("createAction {p color plan transfer with ownedOutputs [0 → the receipt's remittance], inputBEEF, inputs (108-byte unlocks), one 1Color output, no basket, no customInstructions} → signAction with the page's unlocks; the wallet funds it; submitted; no take-in, nothing kept", async () => {
     const a = swapRow(30n, "amm-swap-a");
     const b = swapRow(12n, "amm-swap-b");
     const mine = satsRow(77, "amm-swap-s");
     const others = satsRow(66, "amm-swap-o", `${"ab".repeat(32)}_0`);
     const { wallet, calls } = fakeWallet([a, b, mine, others]);
-    const store = new PendingPayoutStore(memKV());
     const submitted: { topic: string; beef: number[] }[] = [];
     const r = await moveBack({
       wallet,
-      af: null,
       base: "http://x/amm",
       tokenId: TOKEN,
       meta: { sym: "TST" },
-      payouts: store,
       submit: async (topic, beef) => (submitted.push({ topic, beef }), { steak: { [topic]: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [0, 1] } } }),
     });
     expect(r.amount).toBe(42n);
@@ -253,14 +244,18 @@ describe("move back (0.29.0): ONE wallet createAction — every amm-swap output 
     expect(ib.findTxid(a.tx.id("hex"))).toBeTruthy();
     expect(ib.findTxid(b.tx.id("hex"))).toBeTruthy();
     expect(ib.findTxid(mine.tx.id("hex"))).toBeTruthy();
-    expect(create.labels).toEqual(["amm-swap"]); // no p color labels: the module is not in the path
+    expect(create.labels!.at(-1)).toBe("amm-swap");
+    const plan = ColorPlan.fromLabels(create.labels)!;
+    expect(plan).toMatchObject({ version: 1, assets: [TOKEN], operations: [{ assetId: TOKEN, operation: "transfer" }], inputPositions: [], changePositions: [] });
+    expect(plan.ownedOutputs).toHaveLength(1);
+    const receipt = plan.ownedOutputs[0]!;
+    expect(receipt).toMatchObject({ outputIndex: 0, assetId: TOKEN, senderIdentityKey: side.identityKey });
     expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
     expect(create.outputs).toHaveLength(1);
     const o = create.outputs![0]!;
     expect(o.satoshis).toBe(1);
-    expect(o.basket).toBeUndefined();
-    const receipt = JSON.parse(o.customInstructions!) as { assetId: string; derivationPrefix: string; derivationSuffix: string; senderIdentityKey: string };
-    expect(o.customInstructions).toBe(colorReceiptInstructions({ assetId: TOKEN, derivationPrefix: receipt.derivationPrefix, derivationSuffix: receipt.derivationSuffix, senderIdentityKey: side.identityKey }));
+    expect(o.basket).toBeUndefined(); // the module files it
+    expect(o.customInstructions).toBeUndefined(); // the module writes the custody
     const recv = side.publicKey({ protocolID: colorProtocolID(TOKEN, receipt.derivationPrefix, receipt.derivationSuffix), keyID: "color", counterparty: side.identityKey, forSelf: true });
     expect(o.lockingScript).toBe(tokenP2pkhScript(TOKEN, 42n, recv));
 
@@ -280,12 +275,8 @@ describe("move back (0.29.0): ONE wallet createAction — every amm-swap output 
     expect(submitted[0]!.beef).toEqual(r.beef);
     expect(r.submitted).toBe(`admitted under ${TOPIC} (outputs 0)`);
 
-    const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
-    expect(ia.outputs).toEqual([{ outputIndex: 0, protocol: "basket insertion", insertionRemittance: { basket: `p color ${TOKEN.slice(0, 64)}v0`, customInstructions: o.customInstructions } }]);
-    expect(r.internalized).toBe(true);
-    expect(calls.some((c) => c.method === "relinquishOutput")).toBe(false);
+    expect(calls.some((c) => c.method === "internalizeAction" || c.method === "relinquishOutput")).toBe(false);
     expect(r.errors).toEqual([]);
-    expect(store.list()).toEqual([]);
   });
 
   it("an unlock that does not validate: the action is aborted, nothing signed or broadcast", async () => {
@@ -293,41 +284,21 @@ describe("move back (0.29.0): ONE wallet createAction — every amm-swap output 
     // The row names a key that is not the one its output is locked to.
     const bad = { ...a, row: { ...a.row, customInstructions: JSON.stringify({ assetId: TOKEN, amount: "5", protocolID: SWAP, keyID: "amm-swap-other", counterparty: "self" }) } };
     const { wallet, calls } = fakeWallet([bad]);
-    await expect(moveBack({ wallet, af: null, base: "http://x/amm", tokenId: TOKEN, submit: async () => ({}) })).rejects.toThrow(/does not validate/);
+    await expect(moveBack({ wallet, base: "http://x/amm", tokenId: TOKEN, submit: async () => ({}) })).rejects.toThrow(/does not validate/);
     expect(calls.map((c) => c.method).filter((m) => ["createAction", "signAction", "abortAction", "internalizeAction"].includes(m))).toEqual(["createAction", "abortAction"]);
   });
 
-  it("not admitted yet: kept as a pending payout (its receipt and the BEEF), taken in on a retry", async () => {
-    const a = swapRow(9n, "amm-swap-c");
-    const { wallet, calls } = fakeWallet([a]);
-    const store = new PendingPayoutStore(memKV());
-    const r = await moveBack({ wallet, af: null, base: "http://x/amm", tokenId: TOKEN, payouts: store, submit: async () => ({}), admitted: async () => false });
-    expect(r.internalized).toBe(false);
-    expect(r.errors).toEqual(["the token topic has not admitted the move back yet: your wallet takes it in on a retry"]);
-    expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
-    const [rec] = store.list();
-    expect(rec).toMatchObject({ kind: "move-back", txid: r.txid, vout: 0, final: true, tokenId: TOKEN, receipt: { assetId: TOKEN, senderIdentityKey: side.identityKey } });
-    expect(rec!.remittance).toBeUndefined();
-    // The retry: the BEEF the record holds, no lookup; the module's receive with the receipt.
-    expect(await internalizeNow(wallet, store, null, "http://x/amm", rec!)).toEqual({ accepted: true, txid: r.txid });
-    const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: { insertionRemittance: { customInstructions: string } }[] };
-    expect(ia.outputs[0]!.insertionRemittance.customInstructions).toBe(colorReceiptInstructions(rec!.receipt!));
-    expect(store.list()).toEqual([]);
-  });
-
-  it("the submit fails after the wallet's broadcast: the receipt is kept, the error reported", async () => {
+  it("the page's submit fails after the wallet's broadcast: reported, nothing else to do (the module filed the output)", async () => {
     const a = swapRow(4n, "amm-swap-e");
     const { wallet } = fakeWallet([a]);
-    const store = new PendingPayoutStore(memKV());
-    const r = await moveBack({ wallet, af: null, base: "http://x/amm", tokenId: TOKEN, payouts: store, submit: async () => { throw new Error("502"); }, admitted: async () => false });
+    const r = await moveBack({ wallet, base: "http://x/amm", tokenId: TOKEN, submit: async () => { throw new Error("502"); } });
     expect(r.submitted).toBe("the submit failed");
     expect(r.errors[0]).toMatch(/submit: 502/);
-    expect(store.list()).toHaveLength(1);
   });
 
   it("nothing in the swap basket: an error before any action", async () => {
     const { wallet, calls } = fakeWallet([]);
-    await expect(moveBack({ wallet, af: null, base: "http://x/amm", tokenId: TOKEN })).rejects.toThrow(/holds no token/);
+    await expect(moveBack({ wallet, base: "http://x/amm", tokenId: TOKEN })).rejects.toThrow(/holds no token/);
     expect(calls.some((c) => c.method === "createAction")).toBe(false);
   });
 });

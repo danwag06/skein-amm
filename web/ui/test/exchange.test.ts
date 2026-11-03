@@ -12,7 +12,6 @@ import { ColorPlan } from "@bsv/color-permission-module";
 import { decodeOneColor } from "../src/pool";
 import { tokenP2pkhScript } from "../src/lp/poolDeploy";
 import { decode, encode } from "cbor2";
-import { P1SAT_PROTOCOL } from "@1sat/actions";
 import { OneColor } from "@1sat/templates";
 import {
   NO_TERMS_TEXT,

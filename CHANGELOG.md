@@ -4,6 +4,50 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.3 (2026-11-02)
+
+Pages only (web/ui). David's D and E, decided 2026-11-02.
+
+- **Move back and Close are module plans** (E). Each is ONE createAction
+  through the wallet's BRC-207 module: a `p color plan` transfer whose
+  `ownedOutputs` names output 0 (the token output to a NEW module receiving
+  key of the user's own, sender the user's identity). The module checks the
+  output pays that key and files it in `p color <assetTag>` with its custody
+  in the same call. To the module the `amm-swap` rows and the pool are
+  FOREIGN explicit inputs (not in a `p color` basket): checked admitted and
+  unspent on the token's overlay (a sats row adds nothing). The page unlocks
+  them at signAction; the module approves and submits; the wallet broadcasts.
+  Move back takes every `amm-swap` row of the token (tokens and its sats);
+  Close has no payout output, so the pool's sats go to the wallet's change.
+  No internalizeAction afterwards, no receipt kept, no pending entry.
+  `completeClose`, `awaitAdmitted`, `paymentCustomInstructions` and
+  `MovedBack.internalized` are gone.
+- **The deploy's LP key is named in its own action** (D). The LP key stays
+  random (BRC-29 to self, base64("amm-lp") + 16 random bytes). The deploy's
+  createAction carries the label `amm-lp <the derivationSuffix's bytes,
+  lowercase hex>` (`lpKeyLabel`; the wallet lowercases labels, so not
+  base64; 39 characters). A Recover's own action carries it too.
+  `historyPoolRows` reads `listActions({labels: ["amm-pool-deploy"],
+  includeLabels, includeOutputs, includeOutputLockingScripts})`: the keyID
+  from the label (`lpKeyIdOfLabels`), the pool from the output's script.
+  It is the FIRST source for Positions and Recover; the `amm-pools` row
+  stays as before. `PendingDeployStore` is gone.
+- **Unfinished steps** (E). The pending-payout store is now a to-do list
+  with no key material. Only swaps write it, one entry per payout output:
+  `{id, kind: "swap", txid, vout, tokenId, base, createdAt, final}`.
+  - Writing and clearing work as before: written before the relay, cleared
+    only when the wallet accepted the take-in.
+  - "Finish" (`internalizeNow`) finds the final transaction in the token
+    instance's pools, re-derives the key from its inputs (`legDerivation`)
+    and checks that output `vout` pays it (`swapPayoutOf`), then takes it in.
+  - Your tokens shows an "Unfinished" card only while the list is not empty,
+    one Finish per entry; on failure the error shows inline and the entry
+    stays. There is no automatic retry.
+  - Entries from before 0.29.3 (receipt or remittance, script, AtomicBEEF,
+    as Dan's move back) are listed and finished once with their own bytes.
+    Nothing writes those fields any more.
+- vitest 205; zig 79.
+
 ## 0.29.2 (2026-11-02)
 
 - **The `amm-swap` staging keys are derived, not random** (David). In the

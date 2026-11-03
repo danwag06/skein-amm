@@ -6,8 +6,8 @@ validator's key, nonce and affirmation (layout 2, `src/pool/artifact.ts`;
 0.29.1: layout 1, before 0.13.0, is dropped — it decodes as no pool).
 
 - **Pool deploy** (`deployPool`): the LP key is a BRC-29 key to self under
-  a fresh random keyID (`newLpKey`), kept in this browser
-  (`PendingDeployStore`, localStorage) until the row is filed;
+  a fresh random keyID (`newLpKey`), named in the deploy action by the label
+  `amm-lp <hex>` (0.29.3; nothing kept in the browser);
   `amm.pool.affirm {pool, satoshis}` (the pool as proposed: ValidatorPubKey
   33 zero bytes, Nonce 32 zero bytes, Affirmation empty) →
   `{validatorPubKey, nonce, signature}`, checked (the key the validator's
@@ -17,14 +17,14 @@ validator's key, nonce and affirmation (layout 2, `src/pool/artifact.ts`;
   `randomizeOutputs: false` (the module selects the token inputs and adds
   their change; the input BEEF of its own inputs is the module's). The row's
   customInstructions carry the nonce.
-- **Close** (`prepareClose`, `Close(lpSig)`, outputs free; 0.29.1: one wallet
-  createAction, the wallet pays the miner): every sat to the LP key as a BRC-29 payment to self, every token
-  to a NEW module receiving key of the user's own (sender the user's
-  identity), taken in through the module with its receipt (a second
-  `internalizeAction`; kept in pending payouts when the module does not take
-  it at once). No `amm-swap`, no Move back.
+- **Close** (`prepareClose`, `Close(lpSig)`, outputs free; 0.29.3: one module
+  plan, the wallet pays the miner): the pool a foreign explicit input, one
+  output — every token to a NEW module receiving key of the user's own
+  (sender the user's identity), the plan's owned output, filed by the module
+  in the same call; the pool's sats go to the wallet's change. No take-in, no
+  `amm-swap`, no Move back.
 - **Recover** (`recoverPosition`): tries the LP keyIDs of the deploy history,
-  then those this browser kept (a 0.13.0 pool's LP keyID is on no chain).
+  read from each deploy action's `amm-lp <hex>` label (0.29.3; a 0.13.0 pool's LP keyID is on no chain).
 - **Positions**: a rescinded pool (the validator's Rescind: ValidatorPubKey
   cleared) is shown as such; the LP closes it as any.
 
@@ -91,13 +91,12 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
 - **Close**: the contract pays the tokens to the LP key (a BRC-29 key, not a
   module key), so they are filed in `amm-swap` under that key; Move back
   takes them into the wallet's balance.
-- **Move back** (`moveBack`; 0.29.0): ONE wallet createAction — every
-  `amm-swap` output of the token an explicit input (`inputBEEF`, 108-byte
-  unlocks the page fills at signAction), one output to a module receiving
-  key of the user's own (sender: the user's identity) with the receipt as
-  its customInstructions; the wallet funds it, broadcasts it and marks the
-  inputs spent; submitted to this skein's token topic, then taken in through
-  the module with its receipt. No relinquishOutput.
+- **Move back** (`moveBack`; 0.29.3): ONE module plan — every `amm-swap` row
+  of the token (its sats rows too) a foreign explicit input (`inputBEEF`,
+  108-byte unlocks the page fills at signAction), one output to a module
+  receiving key of the user's own (sender: the user's identity), the plan's
+  owned output, filed by the module; the wallet funds it, broadcasts it and
+  marks the inputs spent; submitted to this skein's token topic. No take-in.
 - **Manifest**: baskets `amm-swap`, `amm-pools`, `p color assets` (0.29.0: no `1sat-deposit`); protocols
   BRC-29 to self, `[2, "amm swap"]` to self, identity, AuthFetch's two, the
   action labels; no `bsv21`, `1sat` or `[0, "onesat"]`, no spending

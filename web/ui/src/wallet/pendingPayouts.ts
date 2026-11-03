@@ -1,32 +1,31 @@
 /**
- * Pending payouts: every payout output the page has built and the wallet has
- * not yet internalized, kept durably in the browser so the final step
- * (`internalizeAction`) can run later — after a reload, or for a swap once
- * the validator returns the signed transaction. Two kinds of output (0.12.0):
- * sats, a BRC-29 wallet payment (the wallet derives the output's private key
- * from exactly the remittance stored here); tokens, an output locked to a
- * BRC-207 module receiving key, taken in through the module with the receipt
- * stored here (src/wallet/color.ts `receiptOutput`; the module asks the
- * overlay that the output is admitted and unspent).
+ * Unfinished steps (skein-amm 0.29.3, David Case 2026-11-02): a to-do list in the browser, not a
+ * key store. One entry per swap payout output the wallet has not taken in yet, written before the
+ * swap is relayed and cleared only when the wallet accepted the take-in. It holds no key material:
+ * the payout keys are derived from the final transaction's own inputs (`legDerivation`,
+ * src/market/swapAction.ts), so "Finish" (`internalizeNow`) finds the transaction on the
+ * instance, re-derives the key, checks the output pays it and internalizes (BRC-29 payment, or the
+ * module's receipt). Move back and Close write nothing (0.29.3: the module files their output in
+ * the same createAction).
  *
- * Where the remittance lives at each step:
- *   1. built: in the createAction call (the output's customInstructions, so
- *      the wallet's own record of the action carries it) and here, written
- *      the moment the transaction is built (key `txid:vout`);
- *   2. final: unchanged here (a swap's record is re-keyed to the final txid
- *      when it is found);
- *   3. internalized: in the wallet (`internalizeAction` with
- *      `paymentRemittance`); the record here is cleared only after that
- *      call succeeds.
+ * Entry: `{id, kind: "swap", txid, vout, tokenId, base, createdAt, final}`; `id` = `txid:vout`;
+ * `txid` provisional (the validator's signature changes it) until `final`.
  *
- * Storage: `localStorage["amm-poc.pending-payouts.v1"]`, one JSON object
- * `{[txid:vout]: PendingPayout}`; every access is guarded (private windows,
- * blocked storage), and tests pass their own `KV`.
+ * Entries written before 0.29.3 carry the bytes they were written with (`receipt` or `remittance`,
+ * `lockingScript`, `satoshis`, `atomicBeef`; kinds "swap", "move-back", "close",
+ * "remove-liquidity"): still listed and finished once with those bytes; nothing writes them now.
+ *
+ * Storage: `localStorage["amm-poc.pending-payouts.v1"]`, one JSON object `{[txid:vout]: entry}`;
+ * every access is guarded (private windows, blocked storage), and tests pass their own `KV`.
  */
-import { Beef, Utils, type WalletInterface } from "@bsv/sdk";
+import { Beef, PublicKey, Transaction, Utils, type InternalizeOutput, type WalletInterface } from "@bsv/sdk";
 import { lookupPoolOutput, queryPools, type SignedFetch } from "../lib/overlay";
-import { internalizePayout, type PaymentRemittance } from "./brc29";
-import { receiptOutput, type ColorReceipt } from "./color";
+import { WALLET_PAYMENT, brc29PublicKey, identityKeyOf, internalizePayout, p2pkhHexOf, type PaymentRemittance } from "./brc29";
+import { newReceivingKey, receiptOutput, type ColorReceipt } from "./color";
+import { PoolTemplate, decodeOneColor } from "../pool";
+import { sdkTokenId } from "../lib/tokenId";
+import { legDerivation, legKeyInputOf } from "../market/swapAction";
+import { tokenP2pkhScript } from "../lp/poolDeploy";
 
 export const PENDING_PAYOUTS_KEY = "amm-poc.pending-payouts.v1";
 
@@ -36,29 +35,27 @@ export interface PendingPayout {
   kind: "swap" | "remove-liquidity" | "move-back" | "close";
   txid: string;
   vout: number;
-  satoshis: number;
-  /** The output's script, hex (P2PKH to the BRC-29 key, or the 1Color output to the module key): how the final transaction is recognised when its txid is not known yet. */
-  lockingScript: string;
-  /** A sats payout: its BRC-29 remittance. */
-  remittance?: PaymentRemittance;
-  /** A token payout: its BRC-207 receipt. */
-  receipt?: ColorReceipt;
-  /** The transaction's AtomicBEEF, hex, when the page holds it (a move back): no lookup needed. */
-  atomicBeef?: string;
-  /**
-   * false while the txid is provisional: a swap is built with the
-   * validator's signature slot empty and the wallet's inputs unsigned, so its
-   * txid changes once they are in.
-   */
-  final: boolean;
-  /** The pool's token id (`<txid>_<vout>`): the `ls_amm_<assetId>` query that finds the transaction's BEEF names it. */
+  /** The token (`<txid>_<vout>`): the pools whose BEEF carries the transaction. */
   tokenId: string;
-  /** The pool output the transaction creates (`txid_0`), when it has one (not a closing RemoveLiquidity). */
-  poolOutpoint?: string;
-  /** The wallet's action reference (abortAction releases a swap that is discarded). */
-  reference?: string;
-  description: string;
+  /** The token instance's base URL (0.29.3); absent on an old entry. */
+  base?: string;
   createdAt: number;
+  /** false while the txid is provisional (a swap before the validator signs). */
+  final: boolean;
+  // Before 0.29.3 (read only: an old entry is finished with its own bytes).
+  satoshis?: number;
+  lockingScript?: string;
+  remittance?: PaymentRemittance;
+  receipt?: ColorReceipt;
+  atomicBeef?: string;
+  poolOutpoint?: string;
+  reference?: string;
+  description?: string;
+}
+
+/** Whether an entry carries the key bytes of a pre-0.29.3 record. */
+export function isLegacyPayout(p: PendingPayout): boolean {
+  return p.receipt !== undefined || p.remittance !== undefined;
 }
 
 /** The subset of Storage the store needs. */
@@ -161,16 +158,16 @@ export function onPendingPayoutsChange(fn: () => void): () => void {
 }
 
 // ---------------------------------------------------------------------------
-// Finding the final transaction on the instance
+// Finishing
 // ---------------------------------------------------------------------------
 
-/** The output pays the record's script and amount. */
+/** An old entry's output pays its script and amount. */
 function pays(tx: { outputs: { satoshis?: number; lockingScript: { toHex(): string } }[] }, p: PendingPayout): boolean {
   const o = tx.outputs[p.vout];
   return !!o && o.satoshis === p.satoshis && o.lockingScript.toHex() === p.lockingScript;
 }
 
-/** In a BEEF: the transaction (by txid when final, else by the payout script) as AtomicBEEF. */
+/** An old entry, in a BEEF: the transaction (by txid when final, else by the payout script) as AtomicBEEF. */
 function findIn(beefBytes: number[], p: PendingPayout): { txid: string; beef: number[] } | null {
   const beef = Beef.fromBinary(beefBytes);
   for (const btx of beef.txs) {
@@ -181,84 +178,116 @@ function findIn(beefBytes: number[], p: PendingPayout): { txid: string; beef: nu
   return null;
 }
 
-/**
- * The final transaction's AtomicBEEF from the instance's lookup:
- *  1. `{outpoint: poolOutpoint, beef: true}` — the pool output the
- *     transaction created (or its newest continuation, whose BEEF carries the
- *     transaction as an ancestor), when the record names one and is final;
- *  2. otherwise every live pool of the token (`{}`), each with `{outpoint,
- *     beef: true}`, searched for a transaction paying the record's script
- *     and amount at `vout` (a swap's final txid is not known in advance; the
- *     BRC-29 key is fresh, so the script identifies it).
- * Null when the instance has no such transaction (not final yet, or no
- * longer in any live pool's BEEF).
- */
+/** The BEEFs the instance answers for the token's pools: the final txid's pool output (and its newest continuation), else every live pool. */
+async function* poolBeefs(af: SignedFetch | null, base: string, p: PendingPayout): AsyncGenerator<number[]> {
+  const first = p.final ? (p.poolOutpoint ?? `${p.txid}_0`) : null;
+  if (first) {
+    try {
+      yield (await lookupPoolOutput(af, base, p.tokenId, first)).beef;
+    } catch {
+      /* fall through to the scan */
+    }
+  }
+  for (const pool of await queryPools(af, base, p.tokenId, {})) {
+    try {
+      yield (await lookupPoolOutput(af, base, p.tokenId, pool.outpoint)).beef;
+    } catch {
+      /* next pool */
+    }
+  }
+}
+
+/** An old entry's final transaction: its own AtomicBEEF, else the instance's pools. */
 export async function findPayoutBeef(af: SignedFetch | null, base: string, p: PendingPayout): Promise<{ txid: string; beef: number[] } | null> {
   if (p.atomicBeef) {
     const hit = findIn(Utils.toArray(p.atomicBeef, "hex"), p);
     if (hit) return hit;
   }
-  if (p.final && p.poolOutpoint) {
-    try {
-      const out = await lookupPoolOutput(af, base, p.tokenId, p.poolOutpoint);
-      const hit = findIn(out.beef, p);
-      if (hit) return hit;
-    } catch {
-      /* fall through to the scan */
-    }
-  }
-  const pools = await queryPools(af, base, p.tokenId, {});
-  for (const pool of pools) {
-    try {
-      const out = await lookupPoolOutput(af, base, p.tokenId, pool.outpoint);
-      const hit = findIn(out.beef, p);
-      if (hit) return hit;
-    } catch {
-      /* next pool */
-    }
+  for await (const b of poolBeefs(af, base, p)) {
+    const hit = findIn(b, p);
+    if (hit) return hit;
   }
   return null;
 }
 
 /**
- * Internalize one recorded payout with `atomicBeef` (the final transaction).
- * Clears the record only after the wallet accepted it. A swap record found
- * under a different (final) txid is re-keyed first.
+ * Whether output `vout` of `tx` (a swap: the pool at input 0 and output 0) pays this wallet's leg
+ * key, re-derived from the transaction's own inputs (`legDerivation`): the take-in for it, or null.
+ * A 1Color output is a receipt (sender the pool's validator), a P2PKH one a BRC-29 payment.
  */
-export async function internalizePending(
-  wallet: WalletInterface,
-  store: PendingPayoutStore,
-  p: PendingPayout,
-  found: { txid: string; beef: number[] },
-): Promise<{ accepted: boolean; txid: string }> {
-  let rec = p;
-  if (found.txid !== p.txid || !p.final) rec = store.finalize(p.id, found.txid) ?? { ...p, id: payoutId(found.txid, p.vout), txid: found.txid, final: true };
-  const r = rec.receipt
-    ? await wallet.internalizeAction({ tx: found.beef, outputs: [receiptOutput(rec.vout, rec.receipt)], description: rec.description.slice(0, 50), labels: ["amm-payout"] })
-    : rec.remittance
-      ? await internalizePayout(wallet, found.beef, { outputIndex: rec.vout, remittance: rec.remittance }, rec.description)
-      : { accepted: false };
-  if (r.accepted) store.remove(rec.id);
+export async function swapPayoutOf(wallet: WalletInterface, tx: Transaction, vout: number, tokenId: string): Promise<InternalizeOutput | null> {
+  const pool = tx.outputs[0] ? PoolTemplate.decode(tx.outputs[0].lockingScript) : null;
+  const out = tx.outputs[vout];
+  const first = tx.outputs[1];
+  if (!pool || !out || !first || vout < 1 || tx.inputs.length < 2) return null;
+  const bsvIn = decodeOneColor(first.lockingScript.toBinary()) !== null;
+  let keyInput: string;
+  try {
+    keyInput = legKeyInputOf(tx, bsvIn);
+  } catch {
+    return null;
+  }
+  const d = legDerivation(keyInput, vout === 1 ? "payout" : "commission");
+  const script = out.lockingScript.toHex();
+  const token = decodeOneColor(out.lockingScript.toBinary());
+  if (token) {
+    const sdkId = sdkTokenId(tokenId);
+    const k = await newReceivingKey(wallet, sdkId, pool.state.validatorIdentity, d);
+    return tokenP2pkhScript(sdkId, token.amount, k.publicKey) === script ? receiptOutput(vout, k.receipt) : null;
+  }
+  const identity = await identityKeyOf(wallet);
+  const pub = await brc29PublicKey(wallet, d);
+  if (p2pkhHexOf(PublicKey.fromString(pub).toString()) !== script) return null;
+  return { outputIndex: vout, protocol: WALLET_PAYMENT, paymentRemittance: { ...d, senderIdentityKey: identity } };
+}
+
+/** A swap entry's final transaction on the instance, with its take-in: the final txid's, else any swap in a live pool's BEEF paying this wallet's derived key at `vout`. */
+async function findSwapPayout(wallet: WalletInterface, af: SignedFetch | null, base: string, p: PendingPayout): Promise<{ txid: string; beef: number[]; output: InternalizeOutput } | null> {
+  const seen = new Set<string>();
+  for await (const bytes of poolBeefs(af, base, p)) {
+    const beef = Beef.fromBinary(bytes);
+    for (const btx of beef.txs) {
+      if (!btx.tx || seen.has(btx.txid) || (p.final && btx.txid !== p.txid)) continue;
+      seen.add(btx.txid);
+      const output = await swapPayoutOf(wallet, btx.tx, p.vout, p.tokenId);
+      if (output) return { txid: btx.txid, beef: beef.toBinaryAtomic(btx.txid), output };
+    }
+  }
+  return null;
+}
+
+const NOT_FOUND = (p: PendingPayout) =>
+  p.final
+    ? `the instance's lookup has no transaction ${p.txid.slice(0, 16)}… paying this output (not admitted yet, or no longer in a live pool's BEEF)`
+    : "the final transaction is not on the instance yet: the validator has not returned the signed swap yet";
+
+/**
+ * "Finish" (the Unfinished card): find the final transaction on the instance, take the output in,
+ * and clear the entry only when the wallet accepted. An old entry with its own bytes; a 0.29.3
+ * swap entry with its key re-derived from the transaction.
+ */
+export async function internalizeNow(wallet: WalletInterface, store: PendingPayoutStore, af: SignedFetch | null, base: string, p: PendingPayout): Promise<{ accepted: boolean; txid: string }> {
+  const description = (p.description ?? (p.kind === "swap" ? "AMM swap payout" : `AMM ${p.kind}`)).slice(0, 50);
+  let found: { txid: string; beef: number[] };
+  let output: InternalizeOutput | null;
+  if (isLegacyPayout(p)) {
+    const hit = await findPayoutBeef(af, base, p);
+    if (!hit) throw new Error(NOT_FOUND(p));
+    found = hit;
+    output = p.receipt ? receiptOutput(p.vout, p.receipt) : null;
+    if (!output && p.remittance) {
+      const r = await internalizePayout(wallet, found.beef, { outputIndex: p.vout, remittance: p.remittance }, description);
+      if (r.accepted) store.remove(p.id);
+      return { accepted: r.accepted, txid: found.txid };
+    }
+  } else {
+    const hit = await findSwapPayout(wallet, af, base, p);
+    if (!hit) throw new Error(NOT_FOUND(p));
+    found = hit;
+    output = hit.output;
+  }
+  if (!output) return { accepted: false, txid: found.txid };
+  const r = await wallet.internalizeAction({ tx: found.beef, outputs: [output], description, labels: ["amm-payout"] });
+  if (r.accepted) store.remove(p.id);
   return { accepted: r.accepted, txid: found.txid };
 }
-
-/** "Internalize now": find the final transaction on the instance, then internalize. */
-export async function internalizeNow(wallet: WalletInterface, store: PendingPayoutStore, af: SignedFetch | null, base: string, p: PendingPayout): Promise<{ accepted: boolean; txid: string }> {
-  const found = await findPayoutBeef(af, base, p);
-  if (!found) {
-    throw new Error(
-      p.final
-        ? `the instance's lookup has no transaction ${p.txid.slice(0, 16)}… paying this output (not admitted yet, or no longer in a live pool's BEEF)`
-        : "the final transaction is not on the instance yet: the validator has not returned the signed swap yet",
-    );
-  }
-  return internalizePending(wallet, store, p, found);
-}
-
-/** The AtomicBEEF bytes' txid (for the immediate path, where the page holds the final transaction). */
-export function atomicTxid(atomicBeef: number[]): string {
-  const b = Beef.fromBinary(atomicBeef);
-  if (!b.atomicTxid) throw new Error("not AtomicBEEF");
-  return b.atomicTxid;
-}
-

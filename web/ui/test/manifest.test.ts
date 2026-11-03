@@ -40,7 +40,17 @@ describe("manifest.json", () => {
 
   it("protocols: BRC-29 to self, the exchange's [2, \"amm swap\"] to self, identity key, AuthFetch's two, and every action label the pages use (no onesat: the funding keys are level 0)", () => {
     const used = new Set<string>();
-    for (const src of sources(join(root, "src"))) for (const m of src.matchAll(/labels: \[([^\]]*)\]/g)) for (const l of m[1]!.matchAll(/"([^"]+)"/g)) used.add(l[1]!);
+    // Every quoted label in a `labels: [...]` literal (brackets balanced: a plan's labels nest).
+    for (const src of sources(join(root, "src"))) {
+      for (const m of src.matchAll(/labels: \[/g)) {
+        let depth = 1;
+        let i = m.index! + m[0].length;
+        const from = i;
+        for (; i < src.length && depth > 0; i++) depth += src[i] === "[" ? 1 : src[i] === "]" ? -1 : 0;
+        const body = src.slice(from, i - 1).replace(/\[[^\[\]]*\]/g, "");
+        for (const l of body.matchAll(/"([^"]+)"/g)) used.add(l[1]!);
+      }
+    }
     expect([...used].sort()).toEqual(["amm-close", "amm-payout", "amm-pool-deploy", "amm-swap"]);
     expect(g.protocolPermissions.map((p: { protocolID: unknown; counterparty?: string }) => [p.protocolID, p.counterparty])).toEqual([
       [[2, "3241645161d8"], "self"],
