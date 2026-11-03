@@ -77,7 +77,7 @@ import { RelayError, SWAP_TERMS_FN, callApp, callUrl, readBytes, swapTerms, type
 import { pendingSwapPayouts, planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlannedLeg, type SatsInput, type TokenInput } from "../market/swapAction";
 import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapTotals } from "../market/activeSwap";
 import { relaySwap, type SwapOutcome } from "../market/swapFlow";
-import { PendingPayoutStore, internalizeNow, onPendingPayoutsChange, type PendingPayout } from "../wallet/pendingPayouts";
+import { PendingPayoutStore, internalizeNow, isLegacyPayout, onPendingPayoutsChange, type PendingPayout } from "../wallet/pendingPayouts";
 import { formatAmount } from "../lp/amounts";
 import { basketRows } from "../lp/wallet";
 import { buildInventory, decodeTokenRow, deployIcon } from "../lp/inventory";
@@ -295,6 +295,8 @@ export interface WalletToken {
   outputs: number;
   /** Held in the exchange's active swap basket (`amm-swap`): spent by swap legs, or moved back. */
   inSwaps: bigint;
+  /** Sats staged in `amm-swap` for the token's swap legs (0.29.6): spent by swap legs, or moved back. */
+  swapSats: number;
   /** Registered on this exchange. */
   onExchange: boolean;
 }
@@ -1224,7 +1226,8 @@ async function baseHolding(outpoint: string): Promise<{ base: string; tokenId: s
  * The connected wallet's 1Color tokens (0.12.0: the BRC-207 module's): the
  * assets `p color assets` lists, each balance the sum of its held value
  * outputs there (0.27.0: one read for the whole list, granted once by the
- * pages' group permissions; no per-token `p color balance` here), and what the active swap basket (`amm-swap`) holds of each; symbol,
+ * pages' group permissions; no per-token `p color balance` here), and what the active swap basket (`amm-swap`) holds of each
+ * (its tokens and, 0.29.6, the sats staged for its legs: a token with only sats staged is listed too); symbol,
  * decimals and icon from the token list, else the token's deploy
  * (the discovery lookup `ls_color`, BRC-207 `color-admission`, at the host root, 0.20.1), else a deploy the wallet holds. Each marked on this
  * exchange (registered) or not.
@@ -1233,7 +1236,7 @@ export async function myTokens(): Promise<WalletToken[]> {
   const { wallet } = needWallet();
   const [held, swaps, topics, meta] = await Promise.all([
     heldOutputs(wallet),
-    swapTotals(wallet).catch(() => new Map<string, { amount: bigint; outputs: number }>()),
+    swapTotals(wallet).catch(() => new Map<string, { amount: bigint; outputs: number; sats: number }>()),
     enabledTokens().catch(() => [] as EnabledToken[]),
     tokenMeta(),
   ]);
@@ -1255,18 +1258,20 @@ export async function myTokens(): Promise<WalletToken[]> {
         balance,
         outputs: t?.valueOutputs ?? 0,
         inSwaps: swaps.get(tokenId)?.amount ?? 0n,
+        swapSats: swaps.get(tokenId)?.sats ?? 0,
         onExchange: registered.has(tokenId),
       };
     }),
   );
-  return out.filter((t) => t.balance > 0n || t.inSwaps > 0n).sort((a, b) => a.sym.localeCompare(b.sym) || a.tokenId.localeCompare(b.tokenId));
+  return out.filter((t) => t.balance > 0n || t.inSwaps > 0n || t.swapSats > 0).sort((a, b) => a.sym.localeCompare(b.sym) || a.tokenId.localeCompare(b.tokenId));
 }
 
 /**
  * "Move back" (src/market/activeSwap.ts; 0.29.3: a module plan): every `amm-swap` row of the
  * token (and its staged sats) spent in one action whose one output the wallet's module files
  * into the token's balance in the same call; submitted to this skein's token topic too. The
- * recovery path for a swap that got stuck.
+ * recovery path for a swap that got stuck. 0.29.6: with only sats staged for the token, one plain
+ * createAction over them with no outputs (the wallet's change takes them).
  */
 export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; amount: bigint; errors: string[] }> {
   const { wallet } = needWallet();
@@ -1566,12 +1571,19 @@ export interface Unfinished {
   txid: string;
   /** false while the swap's txid is provisional. */
   final: boolean;
+  /** 0.29.6: whether Dismiss may drop it — a swap never signed (not final), not an entry with its own bytes (pre-0.29.3). */
+  dismissable: boolean;
   createdAt: number;
+}
+
+/** Whether an entry may be dismissed (0.29.6): not final and carrying no key bytes of its own. A final entry or an old-shape one is the only pointer to money. */
+function dismissable(p: PendingPayout): boolean {
+  return p.final === false && !isLegacyPayout(p);
 }
 
 /** The browser's unfinished steps (src/wallet/pendingPayouts.ts), oldest first. */
 export function unfinished(): Unfinished[] {
-  return context.payouts.list().map((p) => ({ id: p.id, kind: p.kind, tokenId: p.tokenId, txid: p.txid, final: p.final, createdAt: p.createdAt }));
+  return context.payouts.list().map((p) => ({ id: p.id, kind: p.kind, tokenId: p.tokenId, txid: p.txid, final: p.final, dismissable: dismissable(p), createdAt: p.createdAt }));
 }
 
 /** The unfinished steps, kept current as entries are written and cleared (this tab and others). */
@@ -1586,6 +1598,18 @@ export function useUnfinished(): Unfinished[] {
  * entry from before 0.29.3, its own bytes), the wallet's take-in; the entry cleared only when the
  * wallet accepted. Throws the reason otherwise (the entry stays).
  */
+/**
+ * "Dismiss" (0.29.6, David Case 2026-11-03): forget an unsigned swap's entry — a leg the validator
+ * never signed (timed out or refused) paid nothing to the user. Removes the entry and nothing else;
+ * refuses a final entry and an old-shape one (the only pointer to money).
+ */
+export function dismissUnfinished(id: string): void {
+  const p = context.payouts.get(id);
+  if (!p) return;
+  if (!dismissable(p)) throw new Error("This step cannot be dismissed: it points to an output paid to you");
+  context.payouts.remove(id);
+}
+
 export async function finishUnfinished(id: string): Promise<{ accepted: boolean; txid: string }> {
   const { wallet, signedFor } = needWallet();
   const p = context.payouts.get(id);

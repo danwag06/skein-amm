@@ -3,11 +3,13 @@
  * this exchange or not; beside the balance, what the swap basket holds of it,
  * with "Move back" (0.12.0: the recovery path for a stuck swap). 0.29.3: an "Unfinished" card, shown
  * only while the browser lists unfinished steps (a swap payout the wallet has not taken in), one
- * "Finish" per step; no automatic retry.
+ * "Finish" per step; no automatic retry. 0.29.6: a swap never signed gets "Dismiss" too (drops the
+ * entry only); the swap-basket line shows the sats staged for the token, Move back offered for
+ * tokens or sats.
  */
 import { useState } from "react";
-import { COLOR_DEPLOY_HREF, finishUnfinished, moveBackTokens, useMyTokens, useUnfinished, type Session, type Unfinished, type WalletToken } from "../data/exchange";
-import { ago, fmtAmount } from "./format";
+import { COLOR_DEPLOY_HREF, dismissUnfinished, finishUnfinished, moveBackTokens, useMyTokens, useUnfinished, type Session, type Unfinished, type WalletToken } from "../data/exchange";
+import { ago, fmtAmount, fmtSats } from "./format";
 import { NeedWallet, Notice, TokenName } from "./bits";
 
 function Status({ t }: { t: WalletToken }) {
@@ -18,11 +20,12 @@ function Status({ t }: { t: WalletToken }) {
 function SwapBasket({ t }: { t: WalletToken }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (t.inSwaps === 0n) return null;
+  if (t.inSwaps === 0n && t.swapSats === 0) return null;
   return (
     <span className="status-cell">
       <span className="muted small">
-        In the swap basket {fmtAmount(t.inSwaps, t.dec)}{" "}
+        In the swap basket {fmtAmount(t.inSwaps, t.dec)}
+        {t.swapSats > 0 ? ` · ${fmtSats(BigInt(t.swapSats))} sats staged` : ""}{" "}
         <button
           type="button"
           className="btn btn-outline"
@@ -85,6 +88,27 @@ function UnfinishedRow({ u }: { u: Unfinished }) {
         >
           {busy ? "Finishing…" : "Finish"}
         </button>
+        {u.dismissable && (
+          <>
+            {" "}
+            <button
+              type="button"
+              className="btn btn-outline"
+              disabled={busy}
+              onClick={() => {
+                setError(null);
+                try {
+                  dismissUnfinished(u.id);
+                } catch (e: unknown) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              }}
+              aria-label="Dismiss: forget this unsigned swap; nothing was paid to you"
+            >
+              Dismiss
+            </button>
+          </>
+        )}
         {error && <span className="bad small"> {error}</span>}
       </span>
     </li>

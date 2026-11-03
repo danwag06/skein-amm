@@ -97,6 +97,14 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
   receiving key of the user's own (sender: the user's identity), the plan's
   owned output, filed by the module; the wallet funds it, broadcasts it and
   marks the inputs spent; submitted to this skein's token topic. No take-in.
+  0.29.6: with no token row and only sats rows staged for the token, ONE
+  plain createAction (`moveBackSats`, labels `["amm-swap"]`, no `p color`
+  plan): the sats rows explicit inputs, NO outputs (the wallet's change
+  takes them and pays the fee); nothing submitted. Your tokens lists a token
+  with only sats staged and shows "<N> sats staged" on its swap-basket line.
+- **Unfinished** (0.29.6): an entry not final (a swap never signed) has
+  "Dismiss" beside Finish, which drops the entry only; final and pre-0.29.3
+  entries have none.
 - **Manifest**: baskets `amm-swap`, `amm-pools`, `p color assets` (0.29.0: no `1sat-deposit`); protocols
   BRC-29 to self, `[2, "amm swap"]` to self, identity, AuthFetch's two, the
   action labels; no `bsv21`, `1sat` or `[0, "onesat"]`, no spending

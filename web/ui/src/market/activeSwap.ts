@@ -40,11 +40,14 @@
  *     the wallet funds the fee and takes the sats rows into its change; the
  *     module approves and submits, the wallet broadcasts. The page submits it
  *     to this skein's token topic too. Nothing is taken in afterwards and
- *     nothing is kept in the browser.
+ *     nothing is kept in the browser. *     (0.29.6) With no token row and only sats rows staged for the token
+ *     (a sats-in leg that failed): one plain createAction (no `p color`
+ *     labels), the sats rows as explicit inputs and no outputs — the wallet
+ *     keeps them as its change and pays the fee (`moveBackSats`).
  */
 import { Beef, P2PKH, PublicKey, Transaction, Utils, type InternalizeOutput, type WalletInterface } from "@bsv/sdk";
 import { decodeOneColor } from "../pool";
-import { parseOutpoint, sdkTokenId, tokenIdOfWire } from "../lib/tokenId";
+import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
 import { basketBeef, basketRows } from "../lp/wallet";
 import { tokenP2pkhScript } from "../lp/poolDeploy";
 import { steakText, submitToOverlay, type Steak } from "../lp/close";
@@ -83,17 +86,30 @@ export async function swapSatsHoldings(wallet: WalletInterface): Promise<SatsInp
   return satsInputsOf(await basketRows(wallet, SWAP_BASKET));
 }
 
-/** What `amm-swap` holds, per token id: the amount and the number of outputs (tokens only: the sats rows are no token's). */
-export async function swapTotals(wallet: WalletInterface): Promise<Map<string, { amount: bigint; outputs: number }>> {
-  const totals = new Map<string, { amount: bigint; outputs: number }>();
-  for (const r of await basketRows(wallet, SWAP_BASKET)) {
+/**
+ * What `amm-swap` holds, per token id: the token amount and the number of token outputs, and
+ * (0.29.6) the sats staged for the token's legs (the sats rows whose customInstructions name its
+ * `assetId`). A token with only sats staged has amount 0n and outputs 0.
+ */
+export async function swapTotals(wallet: WalletInterface): Promise<Map<string, { amount: bigint; outputs: number; sats: number }>> {
+  const totals = new Map<string, { amount: bigint; outputs: number; sats: number }>();
+  const rows = await basketRows(wallet, SWAP_BASKET);
+  for (const r of rows) {
     if (!r.lockingScript) continue;
     const t = decodeOneColor(Utils.toArray(r.lockingScript, "hex"));
     if (!t || t.role !== "value" || !t.idBytes) continue;
     const id = tokenIdOfWire(t.idBytes);
-    const s = totals.get(id) ?? { amount: 0n, outputs: 0 };
+    const s = totals.get(id) ?? { amount: 0n, outputs: 0, sats: 0 };
     s.amount += t.amount;
     s.outputs++;
+    totals.set(id, s);
+  }
+  for (const r of satsInputsOf(rows)) {
+    const ref = r.assetId ? parseTokenId(r.assetId) : null;
+    if (!ref) continue;
+    const id = tokenIdText(ref);
+    const s = totals.get(id) ?? { amount: 0n, outputs: 0, sats: 0 };
+    s.sats += r.satoshis;
     totals.set(id, s);
   }
   return totals;
@@ -305,9 +321,10 @@ export async function moveBack(i: {
   const topic = `tm_color_${assetId}`;
   const rows = await basketRows(wallet, SWAP_BASKET);
   const holdings = tokenInputsOf(rows, assetId);
-  if (holdings.length === 0) throw new Error(`the swap basket holds no ${sym}`);
   // 0.29.1 (David): the token's sats rows (staged for its legs) go in too; the wallet's change takes their sats.
   const satsRows = satsInputsOf(rows).filter((r) => r.assetId === assetId);
+  if (holdings.length === 0 && satsRows.length > 0) return await moveBackSats(wallet, sym, satsRows);
+  if (holdings.length === 0) throw new Error(`the swap basket holds no ${sym}`);
   const amount = holdings.reduce((a, h) => a + h.amount, 0n);
   const sources = await swapHoldingBeef(wallet);
   for (const h of [...holdings, ...satsRows]) if (!sources.findTxid(h.txid)) throw new Error(`the wallet's BEEF lacks the swap basket output ${h.outpoint}`);
@@ -339,4 +356,30 @@ export async function moveBack(i: {
     out.errors.push(`submit: ${err instanceof Error ? err.message : String(err)}`);
   }
   return out;
+}
+
+/**
+ * Move back with only sats staged for the token (0.29.6, David Case 2026-11-03: a sats-in leg that
+ * failed leaves sats and no token): ONE plain wallet createAction (no `p color` labels, the module
+ * is not in the path) with the token's `amm-swap` sats rows as explicit inputs (their sources in
+ * `inputBEEF`) and NO outputs: the wallet keeps everything as its change and pays the fee from it.
+ * The page unlocks the rows at signAction; the wallet broadcasts and marks the rows spent itself
+ * (no relinquish, no take-in, nothing kept). Nothing is submitted to an overlay (no token moves).
+ */
+async function moveBackSats(wallet: WalletInterface, sym: string, satsRows: SatsInput[]): Promise<MovedBack> {
+  const sources = await swapHoldingBeef(wallet);
+  for (const h of satsRows) if (!sources.findTxid(h.txid)) throw new Error(`the wallet's BEEF lacks the swap basket output ${h.outpoint}`);
+  const { txid, tx: beef } = await runAppSignedAction(
+    wallet,
+    {
+      description: describe(`AMM move back: ${sym} sats`),
+      inputBEEF: sources.toBinary(),
+      inputs: satsRows.map((h) => ({ outpoint: h.outpoint, unlockingScriptLength: P2PKH_UNLOCK_LENGTH, inputDescription: describe(`Sats staged for a ${sym} swap`) })),
+      outputs: [],
+      labels: ["amm-swap"],
+      options: { randomizeOutputs: false, acceptDelayedBroadcast: false },
+    },
+    (tx) => swapBasketSpends(wallet, tx, satsRows, "move back"),
+  );
+  return { txid, amount: 0n, beef, submitted: "not submitted (no token moved)", errors: [] };
 }

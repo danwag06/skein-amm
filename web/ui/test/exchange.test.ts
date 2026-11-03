@@ -7,7 +7,7 @@
  * (src/fixtures/vectors.zig's copy).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Beef, LockingScript, PrivateKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
+import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { ColorPlan } from "@bsv/color-permission-module";
 import { decodeOneColor } from "../src/pool";
 import { tokenP2pkhScript } from "../src/lp/poolDeploy";
@@ -618,6 +618,15 @@ describe("exchange.ts, wired", () => {
     // Only what the swap basket holds: still listed, with "Move back".
     connect({ swaps: [swapRow] });
     expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, balance: 0n, outputs: 0, inSwaps: 50_000n })]);
+  });
+
+  it("myTokens (0.29.6): the sats staged in amm-swap for a token's legs (sats rows naming its assetId) — beside its tokens, and a token with ONLY sats staged (no balance, no token row) still listed", async () => {
+    const satsRow = (n: number, satoshis: number, assetId: string) => ({ outpoint: `${"5a".repeat(32)}.${n}`, satoshis, lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toPublicKey().toAddress()).toHex(), customInstructions: JSON.stringify({ sats: true, assetId, protocolID: [2, "amm swap"], keyID: `amm-swap-${n}:sats`, counterparty: "self" }) });
+    const swapRow = { outpoint: `${poolDeploy.id("hex")}.1`, satoshis: 1, lockingScript: poolDeploy.outputs[1]!.lockingScript.toHex(), customInstructions: JSON.stringify({ assetId: TOKEN, amount: "50000", protocolID: [2, "amm swap"], keyID: "amm-swap-1", counterparty: "self" }) };
+    connect({ swaps: [swapRow, satsRow(0, 4_000, TOKEN), satsRow(1, 1_000, TOKEN)] });
+    expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, balance: 0n, inSwaps: 50_000n, swapSats: 5_000 })]);
+    connect({ swaps: [satsRow(2, 2_500, TOKEN)] });
+    expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, sym: "TST", balance: 0n, outputs: 0, inSwaps: 0n, swapSats: 2_500 })]);
   });
 
   it("myTokens (0.20.1): a token not enabled here — its metadata from its deploy, the discovery lookup ls_color (BRC-207 color-admission, topic tm_color) at the HOST ROOT (plain fetch), not /@<tokenId>", async () => {

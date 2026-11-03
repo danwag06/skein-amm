@@ -4,6 +4,35 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.6 (2026-11-03)
+
+- **Unfinished: Dismiss for a swap that was never signed** (David: "that's
+  something you need to fix"). A swap entry is written before the relay
+  runs (`final: false`) and cleared only by a take-in, so a leg that timed
+  out or was refused stayed forever. An entry with `final === false` and no
+  bytes of its own gets "Dismiss" beside Finish (`dismissUnfinished`:
+  `PendingPayoutStore.remove`, nothing else; aria-label "Dismiss: forget
+  this unsigned swap; nothing was paid to you"). A final entry and an
+  old-shape one (receipt / remittance bytes) get none: they are the only
+  pointer to money. Texts unchanged.
+- **Move back for staged sats alone.** `swapTotals` counts, per token, the
+  sats of the `amm-swap` sats rows naming its `assetId`; Your tokens lists a
+  token with only sats staged (balance 0) and its swap-basket line reads
+  "In the swap basket <tokens> · <N> sats staged"; Move back is offered for
+  tokens or sats. `moveBack` with token rows is unchanged (module plan,
+  sweeps the sats rows). With no token row and ≥1 sats row: ONE plain
+  createAction (`moveBackSats`: no `p color` labels, labels `["amm-swap"]`),
+  the sats rows explicit inputs (108-byte unlocks, sources in `inputBEEF`),
+  NO outputs — the wallet keeps them as its change and pays the fee; the
+  page's P2PKH unlocks at signAction (`runAppSignedAction`); the wallet
+  broadcasts and marks the rows spent itself; nothing submitted, nothing
+  taken in, nothing kept. Proven against the real wallet-toolbox 2.15.0
+  (Wallet + StorageKnex + WalletPermissionsManager + color module 0.1.0,
+  MockServices validating every script): accepted with `outputs: []`, two
+  sats rows in (7,500), one change output (7,465), the rows
+  `spendable=false`, another token's row untouched, the module not called.
+- Pages only. vitest 214 (+9).
+
 ## 0.29.5 (2026-11-03)
 
 - **The validator's submission is a fully proven BEEF** (David: "So fix it").
