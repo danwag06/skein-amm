@@ -74,8 +74,8 @@ import { liveSenders, pricesFromBeats, depthOf, type TokenPrice } from "../marke
 import { buildPlanRequest, goneFromLookup, quote as planQuote } from "../market/plan";
 import { validatorStatus } from "../market/view";
 import { RelayError, SWAP_TERMS_FN, callApp, callUrl, readBytes, swapTerms, type AuthFetchLike } from "../market/relay";
-import { pendingSwapPayouts, prepareSwap, selectExactTokenInputs, type TokenInput } from "../market/swapAction";
-import { moveBack, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapTotals } from "../market/activeSwap";
+import { pendingSwapPayouts, planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlannedLeg, type SatsInput, type TokenInput } from "../market/swapAction";
+import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapTotals } from "../market/activeSwap";
 import { relaySwap, type SwapOutcome } from "../market/swapFlow";
 import { PendingPayoutStore } from "../wallet/pendingPayouts";
 import { formatAmount } from "../lp/amounts";
@@ -87,7 +87,7 @@ import { PoolTemplate } from "../pool";
 import { colorOutput, historyPoolRows, mergePoolRows, positionRowsOf, loadPosition, type LoadedPosition } from "../lp/positions";
 import { recoverPosition as recoverPoolRow } from "../lp/recover";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "../wallet/color";
-import { completeClose, prepareClose, submitToOverlay } from "../lp/close";
+import { awaitAdmitted, completeClose, prepareClose, submitToOverlay } from "../lp/close";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -276,7 +276,7 @@ export interface RecoverResult {
 
 export interface CloseRequest {
   outpoint: string;
-  /** The miner fee left from the pool, sats. 0 = the fee is funded from another wallet input. */
+  /** The miner fee left from the pool, sats. 0 = the wallet's own action pays it (0.29.0; a pool from before 0.13.0 needs more than 0). */
   bsvFee: bigint;
 }
 
@@ -914,57 +914,82 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
     legs.push(result);
     runnable.push({ leg, result, pool, peerId: validator.peerId });
   }
-  // Tokens in (0.12.0): each leg spends `amm-swap` outputs carrying exactly its amount in; the
-  // legs that what the basket holds does not cover get one output each from ONE module send.
-  const inputsOf = new Map<LegResult, TokenInput[]>();
-  let tokenBeef: Awaited<ReturnType<typeof swapHoldingBeef>> | undefined;
-  if (direction === "tokenToBsv" && runnable.length > 0) {
-    let candidates = await swapHoldings(wallet, tokenId);
-    const short: typeof runnable = [];
-    for (const r of runnable) {
-      const pick = selectExactTokenInputs(candidates, r.leg.amountIn);
-      if (!pick) {
-        short.push(r);
-        continue;
+  // 0.29.0: every leg spends only `amm-swap` outputs — tokens in, outputs carrying exactly its
+  // amount in (0.12.0); and one sats output of exactly the leg's sats. What the basket does not
+  // cover is staged by ONE send (tokens missing: the module send, the sats with it; else a plain
+  // sats send), then each leg is built from the basket.
+  const tokensIn = direction === "tokenToBsv";
+  let tokenCandidates = tokensIn && runnable.length > 0 ? await swapHoldings(wallet, tokenId) : [];
+  let satsCandidates = runnable.length > 0 ? await swapSatsHoldings(wallet) : [];
+  const staged: { r: (typeof runnable)[number]; poolOutput: Awaited<ReturnType<typeof lookupPoolOutput>>; planned: PlannedLeg; tokens: TokenInput[] | null; sats: SatsInput | null }[] = [];
+  for (const r of runnable) {
+    try {
+      const poolOutput = await lookupPoolOutput(af, base, tokenId, r.leg.outpoint);
+      let tokens: TokenInput[] | null = null;
+      if (tokensIn) {
+        tokens = selectExactTokenInputs(tokenCandidates, r.leg.amountIn);
+        if (tokens) tokenCandidates = tokenCandidates.filter((c) => !tokens!.includes(c));
       }
-      inputsOf.set(r.result, pick);
-      candidates = candidates.filter((c) => !pick.includes(c));
+      // A leg whose tokens are still to be staged gets one output of 1 sat (sendToSwapBasket).
+      const planned = await planSwapLeg({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg: r.leg, pool: r.pool, poolOutput, commissionPkh: terms.commissionPkh, ...(tokensIn ? { tokenInputs: tokens ?? [{ satoshis: 1, amount: r.leg.amountIn }] } : {}), satsPerKb: FEE_RATE_SATS_PER_KB });
+      const sats = selectExactSatsInput(satsCandidates, planned.funding.satoshis);
+      if (sats) satsCandidates = satsCandidates.filter((c) => c !== sats);
+      staged.push({ r, poolOutput, planned, tokens, sats });
+    } catch (e) {
+      r.result.error = errText(e);
     }
-    let sent: number[] | undefined;
-    if (short.length > 0) {
-      const s = await sendToSwapBasket(wallet, base, tokenId, short.map((r) => r.leg.amountIn), { sym: p.sym });
-      sent = s.tx;
-      short.forEach((r, n) => {
-        const h = s.holdings[n];
-        if (h) inputsOf.set(r.result, [h]);
-        else r.result.error = `the swap basket send has no output for this leg${s.errors.length ? ` (${s.errors.join("; ")})` : ""}`;
-      });
-    }
-    tokenBeef = await swapHoldingBeef(wallet, sent);
   }
-  for (const { leg, result, pool, peerId } of runnable) {
-    let tokenInputs: TokenInput[] | undefined;
-    if (direction === "tokenToBsv") {
-      tokenInputs = inputsOf.get(result);
-      if (!tokenInputs) {
-        result.error ??= `no ${p.sym} in the swap basket for exactly ${formatAmount(leg.amountIn, p.dec)}`;
-        continue;
-      }
+  const shortTokens = staged.filter((x) => tokensIn && !x.tokens);
+  const shortSats = staged.filter((x) => !x.sats);
+  let sent: number[] | undefined;
+  if (shortTokens.length > 0) {
+    const s = await sendToSwapBasket(wallet, base, tokenId, { tokens: shortTokens.map((x) => x.r.leg.amountIn), sats: shortSats.map((x) => x.planned.funding.satoshis) }, { sym: p.sym });
+    sent = s.tx;
+    const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
+    shortTokens.forEach((x, n) => {
+      const h = s.holdings[n];
+      if (h) x.tokens = [h];
+      else x.r.result.error = `the swap basket send has no output for this leg${why}`;
+    });
+    shortSats.forEach((x, n) => {
+      const h = s.sats[n];
+      if (h) x.sats = h;
+      else x.r.result.error ??= `the swap basket send has no sats output for this leg${why}`;
+    });
+  } else if (shortSats.length > 0) {
+    const s = await sendSatsToSwapBasket(wallet, shortSats.map((x) => x.planned.funding.satoshis), { sym: p.sym });
+    sent = s.tx;
+    const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
+    shortSats.forEach((x, n) => {
+      const h = s.sats[n];
+      if (h) x.sats = h;
+      else x.r.result.error = `the swap basket send has no sats output for this leg${why}`;
+    });
+  }
+  const holdingBeef = staged.length > 0 ? await swapHoldingBeef(wallet, sent) : undefined;
+  for (const { r, poolOutput, planned, tokens, sats } of staged) {
+    const { leg, result, pool, peerId } = r;
+    if (tokensIn && !tokens) {
+      result.error ??= `no ${p.sym} in the swap basket for exactly ${formatAmount(leg.amountIn, p.dec)}`;
+      continue;
+    }
+    if (!sats) {
+      result.error ??= `no sats in the swap basket for this leg`;
+      continue;
     }
     try {
-      const poolOutput = await lookupPoolOutput(af, base, tokenId, leg.outpoint);
-      const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, tokenInputs, ...(tokenBeef ? { tokenBeef } : {}), satsPerKb: FEE_RATE_SATS_PER_KB });
+      const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, ...(tokens ? { tokenInputs: tokens } : {}), satsInput: sats, ...(holdingBeef ? { holdingBeef } : {}), planned, satsPerKb: FEE_RATE_SATS_PER_KB });
       const pending = pendingSwapPayouts(prepared, tokenId);
-      for (const r of pending) context.payouts.save(r);
+      for (const x of pending) context.payouts.save(x);
       running.push(
         relaySwap({ wallet, authFetch: af, base }, prepared, peerId)
           .catch((e): SwapOutcome => ({ status: "unknown", reason: errText(e) }))
           .then((o) => {
-            for (const r of pending) {
+            for (const x of pending) {
               if (o.status === "accepted") {
-                if (o.completed.internalized) context.payouts.remove(r.id);
-                else context.payouts.finalize(r.id, o.txid);
-              } else if (o.status !== "unknown") context.payouts.remove(r.id);
+                if (o.completed.internalized) context.payouts.remove(x.id);
+                else context.payouts.finalize(x.id, o.txid);
+              } else if (o.status !== "unknown") context.payouts.remove(x.id);
             }
             if (o.status === "accepted") {
               result.status = "filled";
@@ -1135,11 +1160,11 @@ export async function deployPosition(req: DeployRequest): Promise<DeployResult> 
 
 /**
  * Closes a position (src/lp/close.ts): everything in the pool returns to the
- * wallet, less `bsvFee` (the miner fee left from the pool; 0: funded from a
- * wallet output); submitted to this skein's overlay.
+ * wallet, less `bsvFee` (the miner fee left from the pool; 0: 0.29.0, the
+ * wallet's own action pays it); submitted to this skein's overlay.
  */
 export async function closePosition(req: CloseRequest): Promise<CloseResult> {
-  const { wallet } = needWallet();
+  const { wallet, signedFor } = needWallet();
   let pos = loaded.get(req.outpoint);
   if (!pos) {
     await myPositions();
@@ -1157,8 +1182,13 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
     bsvFee: req.bsvFee,
     satsPerKb: FEE_RATE_SATS_PER_KB,
   });
-  await submitToOverlay(await tokenBaseOf(pos.row.tokenId), prepared.topic, prepared.beef);
-  await completeClose(wallet, prepared, pos.row.deployOutpoint, context.payouts);
+  const base = await tokenBaseOf(pos.row.tokenId);
+  const steak = await submitToOverlay(base, prepared.topic, prepared.beef);
+  // The module takes the tokens in only once the topic admits them (0.29.0: waited for here, as Move back does).
+  if (prepared.receipt && !(steak.steak?.[prepared.topic]?.outputsToAdmit.includes(prepared.receipt.outputIndex) ?? false)) {
+    await awaitAdmitted(signedFor(base), base, sdkTokenId(pos.row.tokenId), prepared.txid, prepared.receipt.outputIndex).catch(() => false);
+  }
+  await completeClose(wallet, prepared, context.payouts);
   loaded.delete(req.outpoint);
   emit();
   return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount, tokensTo: prepared.version === 2 ? "wallet" : "swap basket" };
@@ -1258,7 +1288,7 @@ export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; 
   const { wallet, signedFor } = needWallet();
   const meta = await tokenMeta();
   const base = await tokenBaseOf(tokenId);
-  const r = await moveBack({ wallet, af: signedFor(base), base, tokenId, meta: { sym: symOf(meta, tokenId) }, satsPerKb: FEE_RATE_SATS_PER_KB, payouts: context.payouts });
+  const r = await moveBack({ wallet, af: signedFor(base), base, tokenId, meta: { sym: symOf(meta, tokenId) }, payouts: context.payouts });
   emit();
   return { txid: r.txid, amount: r.amount, internalized: r.internalized, errors: r.errors };
 }

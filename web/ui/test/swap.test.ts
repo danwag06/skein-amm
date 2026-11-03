@@ -2,10 +2,11 @@
  * The Swap page's pure parts: market view shaping from the instance's
  * answers (recorded from the v2 instance, test/fixtures/instance-v2), the
  * plan display, races, and the swap itself against a fake BRC-100 wallet and
- * a fake relay: the funding action's shape, the swap's inputs validated with
- * `Spend` (sats in and tokens in, over the amm-topic fixture pools), the
- * relay's call shape and status polling, acceptance (internalize +
- * relinquish) and refusal / timeout (abortAction).
+ * a fake relay: the leg's sats (0.29.0: one `amm-swap` sats output of exactly
+ * the planned amount, no funding transaction), the swap's inputs validated
+ * with `Spend` (sats in and tokens in, over the amm-topic fixture pools), the
+ * relay's call shape and status polling, acceptance (internalize, no
+ * relinquish) and refusal / timeout (nothing to undo).
  */
 import { colorReceiptInstructions } from "@1sat/actions";
 import { colorProtocolID } from "@bsv/color-permission-module";
@@ -30,16 +31,18 @@ import { buildMarketView, marginalPrice, validatorStatus } from "../src/market/v
 import { buildPlanRequest, goneFromLookup, livePools, quote, type SwapForm } from "../src/market/plan";
 import { PEER, beatEntry, liveFor } from "./liveRead";
 import {
-  FUNDING_TAG,
   assetIdOf,
   pendingSwapPayouts,
+  planSwapLeg,
   prepareSwap,
   selectExactTokenInputs,
   spendValid,
   swapFunding,
   swapTxSize,
   tokenInputsOf,
+  type PlanLegInput,
   type PreparedSwap,
+  type SatsInput,
 } from "../src/market/swapAction";
 import { dagBytes, parseSwapTerms, readBytes, swapTerms, toPoolState, type AuthFetchLike } from "../src/market/relay";
 import { relaySwap, checkAgain } from "../src/market/swapFlow";
@@ -269,6 +272,8 @@ const atomic = (tx: Transaction) => {
 function fakeWallet(o: { fundingVout?: number; moveFunding?: boolean } = {}) {
   const calls: { method: string; args: unknown }[] = [];
   const side = brc29Side(walletRoot);
+  /** The `amm-swap` sats outputs' transactions (0.29.0), in the swap basket's BEEF. */
+  const held: Transaction[] = [];
   type K = { identityKey?: boolean; protocolID?: [0 | 1 | 2, string]; keyID?: string; counterparty?: string; forSelf?: boolean };
   let unsigned: Transaction | undefined;
   const w = {
@@ -304,6 +309,7 @@ function fakeWallet(o: { fundingVout?: number; moveFunding?: boolean } = {}) {
       calls.push({ method: "listOutputs", args });
       const b = new Beef();
       b.mergeTransaction(poolDeploy);
+      for (const t of held) b.mergeTransaction(t);
       return { totalOutputs: 1, outputs: [], BEEF: b.toBinary() };
     },
     async abortAction(args: unknown) {
@@ -319,7 +325,32 @@ function fakeWallet(o: { fundingVout?: number; moveFunding?: boolean } = {}) {
       return side.internalizeAction(args);
     },
   };
-  return { wallet: w as unknown as WalletInterface, calls, side };
+  return { wallet: w as unknown as WalletInterface, calls, side, held, fundingVout: o.fundingVout ?? 1 };
+}
+
+const SWAP_KEYS: [2, string] = [2, "amm swap"];
+let satsKeyN = 0;
+
+/** An `amm-swap` sats output of `satoshis` (0.29.0: what the swap-basket send stages), funded from fund:`w.fundingVout`, held by the fake wallet. */
+async function stagedSats(w: ReturnType<typeof fakeWallet>, satoshis: number): Promise<SatsInput> {
+  const keyID = `amm-swap-s${++satsKeyN}`;
+  const pub = w.side.publicKey({ protocolID: SWAP_KEYS, keyID, counterparty: "self", forSelf: true });
+  const tx = new Transaction();
+  tx.addInput({ sourceTXID: fund.id("hex"), sourceOutputIndex: w.fundingVout, sourceTransaction: fund, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+  tx.addOutput({ satoshis, lockingScript: new P2PKH().lock(PublicKey.fromString(pub).toAddress()) });
+  tx.addOutput({ satoshis: fund.outputs[w.fundingVout]!.satoshis! - satoshis - 200, lockingScript: new P2PKH().lock(taker.toAddress()) });
+  tx.inputs[0]!.unlockingScript = await new P2PKH().unlock(taker).sign(tx, 0);
+  w.held.push(tx);
+  const txid = tx.id("hex");
+  return { outpoint: `${txid}.0`, txid, vout: 0, satoshis, lockingScript: tx.outputs[0]!.lockingScript.toHex(), protocolID: SWAP_KEYS, keyID, counterparty: "self" };
+}
+
+/** planSwapLeg, then an `amm-swap` sats output of exactly the planned amount, then prepareSwap (as executeSwap does). */
+async function legOf(w: ReturnType<typeof fakeWallet>, i: Omit<PlanLegInput, "wallet"> & { tokenInputs?: ReturnType<typeof tokenInputsOf>; now?: number }) {
+  const planned = await planSwapLeg({ ...i, wallet: w.wallet });
+  const satsInput = await stagedSats(w, planned.funding.satoshis);
+  const prepared = await prepareSwap({ ...i, wallet: w.wallet, planned, satsInput });
+  return { planned, satsInput, prepared };
 }
 
 const stateOf = (tx: Transaction, validatorIdentityKey: string): PoolState => {
@@ -348,8 +379,8 @@ const tokenRow = () => {
 async function satsIn(w = fakeWallet(), commissionPkh: string | null = v.commissionPkh) {
   const pool = stateOf(poolDeploy, v.identity);
   const leg = legFor(pool, "bsvToToken", 20_000n);
-  const prepared = await prepareSwap({ wallet: w.wallet, tokenId: TOKEN_ID, meta: { sym: "TST", dec: 0 }, direction: "bsvToToken", leg, pool, poolOutput: { beef: atomic(poolDeploy), outputIndex: 0 }, commissionPkh, satsPerKb: RATE, now: 1_000 });
-  return { ...w, pool, leg, prepared, vkey: identity.deriveChild(anyone, `1-amm pool-${v.nonce}`) }; // 0.13.0: the deploy's key is keyed by the nonce
+  const { prepared, satsInput } = await legOf(w, { tokenId: TOKEN_ID, meta: { sym: "TST", dec: 0 }, direction: "bsvToToken", leg, pool, poolOutput: { beef: atomic(poolDeploy), outputIndex: 0 }, commissionPkh, satsPerKb: RATE, now: 1_000 });
+  return { ...w, pool, leg, prepared, satsInput, vkey: identity.deriveChild(anyone, `1-amm pool-${v.nonce}`) }; // 0.13.0: the deploy's key is keyed by the nonce
 }
 
 /** Tokens in on the fixture's second pool (swap_bsv_in:0), 50,000 tokens from pool_deploy:1. */
@@ -357,8 +388,8 @@ async function tokensIn(w = fakeWallet({ fundingVout: 2 }), commissionPkh: strin
   const pool = stateOf(swap1, v.identity);
   const leg = legFor(pool, "tokenToBsv", 50_000n);
   const inputs = selectExactTokenInputs(tokenInputsOf([tokenRow()], TOKEN_ID), 50_000n)!;
-  const prepared = await prepareSwap({ wallet: w.wallet, tokenId: TOKEN_ID, direction: "tokenToBsv", leg, pool, poolOutput: { beef: atomic(swap1), outputIndex: 0 }, commissionPkh, tokenInputs: inputs, satsPerKb: RATE, now: 1_000 });
-  return { ...w, pool, leg, prepared, vkey: validatorKey(poolDeploy.id("hex"), 0) };
+  const { prepared, satsInput } = await legOf(w, { tokenId: TOKEN_ID, direction: "tokenToBsv", leg, pool, poolOutput: { beef: atomic(swap1), outputIndex: 0 }, commissionPkh, tokenInputs: inputs, satsPerKb: RATE, now: 1_000 });
+  return { ...w, pool, leg, prepared, satsInput, vkey: validatorKey(poolDeploy.id("hex"), 0) };
 }
 
 /** What the validator does: fills its slot (over the raw swap it received). */
@@ -369,7 +400,7 @@ async function validatorSigns(p: PreparedSwap, raw: number[], vkey: PrivateKey):
   return tx;
 }
 
-describe("the funding transaction", () => {
+describe("the leg's sats (0.29.0: an amm-swap output)", () => {
   it("the recorded lookup BEEF (v2 instance, before the commission) parses; its pool is the pre-commission template, which no longer decodes", () => {
     // Recorded when the instance ran the previous fixtures (pool_deploy without
     // CommissionBps); the swaps below use the current pool_deploy as the lookup's AtomicBEEF.
@@ -381,35 +412,22 @@ describe("the funding transaction", () => {
     expect(assetIdOf(TOKEN_ID)).toBe(Utils.toHex(tokenDeploy.hash() as number[]));
   });
 
-  it("sats in: one exact P1SAT output in 1sat-deposit with the hold, created and signed nosend; the wallet call sequence", async () => {
-    const { calls, prepared, side } = await satsIn();
+  it("sats in (0.29.0): the leg spends ONE amm-swap sats output of exactly the planned amount — no createAction, no 1sat-deposit; the wallet call sequence", async () => {
+    const { calls, prepared, satsInput } = await satsIn();
     const f = prepared.funding;
-    expect(calls.map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "createAction", "signAction", "createSignature", "getPublicKey"]);
-    const fundingKeyArgs = calls[1]!.args as { keyID: string };
-    expect(fundingKeyArgs).toEqual({ protocolID: [0, "onesat"], keyID: expect.stringMatching(/^amm-funding-[0-9a-f]{16}$/), counterparty: "self", forSelf: true });
-    const keyID = fundingKeyArgs.keyID;
-    const script = new P2PKH().lock(side.privateKey({ protocolID: [0, "onesat"], keyID }).toAddress()).toHex();
-    const expires = 1_000 + 120_000;
-    expect(calls[2]!.args).toEqual({
-      description: "AMM swap funding",
-      labels: ["amm-swap"],
-      outputs: [
-        {
-          lockingScript: script,
-          satoshis: f.satoshis,
-          outputDescription: "AMM swap funding sats → TST",
-          basket: "1sat-deposit",
-          tags: [FUNDING_TAG, `hold:${expires}`],
-          customInstructions: JSON.stringify({ protocolID: [0, "onesat"], keyID, counterparty: "self", amm: { pool: `${poolDeploy.id("hex")}_0`, expires } }),
-        },
-      ],
-      options: { signAndProcess: false, randomizeOutputs: false, noSend: true },
-    });
-    expect(calls[3]!.args).toEqual({ reference: "ref-1", spends: {}, options: { noSend: true } });
-    expect(prepared.expires).toBe(expires);
-    expect(f.outpoint).toBe(`${f.txid}.0`);
-    // The signature over the funding input uses the key named in the customInstructions.
-    expect(calls[4]!.args).toMatchObject({ protocolID: [0, "onesat"], keyID, counterparty: "self" });
+    // The payout key (the module receiving key: one getPublicKey); the swap basket's BEEF; the sats input's signature.
+    expect(calls.map((c) => c.method)).toEqual(["getPublicKey", "listOutputs", "createSignature", "getPublicKey"]);
+    expect(calls.some((c) => c.method === "createAction" || c.method === "signAction")).toBe(false);
+    expect(calls[1]!.args).toEqual({ basket: "amm-swap", include: "entire transactions", limit: 10000 });
+    expect(f.input).toEqual(satsInput);
+    expect(f.outpoint).toBe(satsInput.outpoint);
+    expect(f.txid).toBe(satsInput.txid);
+    expect(f.satoshis).toBe(satsInput.satoshis);
+    // The relay's funding transaction: the sats output's own, as AtomicBEEF.
+    expect(Beef.fromBinary(f.atomicBeef).atomicTxid).toBe(satsInput.txid);
+    expect(prepared.expires).toBe(1_000 + 120_000);
+    // The signature over the sats input uses the key its row names.
+    expect(calls[2]!.args).toMatchObject({ protocolID: [2, "amm swap"], keyID: satsInput.keyID, counterparty: "self" });
   });
 
   it("the amount is exact: amount in + 1 sat for the token payout (the fees and the commission are part of amount in), plus the fee at the rate over the final size", async () => {
@@ -434,22 +452,37 @@ describe("the funding transaction", () => {
     expect(own.prepared.funding.outputs).toBe(20_001);
   });
 
-  it("a wallet that moves the funding output is refused and the funding action aborted", async () => {
-    const w = fakeWallet({ moveFunding: true });
-    await expect(satsIn(w)).rejects.toThrow(/funding output/);
-    expect(w.calls.at(-1)).toEqual({ method: "abortAction", args: { reference: "ref-1" } });
+  it("a sats output of another amount, or token inputs other than those planned: refused before anything is signed", async () => {
+    const w = fakeWallet();
+    const pool = stateOf(poolDeploy, v.identity);
+    const leg = legFor(pool, "bsvToToken", 20_000n);
+    const i = { tokenId: TOKEN_ID, direction: "bsvToToken" as const, leg, pool, poolOutput: { beef: atomic(poolDeploy), outputIndex: 0 }, commissionPkh: v.commissionPkh, satsPerKb: RATE };
+    const planned = await planSwapLeg({ ...i, wallet: w.wallet });
+    const off = await stagedSats(w, planned.funding.satoshis + 1);
+    const before = w.calls.length;
+    await expect(prepareSwap({ ...i, wallet: w.wallet, planned, satsInput: off })).rejects.toThrow(/needs exactly/);
+    expect(w.calls.slice(before).some((c) => c.method === "createSignature")).toBe(false);
+    // Tokens in: two token inputs where the leg was planned with one (the fee differs).
+    const t = fakeWallet({ fundingVout: 2 });
+    const tpool = stateOf(swap1, v.identity);
+    const tleg = legFor(tpool, "tokenToBsv", 50_000n);
+    const ti = { tokenId: TOKEN_ID, direction: "tokenToBsv" as const, leg: tleg, pool: tpool, poolOutput: { beef: atomic(swap1), outputIndex: 0 }, commissionPkh: v.commissionPkh, satsPerKb: RATE };
+    const tplanned = await planSwapLeg({ ...ti, wallet: t.wallet, tokenInputs: [{ satoshis: 1, amount: 50_000n }] });
+    const [one] = tokenInputsOf([tokenRow()], TOKEN_ID);
+    const split = [{ ...one!, amount: 25_000n }, { ...one!, outpoint: `${"ee".repeat(32)}.1`, amount: 25_000n }];
+    await expect(prepareSwap({ ...ti, wallet: t.wallet, planned: tplanned, tokenInputs: split, satsInput: await stagedSats(t, tplanned.funding.satoshis) })).rejects.toThrow(/planned with/);
   });
 
   it("a pool that moved since the plan is refused before the wallet is asked", async () => {
     const pool = { ...stateOf(poolDeploy, v.identity), outpoint: `${"cc".repeat(32)}_0` };
     const { wallet, calls } = fakeWallet();
-    await expect(prepareSwap({ wallet, tokenId: TOKEN_ID, direction: "bsvToToken", leg: legFor(pool, "bsvToToken", 20_000n), pool, poolOutput: { beef: atomic(poolDeploy), outputIndex: 0 }, commissionPkh: null, satsPerKb: RATE })).rejects.toThrow(/the pool moved/);
+    await expect(planSwapLeg({ wallet, tokenId: TOKEN_ID, direction: "bsvToToken", leg: legFor(pool, "bsvToToken", 20_000n), pool, poolOutput: { beef: atomic(poolDeploy), outputIndex: 0 }, commissionPkh: null, satsPerKb: RATE })).rejects.toThrow(/the pool moved/);
     expect(calls).toEqual([]);
   });
 });
 
 describe("the swap transaction", () => {
-  it("sats in: [pool, funding] → exactly the contract's outputs; the funding input validates; with the validator's signature every input does", async () => {
+  it("sats in: [pool, the amm-swap sats output] → exactly the contract's outputs; the sats input validates; with the validator's signature every input does", async () => {
     const { prepared, vkey, side } = await satsIn();
     const s = prepared.swap;
     expect(s.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([`${poolDeploy.id("hex")}.0`, prepared.funding.outpoint]);
@@ -467,9 +500,10 @@ describe("the swap transaction", () => {
     expect(s.outputs[1]!.lockingScript.toHex().endsWith(new P2PKH().lock(PublicKey.fromString(recv).toAddress()).toHex())).toBe(true);
   });
 
-  it("tokens in: [pool, funding, token] with the token input's BEEF from the wallet; funding = 1 sat per 1Color fee or commission output − the token input's sat + fee; all valid", async () => {
+  it("tokens in: [pool, the sats output, token] with their BEEF from the wallet's swap basket; the sats = 1 sat per 1Color fee or commission output − the token input's sat + fee; all valid", async () => {
     const { prepared, calls, vkey, side } = await tokensIn();
-    expect(calls.map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "listOutputs", "getPublicKey", "createAction", "signAction", "createSignature", "getPublicKey", "createSignature", "getPublicKey"]);
+    // The identity and the BRC-29 payout key; the swap basket's BEEF; the sats and token inputs' signatures.
+    expect(calls.map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "listOutputs", "createSignature", "getPublicKey", "createSignature", "getPublicKey"]);
     // The token inputs' sources: the active swap basket (0.12.0).
     expect(calls[2]!.args).toEqual({ basket: "amm-swap", include: "entire transactions", limit: 10000 });
     expect(prepared.funding.outputs).toBe(2); // LP fee, validator fee, commission: 3 sats − the token input's 1
@@ -527,7 +561,7 @@ const ok = (fn: string, result: unknown) => ({ status: 200, body: { fn, result }
 const noSleep = async () => undefined;
 
 describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", () => {
-  it("submits {funding, swap, pool, validator, expires} as DAG-JSON bytes, polls while pending, accepts: internalize (basket insertion) + relinquish the funding", async () => {
+  it("submits {funding (the sats output's transaction), swap, pool, validator, expires} as DAG-JSON bytes, polls while pending, accepts: internalize (basket insertion); no relinquishOutput", async () => {
     const { wallet, calls, prepared, vkey } = await satsIn();
     let final: Transaction | undefined;
     const { af, calls: http } = fakeRelay(async (fn, args, n) => {
@@ -559,9 +593,9 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
     expect(http[1]!.body.args).toEqual({ id: ID });
     expect(seen).toEqual(["pending", "pending", "accepted"]);
 
-    expect(o).toMatchObject({ status: "accepted", id: ID, txid: final!.id("hex"), completed: { internalized: true, relinquished: [prepared.funding.outpoint], errors: [] } });
+    expect(o).toMatchObject({ status: "accepted", id: ID, txid: final!.id("hex"), completed: { internalized: true, errors: [] } });
     const after = calls.slice(before);
-    expect(after.map((c) => c.method)).toEqual(["internalizeAction", "relinquishOutput"]);
+    expect(after.map((c) => c.method)).toEqual(["internalizeAction"]);
     const ia = after[0]!.args as { tx: number[]; outputs: unknown[]; labels: string[]; description: string };
     expect(Beef.fromBinary(ia.tx).atomicTxid).toBe(final!.id("hex"));
     if (prepared.payout.kind !== "color") throw new Error("expected a module receipt");
@@ -575,11 +609,12 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
     ]);
     expect(JSON.parse(colorReceiptInstructions(prepared.payout.receipt))).toEqual({ version: 1, ...prepared.payout.receipt });
     expect(ia.labels).toEqual(["amm-swap"]);
-    expect(after[1]!.args).toEqual({ basket: "1sat-deposit", output: prepared.funding.outpoint });
-    expect(calls.some((c) => c.method === "abortAction")).toBe(false);
+    // The final swap spends the amm-swap sats output: taking it in marks it spent (the wallet's own rule).
+    expect(`${final!.inputs[1]!.sourceTXID}.${final!.inputs[1]!.sourceOutputIndex}`).toBe(prepared.funding.outpoint);
+    expect(calls.some((c) => c.method === "abortAction" || c.method === "relinquishOutput")).toBe(false);
   });
 
-  it("tokens in, accepted: the payout as a wallet payment; the funding and the token input relinquished", async () => {
+  it("tokens in, accepted: the payout as a wallet payment; nothing relinquished (0.29.0)", async () => {
     const { wallet, calls, prepared, vkey } = await tokensIn();
     const { af } = fakeRelay(async (fn, args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
@@ -587,13 +622,10 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
     });
     const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER);
     if (o.status !== "accepted" || prepared.payout.kind !== "brc29") throw new Error(`expected acceptance, got ${o.status}`);
-    expect(o.completed).toEqual({ txid: o.txid, internalized: true, relinquished: [prepared.funding.outpoint, `${poolDeploy.id("hex")}.1`], errors: [] });
+    expect(o.completed).toEqual({ txid: o.txid, internalized: true, errors: [] });
     const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
     expect(ia.outputs).toEqual([{ outputIndex: 1, protocol: "wallet payment", paymentRemittance: prepared.payout.remittance }]);
-    expect(calls.filter((c) => c.method === "relinquishOutput").map((c) => c.args)).toEqual([
-      { basket: "1sat-deposit", output: prepared.funding.outpoint },
-      { basket: "amm-swap", output: `${poolDeploy.id("hex")}.1` },
-    ]);
+    expect(calls.some((c) => c.method === "relinquishOutput")).toBe(false);
   });
 
   it("a transaction that is not ours is not internalized", async () => {
@@ -605,7 +637,7 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
     expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 
-  it("refused: abortAction of the funding, and the refusal's pool for the replan", async () => {
+  it("refused: nothing to undo (0.29.0: the leg's outputs stay in amm-swap), and the refusal's pool for the replan", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "refused", reason: "pool_spent", pool: `${poolDeploy.id("hex")}_0`, poolState: wirePool }));
     const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER);
@@ -615,26 +647,25 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
       reason: "pool_spent",
       pool: { outpoint: wirePool.outpoint, bsvReserve: 1039860n, tokenReserve: 4808341n, liquidityFeeBps: 30n, validationFeeBps: 5n, commissionBps: 10n, validatorIdentityKey: v.identity },
     });
-    expect(calls.at(-1)).toEqual({ method: "abortAction", args: { reference: "ref-1" } });
-    expect(calls.some((c) => c.method === "internalizeAction" || c.method === "relinquishOutput")).toBe(false);
+    expect(calls.some((c) => c.method === "abortAction" || c.method === "internalizeAction" || c.method === "relinquishOutput")).toBe(false);
     // The engine replans against it.
     const req = buildPlanRequest(TOKEN_ID, { direction: "bsvToToken", amount: "20000", slippageBps: "500", allowPartial: true }, [o.status === "refused" ? o.pool! : stateOf(poolDeploy, v.identity)], liveFor([v.identity]), 0);
     if (!req.ok) throw new Error(req.error);
     expect(quote(req.request, liveFor([v.identity]), 0).plan.legs.map((l) => l.outpoint)).toEqual([wirePool.outpoint]);
   });
 
-  it("timeout: abortAction", async () => {
+  it("timeout: nothing to undo", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const { af } = fakeRelay((fn, _a, n) => ok(fn, { id: ID, status: n === 1 ? "pending" : "timeout" }));
     expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep, now: () => 0 }, prepared, PEER)).toEqual({ status: "timeout", id: ID });
-    expect(calls.at(-1)).toEqual({ method: "abortAction", args: { reference: "ref-1" } });
+    expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
-  it("an error answer to submit (the instance does not serve the function): nothing recorded, abortAction", async () => {
+  it("an error answer to submit (the instance does not serve the function): nothing recorded, nothing to undo", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const { af } = fakeRelay((fn) => ({ status: 404, body: { fn, error: { code: "unknown-fn", message: "amm.swap.submit is not provided" } } }));
     expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER)).toEqual({ status: "failed", reason: "amm.swap.submit: unknown-fn: amm.swap.submit is not provided" });
-    expect(calls.at(-1)).toEqual({ method: "abortAction", args: { reference: "ref-1" } });
+    expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
   it("no answer: nothing is aborted; still pending past expiry + grace is unknown; Check again settles it", async () => {
@@ -685,7 +716,8 @@ describe("pending payouts: a swap's BRC-29 payout survives a reload and is inter
     expect(recs).toHaveLength(1); // the commission goes to the relay: only the payout is the taker's
     const rec = recs[0]!;
     expect(new PendingPayoutStore(kv).save(rec)).toBe(true);
-    expect(rec).toMatchObject({ id: `${prepared.swap.id("hex")}:1`, kind: "swap", vout: 1, final: false, tokenId: TOKEN_ID, reference: "ref-1" });
+    expect(rec).toMatchObject({ id: `${prepared.swap.id("hex")}:1`, kind: "swap", vout: 1, final: false, tokenId: TOKEN_ID });
+    expect(rec.reference).toBeUndefined(); // 0.29.0: no funding action to abort
 
     // The validator signs: the txid changes.
     const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
@@ -748,7 +780,7 @@ describe("the commission", () => {
 
   it("sats in, no relay address: the commission (sats) is a BRC-29 payment to the taker's own key, recorded pending and internalized with the token payout", async () => {
     const { wallet, calls, prepared, vkey, side } = await satsIn(fakeWallet(), null);
-    expect(calls.slice(0, 4).map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "getPublicKey", "getPublicKey"]);
+    expect(calls.slice(0, 3).map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "getPublicKey"]);
     expect(calls[0]!.args).toEqual({ identityKey: true });
     const c = prepared.commission;
     expect(c).toMatchObject({ amount: 20n, to: "own" });
@@ -822,10 +854,11 @@ describe("the commission", () => {
     const pool = stateOf(zeroTx, v.identity);
     expect(pool.commissionBps).toBe(0n);
     for (const commissionPkh of [null, v.commissionPkh]) {
-      const { wallet, calls } = fakeWallet();
+      const w = fakeWallet();
+      const { calls } = w;
       const leg = legFor(pool, "bsvToToken", 20_000n);
       expect(leg.commission).toBe(0n);
-      const prepared = await prepareSwap({ wallet, tokenId: TOKEN_ID, direction: "bsvToToken", leg, pool, poolOutput: { beef: atomic(zeroTx), outputIndex: 0 }, commissionPkh, satsPerKb: RATE, now: 1_000 });
+      const { prepared } = await legOf(w, { tokenId: TOKEN_ID, direction: "bsvToToken", leg, pool, poolOutput: { beef: atomic(zeroTx), outputIndex: 0 }, commissionPkh, satsPerKb: RATE, now: 1_000 });
       expect(prepared.commission).toEqual({ amount: 0n, pkh: commissionPkh ?? "00".repeat(20), to: "none" });
       expect(prepared.plan.outputs).toHaveLength(4);
       expect(prepared.funding.outputs).toBe(20_001);

@@ -30,7 +30,7 @@ describe("manifest.json", () => {
     expect(g.certificateAccess).toEqual([]);
     // 0.12.0: the exchange's own baskets; no `bsv21`, no `1sat`. 0.27.0: plus `p color assets` (the token list, one grant on
     // first visit, the store the wallet's 1Color module reads); no other `p color` entry (per-token reads and sends the module asks itself).
-    expect(g.basketAccess.map((b: { basket: string }) => b.basket)).toEqual(["amm-swap", "amm-pools", "p color assets", "1sat-deposit"]);
+    expect(g.basketAccess.map((b: { basket: string }) => b.basket)).toEqual(["amm-swap", "amm-pools", "p color assets"]); // 0.29.0: no 1sat-deposit (no funding transaction)
     expect(JSON.stringify(manifest.metanet).match(/p color [a-z0-9]+/g)).toEqual(["p color assets"]);
     expect(JSON.stringify(manifest)).not.toMatch(/spendingAuthorization/);
     for (const e of [...g.protocolPermissions, ...g.basketAccess]) {

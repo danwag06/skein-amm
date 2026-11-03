@@ -316,7 +316,7 @@ describe("exchange.ts, wired", () => {
     await expect(executeSwap(q)).rejects.toThrow(/spent since the quote/);
   });
 
-  it("executeSwap, tokens in (0.12.0): each leg spends amm-swap outputs carrying its amount exactly; a leg they do not cover gets an output from ONE module send first", async () => {
+  it("executeSwap, tokens in (0.12.0; 0.29.0): each leg spends amm-swap outputs carrying its amount exactly and one sats output of its exact sats; what they do not cover is staged by ONE send first (the module's with the tokens, else a plain sats send)", async () => {
     const swapKey = new PrivateKey(77);
     const sent: CreateActionArgs[] = [];
     const swapRows: unknown[] = [];
@@ -344,14 +344,17 @@ describe("exchange.ts, wired", () => {
     setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
     const q = await quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, allowPartial: false });
     expect(q.legs.map((l) => l.amountIn)).toEqual([50_000n]);
-    // Nothing in the swap basket: one module send of exactly the leg's amount, before the leg.
+    // Nothing in the swap basket: ONE module send of exactly the leg's amount AND the leg's sats (0.29.0), before the leg; no funding action.
     await executeSwap(q);
-    expect(sent).toHaveLength(2); // the send, then the leg's funding
+    expect(sent).toHaveLength(1);
     const plan = ColorPlan.fromLabels(sent[0]!.labels)!;
     expect(plan).toMatchObject({ assets: [TOKEN], ownedOutputs: [], operations: [{ assetId: TOKEN, operation: "transfer" }] });
-    expect(sent[0]!.outputs!.map((o) => decodeOneColor(Utils.toArray(o.lockingScript, "hex"))!.amount)).toEqual([50_000n]);
-    expect(sent[1]!.labels).toEqual(["amm-swap"]);
-    // The swap basket holds an output of exactly the leg's amount: no module send.
+    expect(sent[0]!.outputs).toHaveLength(2);
+    expect(decodeOneColor(Utils.toArray(sent[0]!.outputs![0]!.lockingScript, "hex"))!.amount).toBe(50_000n);
+    const satsOut = sent[0]!.outputs![1]!;
+    expect(decodeOneColor(Utils.toArray(satsOut.lockingScript, "hex"))).toBeNull();
+    expect([satsOut.basket, JSON.parse(satsOut.customInstructions!).sats]).toEqual(["amm-swap", true]);
+    // The swap basket holds an output of exactly the leg's amount: the sats only, by a plain send (no p color plan).
     const held = new Transaction();
     held.addInput({ sourceTXID: "77".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
     held.addOutput({ satoshis: 1, lockingScript: LockingScript.fromHex(tokenP2pkhScript(TOKEN, 50_000n, swapKey.toPublicKey().toString())) });
@@ -359,7 +362,51 @@ describe("exchange.ts, wired", () => {
     swapRows.push({ outpoint: `${held.id("hex")}.0`, satoshis: 1, spendable: true, lockingScript: held.outputs[0]!.lockingScript.toHex(), customInstructions: JSON.stringify({ assetId: TOKEN, amount: "50000", protocolID: [2, "amm swap"], keyID: "amm-swap-x", counterparty: "self" }) });
     sent.length = 0;
     await executeSwap(q);
-    expect(sent.map((a) => ColorPlan.fromLabels(a.labels) !== undefined)).toEqual([false]); // the leg's funding only
+    expect(sent.map((a) => [ColorPlan.fromLabels(a.labels) !== undefined, a.labels, a.outputs!.map((o) => [o.satoshis, o.basket])])).toEqual([[false, ["amm-swap"], [[satsOut.satoshis, "amm-swap"]]]]);
+    // It holds the leg's exact sats too: no send at all.
+    const heldSats = new Transaction();
+    heldSats.addInput({ sourceTXID: "78".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+    heldSats.addOutput({ satoshis: satsOut.satoshis, lockingScript: LockingScript.fromHex(satsOut.lockingScript) });
+    swapBeef.mergeTransaction(heldSats);
+    swapRows.push({ outpoint: `${heldSats.id("hex")}.0`, satoshis: satsOut.satoshis, spendable: true, lockingScript: satsOut.lockingScript, customInstructions: satsOut.customInstructions });
+    sent.length = 0;
+    await executeSwap(q);
+    expect(sent).toEqual([]);
+  });
+
+  it("executeSwap, sats in (0.29.0): the leg's sats (amount in + the token payout's sat + the fee) staged in amm-swap by ONE plain createAction (no p color labels), then the leg; no funding action", async () => {
+    const sent: CreateActionArgs[] = [];
+    const wallet = {
+      ...fakeWallet(),
+      async listOutputs(args: { basket: string }) {
+        if (args.basket === "amm-swap") return { totalOutputs: 0, outputs: [], BEEF: new Beef().toBinary() };
+        return { totalOutputs: 0, outputs: [] };
+      },
+      async getPublicKey(args: { identityKey?: boolean }) {
+        return { publicKey: args.identityKey ? ME : new PrivateKey(78).toPublicKey().toString() };
+      },
+      async createAction(args: CreateActionArgs) {
+        sent.push(args);
+        const tx = new Transaction();
+        tx.addInput({ sourceTXID: fund.id("hex"), sourceOutputIndex: 0, sourceTransaction: fund, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+        for (const o of args.outputs ?? []) tx.addOutput({ satoshis: o.satoshis, lockingScript: LockingScript.fromHex(o.lockingScript) });
+        return { txid: tx.id("hex"), tx: tx.toAtomicBEEF(true) };
+      },
+    } as unknown as WalletInterface;
+    setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
+    const q = await quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false });
+    expect(q.legs.map((l) => l.amountIn)).toEqual([20_000n]);
+    await executeSwap(q);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.labels).toEqual(["amm-swap"]);
+    expect(ColorPlan.fromLabels(sent[0]!.labels)).toBeUndefined();
+    expect(sent[0]!.outputs).toHaveLength(1);
+    const o = sent[0]!.outputs![0]!;
+    expect(o.basket).toBe("amm-swap");
+    expect(JSON.parse(o.customInstructions!)).toMatchObject({ sats: true, protocolID: [2, "amm swap"], counterparty: "self" });
+    // Amount in + 1 sat for the token payout, plus the fee at the rate (> 0).
+    expect(o.satoshis).toBeGreaterThan(20_001);
+    expect(o.satoshis).toBeLessThan(20_001 + 2_000);
   });
 
   it("walletSats: the default basket's spendable sats", async () => {

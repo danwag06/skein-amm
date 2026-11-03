@@ -5,8 +5,10 @@
  * the wallet's BRC-207 module naming no input, the pool filed in `amm-pools`)
  * against a fake wallet and a fake `/call`; and Close (layout 2: the LP's
  * outputs, the tokens to a module key; layout 1: the contract's, the tokens to
- * `amm-swap`; the fee from the pool or a broadcast funding, page-built close
- * validated against the fixture pool, submit, internalize + relinquish).
+ * `amm-swap`; 0.29.0: bsvFee 0, ONE wallet createAction with the pool as an
+ * explicit input and the page's Close unlock at signAction; bsvFee > 0, the
+ * fee from the pool, page-built; validated against the fixture pool, submit,
+ * internalize, no relinquish).
  */
 import {
   BigNumber,
@@ -23,7 +25,7 @@ import {
   type CreateActionArgs,
   type WalletInterface,
 } from "@bsv/sdk";
-import { P1SAT_PROTOCOL } from "@1sat/actions";
+import { P1SAT_PROTOCOL, colorReceiptInstructions } from "@1sat/actions";
 import { ColorPlan, colorProtocolID } from "@bsv/color-permission-module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PoolTemplate, RESCINDED_KEY } from "../src/pool";
@@ -41,7 +43,7 @@ import {
   valueOutputsOf,
   type BasketRow,
 } from "../src/lp/poolDeploy";
-import { LEGACY_LP_KEY, awaitAdmitted, completeClose, prepareClose, steakText, submitToOverlay } from "../src/lp/close";
+import { LEGACY_FEE, LEGACY_LP_KEY, awaitAdmitted, completeClose, prepareClose, steakText, submitToOverlay } from "../src/lp/close";
 import { dagBytes, readBytes, type AuthFetchLike } from "../src/market/relay";
 import { BRC29, brc29Side, isBrc29, type KeyArgs } from "./brc29Wallet";
 import { tokenInputsOf } from "../src/market/swapAction";
@@ -157,9 +159,8 @@ function fakeWallet(fundVout: number, keys: (a: KeyArgs) => PrivateKey = () => l
   const calls: { method: string; args: unknown }[] = [];
   const keyOf = (a: KeyArgs) => (a.keyID.startsWith("amm-funding-") ? side.privateKey(a) : keys(a));
   let pending: Transaction | undefined;
-  const signFunding = async (tx: Transaction) => {
-    tx.inputs[0]!.unlockingScript = await new P2PKH().unlock(lpKey).sign(tx, 0);
-    for (let n = 1; n < tx.inputs.length; n++) tx.inputs[n]!.unlockingScript = await new P2PKH().unlock(lpKey).sign(tx, n);
+  const signFunding = async (tx: Transaction, skip: Set<number> = new Set()) => {
+    for (let n = 0; n < tx.inputs.length; n++) if (!skip.has(n)) tx.inputs[n]!.unlockingScript = await new P2PKH().unlock(lpKey).sign(tx, n);
     return { txid: tx.id("hex"), tx: tx.toAtomicBEEF(true) };
   };
   const w = {
@@ -176,9 +177,10 @@ function fakeWallet(fundVout: number, keys: (a: KeyArgs) => PrivateKey = () => l
       calls.push({ method: "createAction", args });
       const tx = new Transaction();
       // The caller's explicit inputs first (as wallet-toolbox places them), then the funding.
+      const inputBeef = args.inputBEEF ? Beef.fromBinary(Array.from(args.inputBEEF)) : null;
       for (const i of args.inputs ?? []) {
         const [txid, vout] = i.outpoint.split(".");
-        tx.addInput({ sourceTXID: txid!, sourceOutputIndex: Number(vout), sourceTransaction: sources.get(txid!) ?? tokenDeploy, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+        tx.addInput({ sourceTXID: txid!, sourceOutputIndex: Number(vout), sourceTransaction: inputBeef?.findTxid(txid!)?.tx ?? sources.get(txid!) ?? tokenDeploy, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
       }
       tx.addInput({ sourceTXID: fund.id("hex"), sourceOutputIndex: fundVout, sourceTransaction: fund, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
       for (const o of args.outputs ?? []) tx.addOutput({ satoshis: o.satoshis, lockingScript: LockingScript.fromHex(o.lockingScript) });
@@ -190,9 +192,12 @@ function fakeWallet(fundVout: number, keys: (a: KeyArgs) => PrivateKey = () => l
       }
       return signFunding(tx);
     },
-    async signAction(args: unknown) {
+    async signAction(args: { spends?: Record<number, { unlockingScript: string }> }) {
       calls.push({ method: "signAction", args });
-      return signFunding(pending!);
+      // The caller's unlocks in (0.29.0: the close's pool input); the wallet signs the rest.
+      const spends = Object.entries(args.spends ?? {});
+      for (const [n, sp] of spends) pending!.inputs[Number(n)]!.unlockingScript = UnlockingScript.fromHex(sp.unlockingScript);
+      return signFunding(pending!, new Set(spends.map(([n]) => Number(n))));
     },
     async listOutputs(args: unknown) {
       calls.push({ method: "listOutputs", args });
@@ -404,7 +409,7 @@ describe("pool deploy (0.13.0): the validator's affirmation, then one createActi
 // Close (0.9.0)
 // ---------------------------------------------------------------------------
 
-describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key, the tokens to a module key of the user's own; the fee from the pool or a broadcast funding; submit, internalize, relinquish", () => {
+describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key, the tokens to a module key of the user's own; the fee from the pool, or (0.29.0) the wallet's own action; submit, internalize", () => {
   // A pool like the fixture's after swap2, whose LP key is the wallet's BRC-29 LP key for some deposit outpoint.
   const depositOp = `${"33".repeat(32)}_0`;
   const lpRef = { protocolID: BRC29 as never, keyID: lpKeyId(depositOp), counterparty: "self" };
@@ -417,24 +422,30 @@ describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key,
   const sats = BigInt(poolTx.outputs[0]!.satoshis!);
   const [derivationPrefix, derivationSuffix] = lpRef.keyID.split(" ") as [string, string];
 
-  it("bsvFee 0: a funding output broadcast by the wallet (no noSend, exact: the token output's sat + fee); [pool, funding] → [every sat to the LP key, every token to a module key]; both inputs validate; completeClose takes in the payment and, through the module, the tokens, and relinquishes the funding and the pool row", async () => {
+  it("bsvFee 0 (0.29.0): ONE wallet createAction — the pool an explicit input (its BEEF, the call's unlock size), the LP's outputs with the payout's remittance and the receipt as customInstructions, no baskets; the page's Close unlock over the wallet's transaction (its funding and change included) at signAction; both inputs validate; completeClose takes in the payment and, through the module, the tokens; no relinquishOutput", async () => {
     const { wallet, calls } = fakeWallet(3, honest((a) => side.privateKey(a)));
-    const s = await prepareClose({ wallet, tokenId: TOKEN_ID, meta: { sym: "TST", dec: 0 }, poolOutput: poolOutput(), lpKey: lpRef, bsvFee: 0n, satsPerKb: RATE, now: 1_000 });
-    // The identity and the LP key; the module receiving key (the identity, then the key); the funding (its key); the signatures.
-    expect(calls.map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "getPublicKey", "getPublicKey", "getPublicKey", "createAction", "createSignature", "createSignature", "getPublicKey"]);
+    const s = await prepareClose({ wallet, tokenId: TOKEN_ID, meta: { sym: "TST", dec: 0 }, poolOutput: poolOutput(), lpKey: lpRef, bsvFee: 0n, satsPerKb: RATE });
+    // The identity and the LP key; the module receiving key (the identity, then the key); the wallet's action; the LP's signature.
+    expect(calls.map((c) => c.method)).toEqual(["getPublicKey", "getPublicKey", "getPublicKey", "getPublicKey", "createAction", "createSignature", "signAction"]);
+    expect(s.walletBuilt).toBe(true);
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
-    expect(JSON.parse(create.outputs![0]!.customInstructions!).amm).toEqual({ close: `${poolTx.id("hex")}_0`, expires: 121_000 });
-    const f = s.funding!;
-    expect(f.outputs).toBe(1);
-    expect(f.satoshis).toBe(1 + f.fee);
+    expect(create.labels).toEqual(["amm-close"]);
+    expect(create.inputs).toEqual([{ outpoint: `${poolTx.id("hex")}.0`, unlockingScriptLength: PoolTemplate.maxCallUnlockLength(s.plan), inputDescription: "The TST pool" }]);
+    expect(Beef.fromBinary(Array.from(create.inputBEEF!)).findTxid(poolTx.id("hex"))).toBeTruthy();
+    expect(create.outputs!.map((o) => [o.satoshis, o.basket])).toEqual([[Number(sats), undefined], [1, undefined]]);
+    expect(JSON.parse(create.outputs![0]!.customInstructions!)).toEqual({ protocol: "wallet payment", derivationPrefix, derivationSuffix, senderIdentityKey: side.identityKey });
+    const sa = calls.find((c) => c.method === "signAction")!.args as { spends: Record<number, { unlockingScript: string }> };
+    expect(Object.keys(sa.spends)).toEqual(["0"]);
     const tx = s.tx;
-    expect(tx.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([`${poolTx.id("hex")}.0`, f.outpoint]);
-    expect(tx.outputs.map((o) => o.satoshis)).toEqual([Number(sats), 1]);
+    expect(tx.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([`${poolTx.id("hex")}.0`, `${fund.id("hex")}.3`]);
+    // The LP's two outputs, then the wallet's change: Close(lpSig)'s outputs are free, the preimage covers them all.
+    expect(tx.outputs.map((o) => o.satoshis).slice(0, 2)).toEqual([Number(sats), 1]);
+    expect(tx.outputs).toHaveLength(3);
     expect(tx.outputs[0]!.lockingScript.toHex()).toBe(new P2PKH().lock(PublicKey.fromString(lpPub).toAddress()).toHex());
+    expect(tx.inputs[0]!.unlockingScript!.toHex()).toBe(sa.spends[0]!.unlockingScript);
+    expect(tx.inputs[0]!.unlockingScript!.toHex().length / 2).toBeLessThanOrEqual(PoolTemplate.maxCallUnlockLength(s.plan));
     for (const i of [0, 1]) expect(verify(tx, i)).toBe(true);
-    const ins = tx.inputs.reduce((a, i) => a + i.sourceTransaction!.outputs[i.sourceOutputIndex]!.satoshis!, 0);
-    expect(ins - tx.outputs.reduce((a, o) => a + o.satoshis!, 0)).toBe(f.fee);
     expect(s.sats).toBe(sats);
     expect(s.tokenAmount).toBe(base.state.tokenReserve);
     expect(s.payout).toEqual({ outputIndex: 0, satoshis: Number(sats), lockingScript: tx.outputs[0]!.lockingScript.toHex(), remittance: { derivationPrefix, derivationSuffix, senderIdentityKey: side.identityKey } });
@@ -444,6 +455,7 @@ describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key,
     const r = s.receipt!;
     expect(r.outputIndex).toBe(1);
     expect(r.receipt).toMatchObject({ assetId: SDK_ID, senderIdentityKey: side.identityKey });
+    expect(create.outputs![1]!.customInstructions).toBe(colorReceiptInstructions(r.receipt));
     const moduleKey = side.publicKey({ protocolID: colorProtocolID(SDK_ID, r.receipt.derivationPrefix, r.receipt.derivationSuffix), keyID: "color", counterparty: side.identityKey, forSelf: true });
     expect(tx.outputs[1]!.lockingScript.toHex()).toBe(tokenP2pkhScript(SDK_ID, base.state.tokenReserve, moduleKey));
     expect(s.topic).toBe(`tm_color_${DEPLOY_TXID}_0`);
@@ -452,27 +464,39 @@ describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key,
     const kept = new Map<string, string>();
     const { PendingPayoutStore } = await import("../src/wallet/pendingPayouts");
     const payouts = new PendingPayoutStore({ getItem: (k) => kept.get(k) ?? null, setItem: (k, val) => void kept.set(k, val) });
-    const c = await completeClose(wallet, s, `${DEPLOY_TXID}.0`, payouts);
-    expect(c).toEqual({ internalized: true, relinquished: [f.outpoint, `${DEPLOY_TXID}.0`], errors: [] });
+    const c = await completeClose(wallet, s, payouts);
+    expect(c).toEqual({ internalized: true, errors: [] });
     expect(payouts.list()).toEqual([]);
     const after = calls.slice(before);
-    expect(after.map((x) => x.method)).toEqual(["internalizeAction", "internalizeAction", "relinquishOutput", "relinquishOutput"]);
+    expect(after.map((x) => x.method)).toEqual(["internalizeAction", "internalizeAction"]);
     const ia = after[0]!.args as { tx: number[]; outputs: unknown[]; labels: string[] };
     expect(ia.tx).toEqual(s.beef);
     expect(ia.labels).toEqual(["amm-close"]);
     expect(ia.outputs).toEqual([{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: s.payout!.remittance }]);
     const ib = after[1]!.args as { outputs: { insertionRemittance: { basket: string } }[] };
     expect(ib.outputs[0]!.insertionRemittance.basket).toBe(`p color ${DEPLOY_TXID}v0`);
-    expect(after.slice(2).map((x) => x.args)).toEqual([
-      { basket: "1sat-deposit", output: f.outpoint },
-      { basket: "amm-pools", output: `${DEPLOY_TXID}.0` },
-    ]);
+  });
+
+  it("bsvFee 0: a wallet transaction that moves the pool off input 0 is aborted before signing", async () => {
+    const { wallet, calls } = fakeWallet(3, honest((a) => side.privateKey(a)));
+    const real = wallet.createAction.bind(wallet);
+    (wallet as unknown as { createAction: typeof real }).createAction = async (args) => {
+      const r = await real(args);
+      const tx = Transaction.fromAtomicBEEF(r.signableTransaction!.tx);
+      const moved = new Transaction();
+      moved.addInput(tx.inputs[1]!);
+      moved.addInput(tx.inputs[0]!);
+      for (const o of tx.outputs) moved.addOutput(o);
+      return { signableTransaction: { tx: moved.toAtomicBEEF(true), reference: "ref-1" } };
+    };
+    await expect(prepareClose({ wallet, tokenId: TOKEN_ID, poolOutput: poolOutput(), lpKey: lpRef, bsvFee: 0n, satsPerKb: RATE })).rejects.toThrow(/input 0/);
+    expect(calls.map((c) => c.method).filter((m) => m === "signAction" || m === "abortAction")).toEqual(["abortAction"]);
   });
 
   it("bsvFee > 0: no funding (the wallet makes no action); [pool] → [sats − bsvFee, every token]; validates; a fee too small for the miner and the token's sat, or over the pool, is refused", async () => {
     const { wallet, calls } = fakeWallet(3, honest((a) => side.privateKey(a)));
     const s = await prepareClose({ wallet, tokenId: TOKEN_ID, poolOutput: poolOutput(), lpKey: lpRef, bsvFee: 1_000n, satsPerKb: RATE });
-    expect(s.funding).toBeNull();
+    expect(s.walletBuilt).toBe(false);
     expect(calls.some((c) => c.method === "createAction")).toBe(false);
     expect(s.tx.inputs).toHaveLength(1);
     expect(s.tx.outputs.map((o) => o.satoshis)).toEqual([Number(sats) - 1_000, 1]);
@@ -486,7 +510,7 @@ describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key,
     expect(all.receipt!.outputIndex).toBe(0);
   });
 
-  it("a layout-1 pool (before 0.13.0): the contract's outputs, everything to the LP key; the tokens into amm-swap (Move back), as 0.12.x", async () => {
+  it("a layout-1 pool (before 0.13.0): the contract's outputs, everything to the LP key; the tokens into amm-swap (Move back), as 0.12.x; 0.29.0: the fee from the pool (bsvFee 0 refused: no funding transaction)", async () => {
     const swap2v1 = Transaction.fromHex(v1.swap_tokens_in);
     const b1 = PoolTemplate.decode(swap2v1.outputs[0]!.lockingScript)!;
     expect(b1.version).toBe(1);
@@ -495,17 +519,19 @@ describe("close (0.13.0, layout 2): the LP's outputs — the sats to the LP key,
     t1.addOutput({ satoshis: swap2v1.outputs[0]!.satoshis!, lockingScript: PoolTemplate.lockContinuation(b1, { ...b1.state, lpPubKey: lpPub }) });
     const { wallet, calls } = fakeWallet(3, honest());
     const tokenId1 = `${Transaction.fromHex(v1.token_deploy).id("hex")}_0`;
-    const s = await prepareClose({ wallet, tokenId: tokenId1, poolOutput: { beef: atomic(t1, []), outputIndex: 0 }, lpKey: lpRef, bsvFee: 0n, satsPerKb: RATE, now: 1_000 });
+    await expect(prepareClose({ wallet, tokenId: tokenId1, poolOutput: { beef: atomic(t1, []), outputIndex: 0 }, lpKey: lpRef, bsvFee: 0n, satsPerKb: RATE })).rejects.toThrow(LEGACY_FEE);
+    expect(calls.some((c) => c.method === "createAction")).toBe(false);
+    const s = await prepareClose({ wallet, tokenId: tokenId1, poolOutput: { beef: atomic(t1, []), outputIndex: 0 }, lpKey: lpRef, bsvFee: 1_000n, satsPerKb: RATE });
     expect(s.version).toBe(1);
     expect(s.receipt).toBeNull();
     const sats1 = BigInt(t1.outputs[0]!.satoshis!);
-    expect(s.tx.outputs.map((o) => o.satoshis)).toEqual([Number(sats1), 1]);
+    expect(s.tx.outputs.map((o) => o.satoshis)).toEqual([Number(sats1) - 1_000, 1]);
     expect(s.tx.outputs[0]!.lockingScript.toHex()).toBe(new P2PKH().lock(PublicKey.fromString(lpPub).toAddress()).toHex());
     expect(s.tx.outputs[1]!.lockingScript.toHex()).toBe(tokenP2pkhScript(tokenId1, b1.state.tokenReserve, lpPub));
-    for (const i of [0, 1]) expect(verify(s.tx, i)).toBe(true);
+    expect(verify(s.tx, 0)).toBe(true);
     expect(JSON.parse(s.tokens!.customInstructions)).toEqual({ assetId: tokenId1, amount: String(b1.state.tokenReserve), protocolID: BRC29, keyID: lpRef.keyID, counterparty: "self" });
     const before = calls.length;
-    const c = await completeClose(wallet, s, `${DEPLOY_TXID}.0`);
+    const c = await completeClose(wallet, s);
     expect(c.internalized).toBe(true);
     const ia = calls.slice(before)[0]!.args as { outputs: unknown[] };
     expect(ia.outputs).toEqual([

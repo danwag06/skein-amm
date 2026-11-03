@@ -73,9 +73,14 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
   module send before the legs (outputs to fresh keys under the exchange's
   protocol `[2, "amm swap"]`, counterparty self; the plan a transfer out;
   one prompt), filed in `amm-swap` with `{assetId, amount, protocolID,
-  keyID, counterparty}`. The legs are built, signed (`createSignature`
-  under that key), relayed and settled as before; their inputs are
-  relinquished from `amm-swap`. Sats in: no module step.
+  keyID, counterparty}`. 0.29.0: the same send also stages each uncovered
+  leg's sats (one P2PKH output of exactly the leg's miner fee to a fresh
+  `amm swap` key, filed in `amm-swap` by the createAction, customInstructions
+  `{sats: true, protocolID, keyID, counterparty}`); sats in: a plain
+  createAction with each leg's sats output (amount in + 1 + fee). No
+  funding transaction. The legs are built, signed (`createSignature` under
+  each row's key), relayed and settled as before; taking an accepted swap in
+  marks its `amm-swap` inputs spent (no relinquishOutput).
 - **Token payouts**: a swap's token payout (and the taker's own token
   commission) is locked to a module receiving key, `getPublicKey({protocolID:
   [2, "p color <assetTag> <prefixHex> <suffixHex>"], keyID: "color",
@@ -87,12 +92,14 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
 - **Close**: the contract pays the tokens to the LP key (a BRC-29 key, not a
   module key), so they are filed in `amm-swap` under that key; Move back
   takes them into the wallet's balance.
-- **Move back** (`moveBack`): an app-built transaction spending every
-  `amm-swap` output of the token and a funding output the wallet broadcasts
-  (`1sat-deposit`) to one module receiving key of the user's own (sender:
-  the user's identity), submitted to this skein's token topic, then taken in
-  through the module with its receipt; the spent outputs relinquished.
-- **Manifest**: baskets `amm-swap`, `amm-pools`, `1sat-deposit`; protocols
+- **Move back** (`moveBack`; 0.29.0): ONE wallet createAction — every
+  `amm-swap` output of the token an explicit input (`inputBEEF`, 108-byte
+  unlocks the page fills at signAction), one output to a module receiving
+  key of the user's own (sender: the user's identity) with the receipt as
+  its customInstructions; the wallet funds it, broadcasts it and marks the
+  inputs spent; submitted to this skein's token topic, then taken in through
+  the module with its receipt. No relinquishOutput.
+- **Manifest**: baskets `amm-swap`, `amm-pools`, `p color assets` (0.29.0: no `1sat-deposit`); protocols
   BRC-29 to self, `[2, "amm swap"]` to self, identity, AuthFetch's two, the
   action labels; no `bsv21`, `1sat` or `[0, "onesat"]`, no spending
   authorization, no `p color` entry (the module prompts for those itself,
@@ -335,11 +342,10 @@ before any other.
 Declared (0.12.0):
 
 - Spending: none (David, 2026-10-22): the wallet asks for each action's spend.
-- Baskets: `amm-swap` (the active swap basket: tokens on their way into a
-  swap's legs, and a closed position's tokens), `amm-pools` (the pools held
-  as LP), `1sat-deposit` (a swap's exact funding output, held until the
-  swap's expiry, relinquished once the swap spent it; a Close's and a Move
-  back's funding). No `p color` basket: the module asks for those itself.
+- Baskets: `amm-swap` (the active swap basket: tokens and, 0.29.0, sats on
+  their way into a swap's legs, and a closed position's tokens), `amm-pools`
+  (the pools held as LP). 0.29.0: no `1sat-deposit` (no funding
+  transaction anywhere). No `p color` basket but `p color assets`: the module asks for the rest itself.
 - Protocols:
   - `[2, "3241645161d8"]`, counterparty `"self"`: BRC-29 payout keys and LP
     keys ("BRC-29 payouts"). Level-2 grants are keyed by the exact

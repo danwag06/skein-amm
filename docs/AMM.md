@@ -244,19 +244,27 @@ counterparty}`).
   counterparty, amm: {role, validatorIdentity, lpFeeBps, validatorFeeBps,
   commissionBps, nonce}}`). (0.12.x: the page named a key input, input 0,
   and keyed the LP key by it.)
-- **Swap, sats in.** As before (`1sat-deposit` funding, the leg built here,
-  the relay). The token payout is locked to a module receiving key whose
-  sender is the pool's ValidatorIdentity; accepted, the page takes it in
-  through the module with its receipt.
+- **Swap, sats in.** The leg built here, the relay. 0.29.0: the leg's sats
+  (amount in + 1 sat for the token payout + the miner fee) are ONE
+  `amm-swap` output, staged by one plain createAction (no `p color` labels;
+  a P2PKH to an `amm swap` key, filed in `amm-swap` with `{sats: true,
+  protocolID, keyID, counterparty}`) before the legs; no funding transaction,
+  no `1sat-deposit`. The token payout is locked to a module receiving key
+  whose sender is the pool's ValidatorIdentity; accepted, the page takes it
+  in through the module with its receipt.
 - **Swap, tokens in.** Each leg spends `amm-swap` outputs carrying exactly
   its amount in (the contract takes no token change). The legs those do
   not cover get one output each, of exactly their amount, from ONE module
   send before the legs (a transfer out to `amm swap` keys; one module
   prompt; the page submits it to the token topic too and files the outputs
-  in `amm-swap`). The legs are built and signed as before
-  (`createSignature` under each output's key), relayed, and their inputs
-  relinquished from `amm-swap` once accepted; an output a failed leg did
-  not spend stays there for a later swap.
+  in `amm-swap`); 0.29.0: the same send carries each uncovered leg's sats
+  (one P2PKH output per leg of exactly its miner fee, filed in `amm-swap` by
+  the createAction itself; the module passes a non-token output through).
+  The legs are built and signed as before (`createSignature` under each
+  output's key) and relayed; taking an accepted swap in marks its
+  `amm-swap` inputs spent (no relinquishOutput); an output a failed leg did
+  not spend stays there for a later swap (a sats output is reused by a leg
+  needing exactly its amount).
 - **Recover a position** (0.12.1, `src/lp/recover.ts`). A deploy whose
   `amm-pools` row was never filed (the deploy broadcast, the filing did
   not happen) is not in the positions list, so it cannot be closed there.
@@ -276,27 +284,37 @@ counterparty}`).
   `amm-pool-deploy`); otherwise it files nothing ("This pool's LP key is
   not this wallet's."). A pool the wallet already files is left alone.
   The row is then an ordinary position: Close as below.
-- **Close** (0.13.0: `Close(lpSig)`, outputs free). The page's own Close
-  (`bsvFee`: the miner fee left from the pool, or 0 for a funding output the
-  wallet broadcasts): the sats less `bsvFee` to the LP key, a BRC-29 wallet
+- **Close** (0.13.0: `Close(lpSig)`, outputs free). `bsvFee` 0 (0.29.0): ONE
+  wallet createAction — the pool an explicit input (`inputBEEF` the lookup's,
+  `unlockingScriptLength` the call's), the outputs below with the payout's
+  remittance and the receipt as their customInstructions; the wallet pays
+  the fee and adds change; the page fills the pool input (`callUnlock` + the
+  LP's `createSignature` over the wallet's transaction) at signAction; no
+  funding transaction. `bsvFee` > 0: the miner fee left from the pool, the
+  close built here. Either way the sats less `bsvFee` to the LP key, a BRC-29 wallet
   payment to self; every token, one sat, to a NEW module receiving key of
   the user's own (`newReceivingKey`, sender the user's identity), taken in
   through the module with its receipt (a second `internalizeAction`; kept in
   pending payouts if the module does not take it at once). No `amm-swap`,
   no Move back. A pool before 0.13.0 closes as 0.12.x did (the contract's
-  outputs, the tokens to the LP key, filed in `amm-swap`, Move back). A
+  outputs, the tokens to the LP key, filed in `amm-swap`, Move back), its
+  fee from the pool (0.29.0: `bsvFee` 0 refused). No relinquishOutput: the
+  wallet marks the pool row spent itself. A
   rescinded pool is shown as such and closes as any.
-- **Move back** (Your tokens). Every `amm-swap` output of the token, and a
-  funding output the wallet broadcasts for the fee, spent by an app-built
-  transaction to one module receiving key of the user's own (sender: the
-  user's identity), submitted to `tm_color_<assetId>`, taken in through the
-  module, the spent outputs relinquished. A swap that got stuck, and a
+- **Move back** (Your tokens; 0.29.0: ONE wallet createAction). Every
+  `amm-swap` token output of the token an explicit input (`inputBEEF` from
+  the basket, the page's unlocks at signAction), one output to a module
+  receiving key of the user's own (sender: the user's identity) carrying the
+  receipt as its customInstructions, no basket; the wallet funds the fee,
+  adds change, broadcasts and marks the inputs spent; then submitted to
+  `tm_color_<assetId>` and taken in through the module. No relinquishOutput.
+  A swap that got stuck, and a
   pre-0.13.0 position's closed tokens, come back this way.
 - **Pending payouts** (`wallet/pendingPayouts.ts`) keep both kinds: a
   BRC-29 remittance or a module receipt, retried with the final
   transaction's BEEF.
 - **Manifest** (`www/manifest.json`, `web/ui/public/manifest.json`):
-  baskets `amm-swap`, `amm-pools`, `1sat-deposit`; protocols BRC-29 to self,
+  baskets `amm-swap`, `amm-pools`, `p color assets` (0.29.0: no `1sat-deposit`); protocols BRC-29 to self,
   `[2, "amm swap"]` to self, identity, AuthFetch's two, the action labels;
   no spending authorization; no `p color` entry (the module asks for those).
   0.13.0 adds nothing (the deploy, Close and Recover use the labels

@@ -1,55 +1,53 @@
 /**
  * One swap leg through the user's BRC-100 wallet (docs/notes.md, "Swap
  * funding and signing"). The page holds no keys: every key and signature
- * comes from the wallet (`getPublicKey`, `createAction`, `signAction`,
- * `createSignature`).
+ * comes from the wallet (`getPublicKey`, `createAction`, `createSignature`).
  *
- *   1. `PoolTemplate.planSwap`: the outputs the contract requires (pool,
- *      payout, LP fee, validator fee, commission) and the method arguments.
- *      The commission goes to the relay's `amm.swap.terms` address; when the
- *      relay names none and the pool's CommissionBps is nonzero, to a key of
- *      the taker's own (see "the commission" below). The funding amount is
- *      exact: what the contract's outputs take beyond the pool's and the
- *      token inputs' sats (amount in + 1 sat per 1Color output the taker
- *      pays for), plus the miner fee of the final swap (`swapFunding`).
- *   2. **Funding transaction**: `createAction` (`signAndProcess: false`,
- *      `noSend`) with one output of that amount, P2PKH to a P1SAT key
- *      (`amm-funding-<hex>`), filed in 1sat-sdk's `1sat-deposit` staging
- *      basket with tags `amm-funding` and `hold:<expires>` (as OrdLock v2
- *      front funding is), then `signAction` (`noSend`): the wallet keeps a
- *      signed `nosend` transaction and broadcasts nothing.
- *   3. **Swap transaction**, built here: inputs pool (`callUnlock`, the
- *      validator's slot `OP_0`, `_changeAmount = 0`), the funding output,
- *      the token inputs (token → sats: outputs of the active swap basket
- *      `amm-swap`, src/market/activeSwap.ts, 0.12.0); outputs exactly the
- *      contract's, no change. The funding and token inputs are signed with
- *      `createSignature` (SIGHASH_ALL|FORKID over the BIP-143 sighash
- *      computed here, under the key each input's customInstructions name)
- *      and every input but the pool's is checked with `Spend`.
- *   4. The relay (src/market/relay.ts) carries both to the validator.
+ *   1. `planSwapLeg` (`PoolTemplate.planSwap`): the outputs the contract
+ *      requires (pool, payout, LP fee, validator fee, commission) and the
+ *      method arguments. The commission goes to the relay's `amm.swap.terms`
+ *      address; when the relay names none and the pool's CommissionBps is
+ *      nonzero, to a key of the taker's own (see "the commission" below). The
+ *      leg's sats are exact: what the contract's outputs take beyond the
+ *      pool's and the token inputs' sats (amount in + 1 sat per 1Color output
+ *      the taker pays for), plus the miner fee of the final swap
+ *      (`swapFunding`).
+ *   2. **The leg's inputs** (0.29.0, David Case 2026-11-02): every one an
+ *      output of the active swap basket `amm-swap` (src/market/activeSwap.ts):
+ *      ONE sats output of exactly that amount (`SatsInput`) and, token → sats,
+ *      the token outputs carrying exactly the amount in (`TokenInput`), staged
+ *      there by one wallet send before the legs (no funding transaction, no
+ *      `1sat-deposit`).
+ *   3. **Swap transaction**, built here (`prepareSwap`): inputs pool
+ *      (`callUnlock`, the validator's slot `OP_0`, `_changeAmount = 0`), the
+ *      sats output, the token outputs; outputs exactly the contract's, no
+ *      change. The sats and token inputs are signed with `createSignature`
+ *      (SIGHASH_ALL|FORKID over the BIP-143 sighash computed here, under the
+ *      key each input's customInstructions name) and every input but the
+ *      pool's is checked with `Spend`.
+ *   4. The relay (src/market/relay.ts) carries it to the validator, with the
+ *      sats output's transaction as the swap's funding transaction (its
+ *      AtomicBEEF, from the wallet).
  *   5. Accepted: `completeSwap` internalizes the payout (sats: BRC-29 wallet
  *      payment; tokens, 0.12.0: the output is locked to a BRC-207 module
  *      receiving key whose sender is the pool's validator, taken in with a
  *      basket insertion into `p color <assetTag>` and the receipt,
  *      src/wallet/color.ts), and the commission when it is the taker's own
- *      (same two forms), and relinquishes the funding output and the token
- *      inputs (`amm-swap`). Refused / timed out: `abandonSwap` aborts the
- *      funding action (its output never existed).
+ *      (same two forms). No relinquishOutput (0.29.0): the wallet marks the
+ *      `amm-swap` outputs the swap spends spent when it takes the swap in.
+ *      Refused / timed out: nothing to undo; the leg's outputs stay in
+ *      `amm-swap` for a later swap.
  */
-import { P1SAT_PROTOCOL } from "@1sat/actions";
-import { DEPOSIT_BASKET, depositHoldTag } from "@1sat/types";
 import {
   Beef,
   Hash,
   LockingScript,
-  P2PKH,
   PublicKey,
   Spend,
   Transaction,
   TransactionSignature,
   UnlockingScript,
   Utils,
-  type CreateActionArgs,
   type InternalizeOutput,
   type WalletInterface,
   type WalletProtocol,
@@ -66,10 +64,7 @@ import { SWAP_BASKET, newReceivingKey, receiptOutput, type ColorReceipt } from "
 
 /** A P2PKH unlocking script's upper bound: push(DER ≤ 72 + sighash byte) + push(33-byte key). */
 export const P2PKH_UNLOCK_LENGTH = 108;
-/** Tag of a funding output in `1sat-deposit` (as 1sat-sdk's `ordlock-funding`). */
-export const FUNDING_TAG = "amm-funding";
-export const FUNDING_KEY_PREFIX = "amm-funding-";
-/** How long the relay may take, and how long the funding output is held from `sweepDeposit`. */
+/** How long the relay may take (the swap's `expires`). */
 export const SWAP_TTL_MS = 2 * 60_000;
 
 /** BRC-100 descriptions are 5-50 characters. */
@@ -78,10 +73,6 @@ function describe(text: string): string {
 }
 
 const toHex = (b: number[]) => Utils.toHex(b);
-
-function randomHex(bytes = 8): string {
-  return toHex(Array.from(crypto.getRandomValues(new Uint8Array(bytes))));
-}
 
 export class LegShapeError extends Error {
   constructor(message: string) {
@@ -180,6 +171,58 @@ export function selectExactTokenInputs(candidates: TokenInput[], amount: bigint)
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Sats inputs (0.29.0)
+// ---------------------------------------------------------------------------
+
+/** An `amm-swap` sats output (customInstructions `{sats: true, protocolID, keyID, counterparty}`): a plain P2PKH to an "amm swap" key. */
+export interface SatsInput {
+  /** `txid.vout` */
+  outpoint: string;
+  txid: string;
+  vout: number;
+  satoshis: number;
+  lockingScript: string;
+  protocolID: WalletProtocol;
+  keyID: string;
+  counterparty: string;
+}
+
+const P2PKH_RE = /^76a914[0-9a-f]{40}88ac$/i;
+
+/** The basket rows usable as a leg's sats: plain P2PKH outputs whose customInstructions say `sats: true` and name the key. */
+export function satsInputsOf(rows: { outpoint: string; satoshis: number; lockingScript?: string; customInstructions?: string }[]): SatsInput[] {
+  const out: SatsInput[] = [];
+  for (const r of rows) {
+    if (!r.lockingScript || !P2PKH_RE.test(r.lockingScript)) continue;
+    let ci: { sats?: unknown; protocolID?: unknown; keyID?: unknown; counterparty?: unknown } = {};
+    try {
+      ci = JSON.parse(r.customInstructions ?? "{}");
+    } catch {
+      continue;
+    }
+    if (ci.sats !== true || !Array.isArray(ci.protocolID) || typeof ci.keyID !== "string") continue;
+    const op = parseOutpoint(r.outpoint);
+    if (!op) continue;
+    out.push({
+      outpoint: `${op.txid}.${op.vout}`,
+      txid: op.txid,
+      vout: op.vout,
+      satoshis: r.satoshis,
+      lockingScript: r.lockingScript,
+      protocolID: ci.protocolID as WalletProtocol,
+      keyID: ci.keyID,
+      counterparty: typeof ci.counterparty === "string" ? ci.counterparty : "self",
+    });
+  }
+  return out;
+}
+
+/** The sats twin of `selectExactTokenInputs`: one output of exactly `satoshis` (the leg has no change), or null. */
+export function selectExactSatsInput(candidates: SatsInput[], satoshis: number): SatsInput | null {
+  return candidates.find((c) => c.satoshis === satoshis) ?? null;
+}
+
 /** The pool output from the lookup's BEEF, as the template's PoolUtxo. */
 export function poolUtxoFrom(poolOutput: LookupOutput): PoolUtxo {
   const tx = Transaction.fromAtomicBEEF(poolOutput.beef);
@@ -222,7 +265,7 @@ export async function signP2pkhWithWallet(
 }
 
 // ---------------------------------------------------------------------------
-// The funding amount
+// The leg's sats
 // ---------------------------------------------------------------------------
 
 function varIntSize(n: number): number {
@@ -231,7 +274,7 @@ function varIntSize(n: number): number {
 
 /**
  * The final swap's size in bytes: the pool input at `maxCallUnlockLength`
- * (validator's signature in), `takerInputs` P2PKH inputs (funding, tokens)
+ * (validator's signature in), `takerInputs` P2PKH inputs (the sats, tokens)
  * at 108 bytes of unlocking script, the contract's outputs, no change.
  */
 export function swapTxSize(plan: CallPlan, takerInputs: number): number {
@@ -248,7 +291,7 @@ export function swapTxSize(plan: CallPlan, takerInputs: number): number {
 }
 
 export interface SwapFunding {
-  /** The funding output's exact amount. */
+  /** The leg's sats output's exact amount (0.29.0: an `amm-swap` output). */
   satoshis: number;
   /** What the contract's outputs take beyond the pool's and the token inputs' sats. */
   outputs: number;
@@ -258,7 +301,7 @@ export interface SwapFunding {
 }
 
 /**
- * The exact funding: Σ contract outputs − pool sats − token inputs' sats
+ * The leg's exact sats: Σ contract outputs − pool sats − token inputs' sats
  * (sats in: amount in + 1 for the token payout, the fees and the commission
  * being part of amount in; tokens in: 1 per 1Color fee or commission output
  * − the token inputs' sats), plus
@@ -277,7 +320,7 @@ export function swapFunding(plan: CallPlan, tokenInputs: { satoshis: number }[],
 // The leg
 // ---------------------------------------------------------------------------
 
-export interface PrepareSwapInput {
+export interface PlanLegInput {
   wallet: WalletInterface;
   /** `<txid>_0` (src/lib/tokenId.ts). */
   tokenId: string;
@@ -293,112 +336,40 @@ export interface PrepareSwapInput {
    * the commission to a fresh key of the taker's own.
    */
   commissionPkh: string | null;
-  /** token → sats: `amm-swap` outputs carrying exactly `leg.amountIn`. */
-  tokenInputs?: TokenInput[];
-  /** The token inputs' source transactions (default: `amm-swap`'s, from the wallet). */
-  tokenBeef?: Beef;
+  /**
+   * token → sats: the token inputs carrying exactly `leg.amountIn`, or (0.29.0) what they will be
+   * once staged: one output of 1 sat per leg (`sendToSwapBasket`). Their count and sats size the
+   * leg's sats.
+   */
+  tokenInputs?: Pick<TokenInput, "satoshis" | "amount">[];
   /** sats per 1000 bytes (`VITE_FEE_RATE`). */
   satsPerKb: number;
+}
+
+/** Step 1: the leg's plan, payout keys and exact sats (`funding.satoshis`: the `amm-swap` sats output the leg spends). */
+export interface PlannedLeg {
+  /** The pool outpoint `<txid>_<vout>`. */
+  pool: string;
+  validator: string;
+  bsvIn: boolean;
+  poolUtxo: PoolUtxo;
+  plan: CallPlan;
+  funding: SwapFunding;
+  payout: SwapPayout;
+  commission: SwapCommission;
+}
+
+export interface PrepareSwapInput extends PlanLegInput {
+  /** token → sats: `amm-swap` outputs carrying exactly `leg.amountIn`. */
+  tokenInputs?: TokenInput[];
+  /** The leg's `amm-swap` sats output: exactly the planned `funding.satoshis` (0.29.0). */
+  satsInput: SatsInput;
+  /** The swap basket's source transactions: the sats and token inputs' (default: `amm-swap`'s, from the wallet). */
+  holdingBeef?: Beef;
+  /** Step 1 already done (`planSwapLeg` over the same input); planned here when absent. */
+  planned?: PlannedLeg;
   now?: number;
   ttlMs?: number;
-}
-
-/** The funding output's customInstructions (sweepDeposit reads protocolID / keyID / counterparty). */
-export interface FundingInstructions {
-  protocolID: WalletProtocol;
-  keyID: string;
-  counterparty: "self";
-  /** What the funding is for (swap: `{pool, expires}`; deploy: `{deploy, expires}`; remove: `{remove, expires}`). */
-  amm: { expires: number } & Record<string, unknown>;
-}
-
-/** A funding transaction's one output, as the wallet made it. */
-export interface Funding {
-  createArgs: CreateActionArgs;
-  /** The nosend action's reference (abortAction releases it); absent once the wallet has broadcast. */
-  reference?: string;
-  tx: Transaction;
-  /** The funding transaction as the wallet's AtomicBEEF (with its ancestry). */
-  atomicBeef: number[];
-  txid: string;
-  /** `txid.vout` */
-  outpoint: string;
-  lockingScript: string;
-  keyID: string;
-  instructions: FundingInstructions;
-}
-
-export interface FundingRequest {
-  satoshis: number;
-  expires: number;
-  /** `amm` of the customInstructions, without `expires`. */
-  amm: Record<string, unknown>;
-  description: string;
-  labels: string[];
-  outputDescription: string;
-  /**
-   * true: `createAction` (signAndProcess false, noSend) + `signAction`
-   * (noSend), a gated call (swap, deploy) whose funding someone else
-   * broadcasts. false: one `createAction` the wallet signs and broadcasts
-   * at once (`acceptDelayedBroadcast: false`), an LP-only call.
-   */
-  noSend: boolean;
-}
-
-/**
- * The funding transaction (docs/notes.md, "Swap funding and signing"): one
- * exact output, P2PKH to a fresh P1SAT key (`amm-funding-<hex>`), filed in
- * `1sat-deposit` with tags `amm-funding` and `hold:<expires>`, its key in
- * the customInstructions (sweepDeposit reads protocolID / keyID /
- * counterparty). The output must come back as output 0; a nosend action
- * that does not is aborted.
- */
-export async function createFunding(wallet: WalletInterface, r: FundingRequest): Promise<Funding> {
-  const keyID = `${FUNDING_KEY_PREFIX}${randomHex()}`;
-  const { publicKey: fundingKey } = await wallet.getPublicKey({ protocolID: P1SAT, keyID, counterparty: "self", forSelf: true });
-  const lockingScript = new P2PKH().lock(PublicKey.fromString(fundingKey).toAddress()).toHex();
-  const instructions: FundingInstructions = { protocolID: P1SAT, keyID, counterparty: "self", amm: { ...r.amm, expires: r.expires } };
-  const createArgs: CreateActionArgs = {
-    description: describe(r.description),
-    labels: r.labels,
-    outputs: [
-      {
-        lockingScript,
-        satoshis: r.satoshis,
-        outputDescription: describe(r.outputDescription),
-        basket: DEPOSIT_BASKET,
-        tags: [FUNDING_TAG, depositHoldTag(r.expires)],
-        customInstructions: JSON.stringify(instructions),
-      },
-    ],
-    options: r.noSend ? { signAndProcess: false, randomizeOutputs: false, noSend: true } : { randomizeOutputs: false, acceptDelayedBroadcast: false },
-  };
-  const created = await wallet.createAction(createArgs);
-  let atomicBeef: number[];
-  let reference: string | undefined;
-  if (r.noSend) {
-    reference = created.signableTransaction?.reference;
-    if (!reference) throw new LegShapeError("the wallet returned no signable funding transaction");
-    try {
-      const signed = await wallet.signAction({ reference, spends: {}, options: { noSend: true } });
-      if (!signed.tx) throw new LegShapeError("the wallet returned no signed funding transaction");
-      atomicBeef = Array.from(signed.tx);
-    } catch (err) {
-      await wallet.abortAction({ reference }).catch(() => undefined);
-      throw err;
-    }
-  } else {
-    if (!created.tx) throw new LegShapeError("the wallet returned no funding transaction");
-    atomicBeef = Array.from(created.tx);
-  }
-  const tx = Transaction.fromAtomicBEEF(atomicBeef);
-  const out0 = tx.outputs[0];
-  if (!out0 || out0.satoshis !== r.satoshis || out0.lockingScript.toHex() !== lockingScript) {
-    if (reference) await wallet.abortAction({ reference }).catch(() => undefined);
-    throw new LegShapeError("the wallet moved the funding output; it must be output 0");
-  }
-  const txid = tx.id("hex");
-  return { createArgs, ...(reference ? { reference } : {}), tx, atomicBeef, txid, outpoint: `${txid}.0`, lockingScript, keyID, instructions };
 }
 
 export type SwapPayout =
@@ -412,16 +383,13 @@ export interface PreparedSwap {
   expires: number;
   plan: CallPlan;
   funding: SwapFunding & {
-    createArgs: CreateActionArgs;
-    reference: string;
-    tx: Transaction;
-    /** signAction's AtomicBEEF of the funding transaction (what the relay is sent). */
+    /** The leg's `amm-swap` sats output (input 1). */
+    input: SatsInput;
+    /** Its transaction as the wallet's AtomicBEEF: the swap's funding transaction, what the relay is sent. */
     atomicBeef: number[];
     txid: string;
     /** `txid.vout` */
     outpoint: string;
-    lockingScript: string;
-    instructions: FundingInstructions;
   };
   /** Every input signed except the pool's validator slot. */
   swap: Transaction;
@@ -444,10 +412,8 @@ export interface SwapCommission {
 
 const ZERO_PKH = "00".repeat(20);
 
-const P1SAT = P1SAT_PROTOCOL as WalletProtocol;
-
-/** Steps 1-3 (see the module comment). Throws `PoolBuildError` / `LegShapeError`; aborts the funding action on any failure after it exists. */
-export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
+/** Step 1 (see the module comment). Throws `PoolBuildError` / `LegShapeError`; nothing is created in the wallet but payout keys. */
+export async function planSwapLeg(i: PlanLegInput): Promise<PlannedLeg> {
   const { wallet, leg, pool } = i;
   const bsvIn = i.direction === "bsvToToken";
   const poolUtxo = poolUtxoFrom(i.poolOutput);
@@ -504,9 +470,6 @@ export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
       amountOut: leg.amountOut,
     },
   });
-  const amounts = swapFunding(plan, tokenInputs, i.satsPerKb);
-  const expires = (i.now ?? Date.now()) + (i.ttlMs ?? SWAP_TTL_MS);
-  const sym = i.meta?.sym ?? "token";
 
   const payout: SwapPayout = brc29
     ? { kind: "brc29", outputIndex: 1, satoshis: Number(plan.outputs[1]!.satoshis), lockingScript: plan.outputs[1]!.script, remittance: brc29.remittance }
@@ -522,61 +485,58 @@ export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
       : { kind: "color", outputIndex: at, satoshis: Number(out.satoshis), lockingScript: out.script, receipt: ownCommission.token!.receipt };
   }
 
-  // Token inputs: their source transactions (the active swap basket's), for the final swap's BEEF.
-  let tokenBeef: Beef | null = null;
-  if (tokenInputs.length > 0) {
-    tokenBeef = i.tokenBeef ?? (await basketBeef(wallet, SWAP_BASKET));
-    if (!tokenBeef) throw new LegShapeError("the wallet returned no BEEF for the token inputs");
-    for (const t of tokenInputs) if (!tokenBeef.findTxid(t.txid)) throw new LegShapeError(`the wallet's BEEF lacks the token input ${t.outpoint}`);
+  return { pool: leg.outpoint, validator: pool.validatorIdentityKey, bsvIn, poolUtxo, plan, funding: swapFunding(plan, tokenInputs, i.satsPerKb), payout, commission };
+}
+
+/** Steps 1 (unless `planned` is given) and 3 (see the module comment). Throws `PoolBuildError` / `LegShapeError`; the wallet is left as it was. */
+export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
+  const { wallet } = i;
+  const planned = i.planned ?? (await planSwapLeg(i));
+  const { plan, poolUtxo } = planned;
+  const tokenInputs = i.tokenInputs ?? [];
+  const tokensIn = tokenInputs.reduce((a, t) => a + t.amount, 0n);
+  if (planned.bsvIn ? tokenInputs.length > 0 : tokensIn !== i.leg.amountIn) {
+    throw new LegShapeError(`token inputs carry ${tokensIn}, the leg needs exactly ${planned.bsvIn ? 0n : i.leg.amountIn}`);
+  }
+  // The leg's sats were sized for these token inputs: the same count and sats, or the fee is off.
+  const amounts = swapFunding(plan, tokenInputs, i.satsPerKb);
+  if (amounts.satoshis !== planned.funding.satoshis) throw new LegShapeError(`the token inputs need ${amounts.satoshis} sats with the leg, it was planned with ${planned.funding.satoshis}`);
+  const sats = i.satsInput;
+  if (sats.satoshis !== amounts.satoshis) throw new LegShapeError(`the swap basket's sats output ${sats.outpoint} holds ${sats.satoshis} sats, the leg needs exactly ${amounts.satoshis}`);
+
+  // The inputs' source transactions: the active swap basket's.
+  const beef = i.holdingBeef ?? (await basketBeef(wallet, SWAP_BASKET));
+  if (!beef) throw new LegShapeError("the wallet returned no BEEF for the swap basket");
+  for (const t of [sats, ...tokenInputs]) if (!beef.findTxid(t.txid)) throw new LegShapeError(`the wallet's BEEF lacks the swap basket output ${t.outpoint}`);
+  const sourceOf = (txid: string) => beef.findAtomicTransaction(txid) ?? beef.findTxid(txid)!.tx!;
+
+  // Step 3: the swap transaction.
+  const swap = new Transaction();
+  swap.version = 1;
+  swap.lockTime = 0;
+  swap.addInput({ sourceTXID: poolUtxo.txid, sourceOutputIndex: poolUtxo.vout, sourceTransaction: poolUtxo.sourceTransaction, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+  swap.addInput({ sourceTXID: sats.txid, sourceOutputIndex: sats.vout, sourceTransaction: sourceOf(sats.txid), unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+  for (const t of tokenInputs) swap.addInput({ sourceTXID: t.txid, sourceOutputIndex: t.vout, sourceTransaction: sourceOf(t.txid), unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+  for (const o of plan.outputs) swap.addOutput({ satoshis: Number(o.satoshis), lockingScript: LockingScript.fromHex(o.script) });
+
+  swap.inputs[0]!.unlockingScript = PoolTemplate.callUnlock(plan, swap, null).unlockingScript;
+  swap.inputs[1]!.unlockingScript = await signP2pkhWithWallet(wallet, swap, 1, sats);
+  for (const [n, t] of tokenInputs.entries()) swap.inputs[n + 2]!.unlockingScript = await signP2pkhWithWallet(wallet, swap, n + 2, t);
+  for (let n = 1; n < swap.inputs.length; n++) {
+    if (!spendValid(swap, n)) throw new LegShapeError(`input ${n} of the swap does not validate`);
   }
 
-  // Step 2: the funding transaction.
-  const f = await createFunding(wallet, {
-    satoshis: amounts.satoshis,
-    expires,
-    amm: { pool: leg.outpoint },
-    description: "AMM swap funding",
-    labels: ["amm-swap"],
-    outputDescription: `AMM swap funding ${bsvIn ? "sats → " + sym : sym + " → sats"}`,
-    noSend: true,
-  });
-  const reference = f.reference!;
-  const { keyID, lockingScript: fundingScript, tx: fundingTx, txid: fundingTxid } = f;
-  try {
-    // Step 3: the swap transaction.
-    const swap = new Transaction();
-    swap.version = 1;
-    swap.lockTime = 0;
-    swap.addInput({ sourceTXID: poolUtxo.txid, sourceOutputIndex: poolUtxo.vout, sourceTransaction: poolUtxo.sourceTransaction, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-    swap.addInput({ sourceTXID: fundingTxid, sourceOutputIndex: 0, sourceTransaction: fundingTx, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-    for (const t of tokenInputs) {
-      const src = tokenBeef!.findAtomicTransaction(t.txid) ?? tokenBeef!.findTxid(t.txid)!.tx!;
-      swap.addInput({ sourceTXID: t.txid, sourceOutputIndex: t.vout, sourceTransaction: src, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-    }
-    for (const o of plan.outputs) swap.addOutput({ satoshis: Number(o.satoshis), lockingScript: LockingScript.fromHex(o.script) });
-
-    swap.inputs[0]!.unlockingScript = PoolTemplate.callUnlock(plan, swap, null).unlockingScript;
-    swap.inputs[1]!.unlockingScript = await signP2pkhWithWallet(wallet, swap, 1, { satoshis: amounts.satoshis, lockingScript: fundingScript, protocolID: P1SAT, keyID, counterparty: "self" });
-    for (const [n, t] of tokenInputs.entries()) swap.inputs[n + 2]!.unlockingScript = await signP2pkhWithWallet(wallet, swap, n + 2, t);
-    for (let n = 1; n < swap.inputs.length; n++) {
-      if (!spendValid(swap, n)) throw new LegShapeError(`input ${n} of the swap does not validate`);
-    }
-
-    return {
-      pool: leg.outpoint,
-      validator: pool.validatorIdentityKey,
-      expires,
-      plan,
-      funding: { ...amounts, createArgs: f.createArgs, reference, tx: fundingTx, atomicBeef: f.atomicBeef, txid: fundingTxid, outpoint: f.outpoint, lockingScript: fundingScript, instructions: f.instructions },
-      swap,
-      tokenInputs,
-      payout,
-      commission,
-    };
-  } catch (err) {
-    await wallet.abortAction({ reference }).catch(() => undefined);
-    throw err;
-  }
+  return {
+    pool: planned.pool,
+    validator: planned.validator,
+    expires: (i.now ?? Date.now()) + (i.ttlMs ?? SWAP_TTL_MS),
+    plan,
+    funding: { ...amounts, input: sats, atomicBeef: beef.toBinaryAtomic(sats.txid), txid: sats.txid, outpoint: sats.outpoint },
+    swap,
+    tokenInputs,
+    payout: planned.payout,
+    commission: planned.commission,
+  };
 }
 
 /** @bsv/sdk's `Spend` over input `n` of `tx` (its source output from `sourceTransaction`). */
@@ -650,21 +610,20 @@ export function finalCallOf(ours: Transaction, raw: number[], txid: string | und
 export interface CompletedSwap {
   txid: string;
   internalized: boolean;
-  relinquished: string[];
-  /** Internalize or relinquish errors (the swap itself is final). */
+  /** Internalize errors (the swap itself is final). */
   errors: string[];
 }
 
 /**
- * Accepted: the wallet takes the payout in (`internalizeAction`) and drops
- * what the swap spent from its baskets (`relinquishOutput`: the funding
- * output in `1sat-deposit`, the token inputs in `amm-swap`). The funding
- * transaction stays a `nosend` action; the wallet's TaskCheckNoSends finds
- * its proof once the validator's broadcast is mined.
+ * Accepted: the wallet takes the payout in (`internalizeAction`). No
+ * relinquishOutput (0.29.0, David Case 2026-11-02: "Anything we internalize
+ * should relinquish outputs itself"): taking the swap in marks the wallet's
+ * outputs it spends — the `amm-swap` sats and token inputs — spent
+ * (wallet-toolbox `markUserInputsSpent`).
  */
 export async function completeSwap(wallet: WalletInterface, p: PreparedSwap, raw: number[], txid?: string): Promise<CompletedSwap> {
   const final = finalSwapOf(p, raw, txid);
-  const out: CompletedSwap = { txid: final.id("hex"), internalized: false, relinquished: [], errors: [] };
+  const out: CompletedSwap = { txid: final.id("hex"), internalized: false, errors: [] };
   const outputs: InternalizeOutput[] = [internalizeOutputOf(p.payout)];
   if (p.commission.payout) outputs.push(internalizeOutputOf(p.commission.payout));
   try {
@@ -678,28 +637,11 @@ export async function completeSwap(wallet: WalletInterface, p: PreparedSwap, raw
   } catch (err) {
     out.errors.push(`internalizeAction: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const spent = [
-    { basket: DEPOSIT_BASKET, output: p.funding.outpoint },
-    ...p.tokenInputs.map((t) => ({ basket: SWAP_BASKET, output: t.outpoint })),
-  ];
-  for (const s of spent) {
-    try {
-      await wallet.relinquishOutput(s);
-      out.relinquished.push(s.output);
-    } catch (err) {
-      out.errors.push(`relinquishOutput ${s.output}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
   return out;
 }
 
 function internalizeOutputOf(o: SwapPayout): InternalizeOutput {
   return o.kind === "brc29" ? { outputIndex: o.outputIndex, protocol: WALLET_PAYMENT, paymentRemittance: { ...o.remittance } } : receiptOutput(o.outputIndex, o.receipt);
-}
-
-/** Refused or timed out: the funding action is aborted, freeing the wallet's inputs (its output never existed on chain). */
-export async function abandonSwap(wallet: WalletInterface, p: PreparedSwap): Promise<void> {
-  await wallet.abortAction({ reference: p.funding.reference });
 }
 
 /**
@@ -723,7 +665,6 @@ export function pendingSwapPayouts(p: PreparedSwap, tokenId: string, now = Date.
       ...(o.kind === "brc29" ? { remittance: o.remittance } : { receipt: o.receipt }),
       final: false,
       tokenId,
-      reference: p.funding.reference,
       description,
       createdAt: now,
     });

@@ -24,7 +24,7 @@
  *                      is a market for the token)
  *   VITE_FEE_RATE      the miner fee rate, sats per 1000 bytes, the Swap page
  *                      applies to the swap transaction it builds (default
- *                      100). The swap's fee is paid from the exact funding
+ *                      100). The swap's fee is paid from the leg's exact sats
  *                      output, so the rate is fixed here, not by the wallet
  *
  * From a dev server (serve.sh) the instance is called cross-origin: it sends
@@ -84,7 +84,7 @@ export const AMM_PEER_OVERLAY = (env?.VITE_AMM_PEER_OVERLAY ?? "").replace(/\/+$
 
 /**
  * Miner fee rate for the swap transaction the page builds, sats per 1000
- * bytes (`VITE_FEE_RATE`, default 100). The funding output is sized to the
+ * bytes (`VITE_FEE_RATE`, default 100). The leg's sats output (`amm-swap`) is sized to the
  * swap's inputs and outputs plus this fee over the swap's size with the pool
  * input at `PoolTemplate.maxCallUnlockLength`; the contract allows no change.
  */

@@ -20,7 +20,8 @@
  *
  *   funding    bytes: the funding transaction as the wallet's AtomicBEEF (its
  *              ancestry with it: the validator's overlay verifies the unproven
- *              funding against parents in the BEEF)
+ *              funding against parents in the BEEF); 0.29.0: the transaction
+ *              of the leg's `amm-swap` sats output, the swap's input 1
  *   swap       bytes: the raw swap, the validator's slot `OP_0`
  *   pool       text `<txid>_<vout>`; validator bytes(33); expires unix ms
  *   peerId     text: the validator's libp2p peer ID, from the token's liveness
@@ -77,7 +78,7 @@ export interface SwapSubmit {
   validator: string;
   /** The validator's libp2p peer ID (text), as the liveness read gave it: what the relay dials. */
   peerId: string;
-  /** Unix ms after which the relay gives up (and the funding's hold lapses). */
+  /** Unix ms after which the relay gives up. */
   expires: number;
 }
 

@@ -4,6 +4,71 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.0 (2026-11-02)
+
+Pages only (web/ui). Decided with David after walking the swap, deploy and
+close call by call (plans/wallet-built-flows-2026-11-02.md); the browser
+stores (pending payouts, pending deploys) are unchanged.
+
+- **The swap-basket send carries the legs' sats.** One send per swap stages
+  everything the legs spend in `amm-swap`: tokens in, the module send
+  (`sendToSwapBasket`, `{tokens, sats}`) has the per-leg token outputs and
+  after them ONE P2PKH sats output per leg not covered (exactly the leg's
+  `swapFunding` amount) to a fresh `[2, "amm swap"]` key, filed in
+  `amm-swap` by the createAction itself (customInstructions `{sats: true,
+  protocolID, keyID, counterparty}`; the module passes a non-token output
+  through); sats in, or tokens already staged, a plain createAction
+  (`sendSatsToSwapBasket`, no `p color` labels). A leg's input 1 is its sats
+  output (`SatsInput`, `satsInputsOf`, `selectExactSatsInput`: exact amounts
+  only), signed with `createSignature` like the token inputs; the relay's
+  `funding` is that output's transaction (AtomicBEEF). `prepareSwap` is split:
+  `planSwapLeg` (plan, payout keys, the exact sats) then `prepareSwap`
+  (`planned`, `satsInput`, `holdingBeef`). `createFunding`, the funding
+  noSend action, `abandonSwap`'s abortAction, `1sat-deposit`, the hold tag
+  and `amm-funding` are gone; a refused or timed-out leg leaves its outputs
+  in `amm-swap` for a later swap. `swapTotals` (Your tokens) counts tokens
+  only; the sats rows are shown nowhere.
+- **Move back = ONE wallet createAction** (`moveBack`): `inputBEEF` = the
+  basket's BEEF, `inputs` = every `amm-swap` token output of the token
+  (`unlockingScriptLength` 108), one output to a NEW module receiving key
+  with the receipt as its customInstructions (no basket), labels
+  `["amm-swap"]`, `randomizeOutputs: false`; the page's unlocks go to
+  `signAction` (`src/wallet/action.ts` `runAppSignedAction`, aborted on any
+  failure before the signatures); the wallet funds the fee, adds change,
+  broadcasts. Then the submit, the admission wait and the module take-in as
+  before. A failed submit after the wallet's broadcast is reported, not
+  thrown, so the receipt is kept as a pending payout.
+- **Close = ONE wallet createAction** (layout 2, `bsvFee` 0): the pool an
+  explicit input (`inputBEEF` the lookup's, `unlockingScriptLength`
+  `PoolTemplate.maxCallUnlockLength`), outputs `planClose`'s with the
+  payout's `paymentCustomInstructions` and the receipt; the page fills input
+  0 over the wallet's transaction (its change included: Close(lpSig)'s
+  outputs are free) at signAction. `closePosition` waits for the topic's
+  admission of the token output before the take-in. `bsvFee` > 0: unchanged
+  (the fee from the pool, page-built). A layout-1 pool now needs `bsvFee` > 0
+  (no funding transaction to pay its fee).
+- **No relinquishOutput anywhere** (David: "Anything we internalize should
+  relinquish outputs itself"): `completeSwap`, `moveBack`, `completeClose`
+  call none; `CompletedSwap` / `CompletedClose` / `MovedBack` have no
+  `relinquished`.
+- Manifest: `1sat-deposit` leaves `basketAccess`.
+- Proven against the real wallet-toolbox 2.15.0 (Wallet + StorageKnex/SQLite
+  + WalletPermissionsManager, the class Yours's LocalWalletPermissionsManager
+  extends; MockServices as the network, which verifies every input script)
+  and the real @bsv/color-permission-module 0.1.0, outside this repository
+  (the toolbox is not a dependency here): the toolbox takes `amm-swap` rows
+  and a pool (held or foreign) as explicit inputs with the page's unlocking
+  scripts, marks them spent (`spentBy` the action), and an internalized
+  foreign swap marks its `amm-swap` input spent; customInstructions on an
+  output with no basket are in storage when the transaction is broadcast;
+  the manager routes no createAction or signAction of these flows to the
+  color module; the module's `planOutput` returns a sats output with basket
+  `amm-swap` unchanged.
+- vitest 205 (new: the swap-basket send's tokens + sats output set, the
+  sats-only send, Move back's and Close's createAction / signAction shapes
+  against fake wallets that place explicit inputs first, a sats-in
+  `executeSwap`), zig 79.
+
 ## 0.28.2 (2026-11-02)
 
 - The pages keep no liveness window of their own (David, 2026-11-02:

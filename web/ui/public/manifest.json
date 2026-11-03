@@ -9,7 +9,7 @@
   "theme_color": "#0E1526",
   "metanet": {
     "groupPermissions": {
-      "description": "Open Exchange builds swaps and pools with your wallet, holds the tokens on their way into a swap, and receives the sats pools pay you; the list of your tokens and their amounts is read once through your wallet's 1Color module (granted here); sending tokens, and the exact balance of one token, the module asks you about itself.",
+      "description": "Open Exchange builds swaps and pools with your wallet, holds the tokens and sats on their way into a swap, and receives the sats pools pay you; the list of your tokens and their amounts is read once through your wallet's 1Color module (granted here); sending tokens, and the exact balance of one token, the module asks you about itself.",
       "protocolPermissions": [
         {
           "protocolID": [2, "3241645161d8"],
@@ -54,7 +54,7 @@
       "basketAccess": [
         {
           "basket": "amm-swap",
-          "description": "File the tokens sent into the swap basket for your swap legs, spend them in the legs, and move them back into your wallet."
+          "description": "File the tokens and the sats sent into the swap basket for your swap legs, spend them in the legs, and move the tokens back into your wallet."
         },
         {
           "basket": "amm-pools",
@@ -63,10 +63,6 @@
         {
           "basket": "p color assets",
           "description": "List the 1Color tokens this wallet holds and their amounts (the wallet's 1Color module). The exact balance of one token is asked when you open it."
-        },
-        {
-          "basket": "1sat-deposit",
-          "description": "File the exact funding output of each swap under a short hold, and drop it once the swap has spent it."
         }
       ],
       "certificateAccess": []
