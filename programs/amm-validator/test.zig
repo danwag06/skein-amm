@@ -724,14 +724,18 @@ test "sign: a sats-in swap comes back as the Go fixture, byte for byte; submitte
     const ev = readBack(a, try m.node.launched(served));
     try testing.expectEqualStrings("submit", ev.getText("kind").?);
     try testing.expectEqualStrings(&w.header.toHex(txidOf(want)), ev.getText("txid").?);
-    // The BEEF the event carries: fund (with its BUMP), then the signed transaction.
+    // The BEEF the event carries (0.29.5): fund (with its BUMP, the request's), the pool's transaction
+    // (pool_deploy, with its BUMP: the chain state's BEEF of it; it spends fund, so after it), then the
+    // signed transaction; one BUMP, the block's, both leaves in it.
     const txs = try txsOf(a, ev);
-    try testing.expectEqual(@as(usize, 2), txs.len);
+    try testing.expectEqual(@as(usize, 3), txs.len);
     try testing.expectEqualSlices(u8, f.raw("fund"), txs[0]);
-    try testing.expectEqualSlices(u8, want, txs[1]);
+    try testing.expectEqualSlices(u8, f.raw("pool_deploy"), txs[1]);
+    try testing.expectEqualSlices(u8, want, txs[2]);
     const eb = try w.beef.parse(a, ev.getBytes("beef").?);
     try testing.expectEqual(@as(usize, 1), eb.bumps.len);
     try testing.expectEqual(w.beef.Format.raw_with_bump, eb.entries[0].format);
+    try testing.expectEqual(w.beef.Format.raw_with_bump, eb.entries[1].format);
     const j = ev.getArray("topics").?[0];
     try testing.expectEqualStrings(m.topic, j.getText("topic").?);
     try testing.expectEqual(@as(usize, 1), j.getArray("previousCoins").?.len); // the pool
@@ -926,13 +930,13 @@ test "sign: a request as a BEEF: an unheld parent's source verifies the taker's 
     try testing.expect(sub.ancestry != null);
     // What goes to skein's submit.route: the request's BEEF, parents first,
     // its subject now the signed transaction.
-    const sb = try w.beef.parse(a, try submit.submissionBeef(a, r.ok.tx.?, sub.ancestry));
+    const sb = try w.beef.parse(a, try submit.submissionBeef(a, r.ok.tx.?, sub.ancestry, null));
     try testing.expectEqual(@as(usize, 2), sb.entries.len);
     try testing.expectEqualSlices(u8, parent, sb.entries[0].raw.?);
     try testing.expectEqualSlices(u8, want.raw("swap_bsv_in"), sb.entries[1].raw.?);
     try testing.expectEqualSlices(u8, &txidOf(want.raw("swap_bsv_in")), &sb.subject().?);
     // A raw request: a V1 BEEF of the signed transaction alone.
-    const rb = try w.beef.parse(a, try submit.submissionBeef(a, r.ok.tx.?, null));
+    const rb = try w.beef.parse(a, try submit.submissionBeef(a, r.ok.tx.?, null, null));
     try testing.expectEqual(@as(usize, 1), rb.entries.len);
     // It goes to the submissions box `<app>/submit` (skein-overlay 0.7.5, shruggr/skein#128).
     try testing.expectEqualStrings("amm/submit", try submit.box(a, "amm"));
@@ -1535,13 +1539,16 @@ test "relay request: a swap with its funding transaction as an unproven parent, 
     try testing.expectEqualSlices(u8, &txidOf(m.f.raw("fund")), &ab.entries[0].txid);
 
     // The swap's submission: the engine's route verified the BEEF (the pool contract and both P2PKH spends
-    // run), which carries fund, the funding transaction, the signed swap; the chain app ingests it,
-    // registering and broadcasting the funding transaction and the swap, parents first; RECEIVED admits it.
+    // run), which carries the pool's transaction (0.29.5), fund, the funding transaction, the signed swap;
+    // the chain app ingests it, registering and broadcasting the funding transaction and the swap, parents
+    // first (pool_deploy arrives proven: nothing to broadcast); RECEIVED admits it.
     const ev = readBack(a, try m.node.launched(served));
     const txs = try txsOf(a, ev);
-    try testing.expectEqual(@as(usize, 3), txs.len);
-    try testing.expectEqualSlices(u8, p.funding, txs[1]);
-    try testing.expectEqualSlices(u8, signed, txs[2]);
+    try testing.expectEqual(@as(usize, 4), txs.len);
+    try testing.expectEqualSlices(u8, m.f.raw("fund"), txs[0]);
+    try testing.expectEqualSlices(u8, m.f.raw("pool_deploy"), txs[1]);
+    try testing.expectEqualSlices(u8, p.funding, txs[2]);
+    try testing.expectEqualSlices(u8, signed, txs[3]);
     const first = try m.node.step(ev);
     try testing.expectEqual(Gated.pending, first.gate);
     try testing.expectEqual(@as(usize, 2), m.node.posts); // the funding transaction and the swap, by the chain app
@@ -1557,6 +1564,79 @@ test "relay request: a swap with its funding transaction as an unproven parent, 
     const again = try m.respond(a, req);
     try testing.expect(again.next == .from_state);
     try testing.expectEqual(@as(usize, 0), again.broadcast.len);
+}
+
+/// The door's check (skein kernel-zig/src/door.zig `spv`): skein-sdk `chain.spv.verify` over the
+/// BEEF, `rootAt` the mined block's merkle root at height 1, `knownRaw` none — the BEEF stands alone.
+fn doorVerify(a: std.mem.Allocator, m: *Mined, bytes: []const u8) !w.spv.Result {
+    const Ctx = struct {
+        blk: [80]u8,
+        fn rootAt(ptr: *anyopaque, height: u32) anyerror!?[32]u8 {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            return if (height == 1) c.blk[36..68].* else null;
+        }
+        fn knownRaw(_: *anyopaque, _: std.mem.Allocator, _: [32]u8) anyerror!?[]const u8 {
+            return null;
+        }
+    };
+    var ctx = Ctx{ .blk = m.blk };
+    return w.spv.verify(a, try w.beef.parse(a, bytes), .{ .ptr = &ctx, .rootAtFn = Ctx.rootAt, .knownRawFn = Ctx.knownRaw });
+}
+
+test "submission BEEF (0.29.5): a relay request without the pool's transaction — the submission carries it with its proof and passes the door's check (chain.spv.verify, nothing known); a request that carries it already is not duplicated" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const m = try Mined.init(a, &ms);
+    const pool_txid = txidOf(m.f.raw("pool_deploy"));
+
+    // As the relay sends it: fund (proven), the taker's funding, the swap — no pool_deploy.
+    const p = try relayPair(a, m.f, .signed);
+    const req = try relayBeef(a, m, p);
+    try testing.expect((try w.beef.parse(a, req)).find(pool_txid) == null);
+
+    const served = try m.respond(a, req);
+    try testing.expect(served.reply == .ok);
+    const signed = served.reply.ok.tx.?;
+    // Before 0.29.5 (the request's ancestry alone): the door refuses it, MissingInput (ovh, 2026-11-03).
+    const old = try submit.submissionBeef(a, signed, try w.beef.parse(a, req), null);
+    try testing.expectError(error.MissingInput, doorVerify(a, m, old));
+    const out = served.next.submit.beef;
+    const ob = try w.beef.parse(a, out);
+    // (a) the pool's transaction is in it, with its BUMP; the swap is still the subject, last.
+    const pe = ob.find(pool_txid) orelse return error.TestPoolMissing;
+    try testing.expectEqual(w.beef.Format.raw_with_bump, pe.format);
+    try testing.expect(w.beef.bumpHas(ob.bumps[pe.bump.?], pool_txid));
+    try testing.expectEqualSlices(u8, m.f.raw("pool_deploy"), pe.raw.?);
+    try testing.expectEqualSlices(u8, &txidOf(signed), &ob.subject().?);
+    try testing.expectEqualSlices(u8, &txidOf(signed), &ob.entries[ob.entries.len - 1].txid);
+    try testing.expectEqual(@as(usize, 4), ob.entries.len); // fund, pool_deploy, funding, swap
+    try testing.expectEqual(@as(usize, 1), ob.bumps.len); // one block: one BUMP, both leaves
+    // (b) the door's exact check passes: every input's source inside the BEEF, scripts verified.
+    const r = try doorVerify(a, m, out);
+    for (ob.entries, r.proven) |e, proven| try testing.expectEqual(e.format == .raw_with_bump, proven);
+
+    // (c) a request that carries the pool's transaction already: once, one BUMP, and it verifies.
+    const with = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = ob.bumps, .entries = try a.dupe(w.beef.Entry, &.{
+        ob.entries[0], ob.entries[1], ob.entries[2],
+        .{ .txid = txidOf(p.swap), .format = .raw, .raw = p.swap },
+    }) });
+    var ms2 = w.store.MemStore.init(testing.allocator);
+    defer ms2.deinit();
+    const m2 = try Mined.init(a, &ms2);
+    const served2 = try m2.respond(a, with);
+    try testing.expect(served2.reply == .ok);
+    const ob2 = try w.beef.parse(a, served2.next.submit.beef);
+    try testing.expectEqual(@as(usize, 4), ob2.entries.len);
+    try testing.expectEqual(@as(usize, 1), ob2.bumps.len);
+    for (ob2.entries, 0..) |e, i| for (ob2.entries[0..i]) |x| try testing.expect(!std.mem.eql(u8, &e.txid, &x.txid));
+    _ = try doorVerify(a, m2, served2.next.submit.beef);
+    // The Rescind's path (submit.withPool): a BEEF that holds the pool already is unchanged.
+    const again = try w.beef.parse(a, try submit.withPool(a, out, try ov.state.beefFor((try m.node.state()).ch, pool_txid)));
+    try testing.expectEqual(ob.entries.len, again.entries.len);
+    try testing.expectEqual(ob.bumps.len, again.bumps.len);
 }
 
 test "relay request refused: an unsigned funding input, a bad funding signature, a pool already spent — nothing signed, nothing to broadcast" {

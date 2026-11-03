@@ -370,7 +370,12 @@ fn rescindStep(a: std.mem.Allocator, raw_in: Value) !void {
             },
             .signed => |tx| {
                 const l = (try rescind.locate(a, identity, tx)) orelse return rescindError(a, args, "the Rescind spends no pool of ours");
-                const m = try vm.send(a, &identity, try submit.box(a, ov.calls.appOf(in)), try submit.body(a, tx, try rescind.topicOf(a, l.pool)));
+                // 0.29.5: the same rule as a swap's submission — the pool's transaction with its
+                // ancestry back to proven ones is in the BEEF (the door verifies with nothing known).
+                const st = try overlayState(a, in);
+                const pool_beef = ov.state.beefFor(st.ch, l.op.txid) catch return rescindError(a, args, "the chain state has no BEEF of the pool's transaction");
+                const full = submit.withPool(a, tx, pool_beef) catch |e| return rescindError(a, args, @errorName(e));
+                const m = try vm.send(a, &identity, try submit.box(a, ov.calls.appOf(in)), try submit.body(a, full, try rescind.topicOf(a, l.pool)));
                 try vm.awaitRecord(m);
                 _ = try vm.finish(a, s, try resultRecord(a, "submitted", &.{}));
                 return;

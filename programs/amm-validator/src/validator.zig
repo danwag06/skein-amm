@@ -212,9 +212,10 @@ pub const Parent = struct {
 };
 
 /// What a signed spend's submission needs besides the transaction: the
-/// topic it was judged for, the pool it spends, the request's ancestry
-/// (the signed BEEF is the request's with its subject replaced, submit.zig
-/// `submissionBeef`), and the unproven parents it carries.
+/// topic it was judged for, the pool it spends (0.29.5: its transaction's BEEF is
+/// merged into the submission), the request's ancestry (the signed BEEF is the
+/// request's with its subject replaced, submit.zig `submissionBeef`), and the
+/// unproven parents it carries.
 pub const Submission = struct {
     topic: []const u8,
     pool: Outpoint,

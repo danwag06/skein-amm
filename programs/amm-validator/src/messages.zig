@@ -182,7 +182,14 @@ fn finishSpend(a: std.mem.Allocator, reply: Reply, d: Deps) !Served {
     if (try d.st.isApplied(sub.topic, txid)) return .{ .reply = reply, .next = .from_state };
     if ((try settlementOf(d.st, txid)) != null) return .{ .reply = reply, .next = .from_state };
     if (try d.st.isPending(txid)) if (!(try d.st.isPaused(txid))) return .{ .reply = reply, .next = .{ .wait_on = txid } };
-    const beef = try submit.submissionBeef(a, raw, sub.ancestry);
+    // 0.29.5: the pool's transaction with its ancestry back to proven ones (the chain state's
+    // Atomic BEEF of it), merged in: the door verifies the submission with nothing known.
+    const pool_beef = ov.state.beefFor(d.st.ch, sub.pool.txid) catch |e| return .{ .reply = .{ .refused = .{
+        .reason = .submit_refused,
+        .detail = try std.fmt.allocPrint(a, "the chain state has no BEEF of the pool's transaction back to proven ones: {s}", .{@errorName(e)}),
+        .txid = txid,
+    } } };
+    const beef = try submit.submissionBeef(a, raw, sub.ancestry, pool_beef);
     return .{ .reply = reply, .next = .{ .submit = .{ .beef = beef, .topic = sub.topic } }, .broadcast = sub.parents };
 }
 

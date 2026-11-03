@@ -4,6 +4,29 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.5 (2026-11-03)
+
+- **The validator's submission is a fully proven BEEF** (David: "So fix it").
+  The kernel's door (skein `door.zig`, since c6dbbb0) verifies every BEEF
+  with skein-sdk `chain.spv.verify` and no known transactions, and the
+  relay's request carries the taker's ancestry, never the pool's
+  transaction: every relayed swap was refused `MissingInput` at the door
+  and its relay record waited out `expires` (ovh, 2026-11-02 and 11-03).
+  `messages.finishSpend` now merges the chain state's Atomic BEEF of the
+  pool's transaction (skein-overlay `state.beefFor`: back to proven
+  transactions) into the submission (`submit.submissionBeef`, `merged`):
+  BUMPs combined per block, a transaction both carry kept once (the proven
+  one), parents first, the swap still the subject. No BEEF of the pool's
+  transaction → refused `submit_refused`, nothing submitted. The Rescind's
+  submission takes the same merge (`submit.withPool`; the wallet's Atomic
+  BEEF already carries it: a no-op there).
+- Programs only: the relay (`amm-p2p`) and the pages are unchanged (pages
+  as 0.29.4). The programs had not changed since 0.24.1 but for this.
+- zig 80 (a new test: a relay request without the pool → the submission
+  carries it with its BUMP and passes `chain.spv.verify` with `knownRaw`
+  none; the pre-fix shape fails `MissingInput`; a request that carries the
+  pool is not duplicated); vitest untouched.
+
 ## 0.29.4 (2026-11-02)
 
 - **The deploy's LP keyID is in its pool output description, not a label**
