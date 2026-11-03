@@ -101,7 +101,6 @@ describe("PoolTemplate.decode", () => {
 describe("PoolTemplate.lockDeploy", () => {
   it("rebuilds pool_deploy's pool output (0.13.0: the key, nonce and affirmation in state, no payload); with them still to come, the proposed pool", () => {
     const pool = PoolTemplate.decode(poolDeploy.outputs[0]!.lockingScript)!;
-    expect(pool.affirmation).toBeUndefined();
     expect(PoolTemplate.lockDeploy(pool.args, pool.state).toHex()).toBe(poolDeploy.outputs[0]!.lockingScript.toHex());
     const proposed = PoolTemplate.lockDeploy(pool.args, { ...pool.state, validatorPubKey: RESCINDED_KEY, nonce: "00".repeat(32), affirmation: "" });
     const back = PoolTemplate.decode(proposed)!;
@@ -197,50 +196,21 @@ describe("rebuilding the fixtures", () => {
       { satoshis: 1n, script: close.outputs[1]!.lockingScript.toHex() },
     ];
     expect(close.outputs[1]!.lockingScript.toHex().endsWith(`76a914${pkh(lpTokens)}88ac`)).toBe(true);
-    const call = await PoolTemplate.close({ pool: poolUtxo(swap2), inputs: [], bsvFee: 0n, outputs, lpKey, changePkh: pkh(lpKey), fee: { sats: v.closeFee - 1 } });
+    const call = await PoolTemplate.close({ pool: poolUtxo(swap2), inputs: [], outputs, lpKey, changePkh: pkh(lpKey), fee: { sats: v.closeFee - 1 } });
     expect(call.unsigned).toEqual([]);
     expect(call.next).toBeNull();
     expect(call.tx.toHex()).toBe(v.close);
     expect(verifyInput(call.tx, 0)).toBe(true);
     // The rescinded pool closes the same.
-    const c2 = await PoolTemplate.close({ pool: poolUtxo(rescind), inputs: [], bsvFee: 0n, outputs, lpKey, changePkh: pkh(lpKey), fee: { sats: v.closeFee - 1 } });
+    const c2 = await PoolTemplate.close({ pool: poolUtxo(rescind), inputs: [], outputs, lpKey, changePkh: pkh(lpKey), fee: { sats: v.closeFee - 1 } });
     expect(c2.tx.toHex()).toBe(v.close_rescinded);
     expect(verifyInput(c2.tx, 0)).toBe(true);
     // No outputs named: refused.
-    expect(() => PoolTemplate.planClose({ pool: poolUtxo(swap2), bsvFee: 0n })).toThrow(PoolBuildError);
+    expect(() => PoolTemplate.planClose({ pool: poolUtxo(swap2), outputs: [] })).toThrow(PoolBuildError);
   });
 
-  it("close of a layout-1 pool (before 0.13.0), bsvFee 0: byte for byte, the contract's outputs, the fee and the token output's sat from another input, Rúnar's change after", async () => {
-    const swap2v1 = Transaction.fromHex(v1.swap_tokens_in);
-    const fund1 = Transaction.fromHex(v1.fund);
-    expect(PoolTemplate.decode(swap2v1.outputs[0]!.lockingScript)!.version).toBe(1);
-    const call = await PoolTemplate.close({
-      pool: poolUtxo(swap2v1),
-      inputs: [input(fund1, 3, lpKey)],
-      bsvFee: 0n,
-      lpKey,
-      changePkh: pkh(lpKey),
-      fee: { sats: 600 },
-    });
-    expect(call.tx.toHex()).toBe(v1.close);
-    expect(verifyInput(call.tx, 0)).toBe(true);
-  });
-
-  it("close of a layout-1 pool, bsvFee 1,000: byte for byte, the fee left from the pool's sats", async () => {
-    const swap2v1 = Transaction.fromHex(v1.swap_tokens_in);
-    const plan = PoolTemplate.planClose({ pool: poolUtxo(swap2v1), bsvFee: BigInt(v1.closeFee) });
-    expect(plan.outputs.map((o) => o.satoshis)).toEqual([BigInt(v1.pool2.bsv - v1.closeFee), 1n]);
-    const call = await PoolTemplate.close({ pool: poolUtxo(swap2v1), inputs: [], bsvFee: BigInt(v1.closeFee), lpKey, changePkh: pkh(lpKey), fee: { sats: v1.closeFee - 1 } });
-    expect(call.tx.toHex()).toBe(v1.close_fee);
-    expect(verifyInput(call.tx, 0)).toBe(true);
-    // A layout-1 pool decodes with its deploy's affirmation as the payload.
-    const d = PoolTemplate.decode(Transaction.fromHex(v1.pool_deploy).outputs[0]!.lockingScript)!;
-    expect(d.version).toBe(1);
-    expect(d.affirmation).toBe(v1.affirmation);
-    const sats = BigInt(v1.pool2.bsv);
-    expect(PoolTemplate.planClose({ pool: poolUtxo(swap2v1), bsvFee: sats }).outputs).toHaveLength(1);
-    expect(() => PoolTemplate.planClose({ pool: poolUtxo(swap2v1), bsvFee: sats + 1n })).toThrow(PoolBuildError);
-    expect(() => PoolTemplate.planClose({ pool: poolUtxo(swap2v1), bsvFee: -1n })).toThrow(PoolBuildError);
+  it("0.29.1: a layout-1 pool (the 0.9.0-0.12.x contract) decodes as no pool", () => {
+    for (const hex of [v1.pool_deploy, v1.swap_tokens_in]) expect(PoolTemplate.decode(Transaction.fromHex(hex).outputs[0]!.lockingScript)).toBeNull();
   });
 
   it("a fee rate: the interpreter accepts the finished swap", async () => {

@@ -29,9 +29,8 @@
  *      validator, its fees and its nonce).
  *
  * Keys:
- *  - LP key: as above. Pools before 0.13.0 keyed it by the deploy's first
- *    token input (`lpDerivation`, `lpKeyId`; before BRC-29, `legacyLpKeyId`
- *    under `P1SAT_PROTOCOL`): kept for their rows and for Recover.
+ *  - LP key: as above (0.29.1: the pre-0.13.0 LP keys, keyed by the deploy's
+ *    first token input or under `P1SAT_PROTOCOL`, are gone with layout 1).
  *  - Validator key: the anyone-child of the validator's identity keyed by
  *    the nonce (src/lib/keys.ts `deriveFirstValidatorPubKey`), a public
  *    derivation the page checks.
@@ -55,8 +54,6 @@ export interface ValidatorChoice {
   identityKey: string;
 }
 
-/** The keyID prefix of the pre-BRC-29 LP keys (`P1SAT_PROTOCOL`). */
-export const LP_KEY_PREFIX = "amm-lp-";
 /** The LP key's protocol: BRC-29 (see the module comment). */
 export const LP_KEY_PROTOCOL: WalletProtocol = BRC29_PROTOCOL;
 const LP_DERIVATION_PREFIX = Utils.toBase64(Utils.toArray("amm-lp", "utf8"));
@@ -72,23 +69,6 @@ function describe(text: string): string {
 /** A new pool's LP key derivation (0.13.0): derivationPrefix base64("amm-lp"), derivationSuffix 16 random bytes, base64. */
 export function newLpDerivation(): { derivationPrefix: string; derivationSuffix: string } {
   return { derivationPrefix: LP_DERIVATION_PREFIX, derivationSuffix: randomBase64(16) };
-}
-
-/** A pool before 0.13.0: the LP key's BRC-29 derivation for a pool output created by a transaction whose key input spends `outpoint` (`<txid>_<vout>` or `txid.vout`). */
-export function lpDerivation(outpoint: string): { derivationPrefix: string; derivationSuffix: string } {
-  const [txid, vout] = outpoint.split(/[._]/);
-  return { derivationPrefix: LP_DERIVATION_PREFIX, derivationSuffix: Utils.toBase64(Utils.toArray(`${txid}_${vout}`, "utf8")) };
-}
-
-/** The LP key's keyID (`LP_KEY_PROTOCOL`) for `outpoint`: `"<derivationPrefix> <derivationSuffix>"`. */
-export function lpKeyId(outpoint: string): string {
-  return brc29KeyID(lpDerivation(outpoint));
-}
-
-/** The pre-BRC-29 LP keyID (`P1SAT_PROTOCOL`): `amm-lp-<txid>_<vout>`. */
-export function legacyLpKeyId(outpoint: string): string {
-  const [txid, vout] = outpoint.split(/[._]/);
-  return `${LP_KEY_PREFIX}${txid}_${vout}`;
 }
 
 /** A basket row as the wallet lists it. */

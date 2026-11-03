@@ -1,7 +1,7 @@
 /**
  * Your tokens: the wallet's own 1Color tokens with balance (the BRC-207 module's), each marked on
  * this exchange or not; beside the balance, what the swap basket holds of it,
- * with "Move back" (0.12.0: the recovery path for a stuck swap, and a closed position's tokens).
+ * with "Move back" (0.12.0: the recovery path for a stuck swap).
  */
 import { useState } from "react";
 import { COLOR_DEPLOY_HREF, moveBackTokens, useMyTokens, type Session, type WalletToken } from "../data/exchange";

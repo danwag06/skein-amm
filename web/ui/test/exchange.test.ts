@@ -444,7 +444,7 @@ describe("exchange.ts, wired", () => {
     // Closed: gone from the list; and a close of a position not held is refused.
     inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
     expect(await myPositions()).toEqual([]);
-    await expect(closePosition({ outpoint: `${swap1.id("hex")}.0`, bsvFee: 0n })).rejects.toThrow(/No such position/);
+    await expect(closePosition({ outpoint: `${swap1.id("hex")}.0` })).rejects.toThrow(/No such position/);
   });
 
   it("myPositions (0.28.0): a pool whose filed output the wallet itself spent (listOutputs has no row) is found in its deploy history (listActions amm-pool-deploy) and listed at its current output; a filed row for the same pool is not listed twice", async () => {

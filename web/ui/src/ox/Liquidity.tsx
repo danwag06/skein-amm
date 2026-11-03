@@ -1,7 +1,7 @@
 /**
  * Liquidity: your positions, and deploying a new one. A position is only
  * deployed or closed: no add, no partial remove (resize = close, then deploy).
- * Closing asks for bsvFee, the miner fee left from the pool. Deploying takes
+ * Closing is one wallet action (0.29.1): the wallet pays the miner fee; nothing to enter. Deploying takes
  * the validator's fees as they are (read-only).
  */
 import { useEffect, useState } from "react";
@@ -26,25 +26,16 @@ import { routeHref } from "./route";
 
 function PositionCard({ p, onClosed }: { p: Position; onClosed: (msg: string, txid: string) => void }) {
   const [confirm, setConfirm] = useState(false);
-  const [feeText, setFeeText] = useState("0");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const fee = parseInput(feeText, 0);
-  const feeBad = fee === null || fee > p.sats;
   const pair = `${p.sym} / BSV`;
 
   async function close() {
-    if (fee === null) return;
     setBusy(true);
     setError(null);
     try {
-      const r = await closePosition({ outpoint: p.outpoint, bsvFee: fee });
-      onClosed(
-        r.tokensTo === "wallet"
-          ? `Closed ${pair}: ${fmtSats(r.sats)} sats and ${fmtAmount(r.tokens, p.dec)} ${p.sym} returned to your wallet.`
-          : `Closed ${pair}: ${fmtSats(r.sats)} sats returned to your wallet; ${fmtAmount(r.tokens, p.dec)} ${p.sym} are in the swap basket (Your tokens, Move back).`,
-        r.txid,
-      );
+      const r = await closePosition({ outpoint: p.outpoint });
+      onClosed(`Closed ${pair}: ${fmtSats(r.sats)} sats and ${fmtAmount(r.tokens, p.dec)} ${p.sym} returned to your wallet.`, r.txid);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -52,40 +43,15 @@ function PositionCard({ p, onClosed }: { p: Position; onClosed: (msg: string, tx
   }
 
   if (confirm) {
-    const feeId = `fee-${p.outpoint}`;
     return (
       <article className="panel pos pos-confirm" aria-label={`Close ${pair}`}>
         <h2 className="h2 h2-sm">Close {pair}?</h2>
         <p className="fg2 small">
-          {p.legacy ? (
-            <>
-              Everything in the pool returns to you: {fmtSats(p.sats)} sats to your wallet, and {fmtAmount(p.tokens, p.dec)} {p.sym} to the swap basket, which
-              Your tokens moves back into your wallet.
-            </>
-          ) : (
-            <>
-              Everything in the pool returns to your wallet: {fmtSats(p.sats)} sats and {fmtAmount(p.tokens, p.dec)} {p.sym}.
-            </>
-          )}
+          Everything in the pool returns to your wallet: {fmtSats(p.sats)} sats and {fmtAmount(p.tokens, p.dec)} {p.sym}. Your wallet pays the miner fee.
         </p>
-        <div className="field">
-          <label htmlFor={feeId}>Miner fee from the pool (sats)</label>
-          <input
-            id={feeId}
-            inputMode="numeric"
-            value={feeText}
-            onChange={(e) => setFeeText(e.target.value)}
-            aria-invalid={feeBad || undefined}
-            aria-describedby={`${feeId}-help`}
-            autoFocus
-          />
-          <span id={`${feeId}-help`} className={`help ${feeBad ? "bad" : ""}`}>
-            {feeBad ? "A whole number of sats, at most the pool's sats." : "0 pays the fee from another input in your wallet."}
-          </span>
-        </div>
         {error && <Notice kind="bad">{error}</Notice>}
         <div className="row">
-          <button type="button" className="btn btn-primary" onClick={() => void close()} disabled={busy || feeBad}>
+          <button type="button" className="btn btn-primary" onClick={() => void close()} disabled={busy}>
             {busy ? "Closing…" : "Close"}
           </button>
           <button type="button" className="btn btn-outline" onClick={() => setConfirm(false)} disabled={busy}>

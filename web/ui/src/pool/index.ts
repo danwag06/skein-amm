@@ -25,5 +25,5 @@ export {
   type SigSlot,
   type PoolBuildErrorCode,
 } from "./template";
-export { poolArtifact, poolArtifactV1, artifactOf, METHOD_INDEX, type PoolMethod, type PoolVersion } from "./artifact";
+export { poolArtifact, artifactOf, METHOD_INDEX, type PoolMethod, type PoolVersion } from "./artifact";
 export { decodeOneColor, oneColorValuePrefix, type OneColorPrefix, type OneColorRole } from "./oneColor";

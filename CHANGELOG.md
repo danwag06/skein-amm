@@ -4,6 +4,52 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.1 (2026-11-02)
+
+Pages only (web/ui). David's corrections to 0.29.0, decided 2026-11-02.
+
+- **Close has ONE path: the wallet createAction**, for every pool. The
+  page-built close (`bsvFee` > 0, the fee left from the pool) is gone, and
+  with it the `bsvFee` number, the Close card's fee field and its help text
+  (the card now says the wallet pays the miner fee), `CloseRequest.bsvFee`,
+  `CloseResult.tokensTo`, `PreparedClose.walletBuilt` / `version` / `tokens`,
+  `CloseInput.satsPerKb`, `LEGACY_FEE` and `LEGACY_LP_KEY` (a non-BRC-29 LP
+  key is refused as "not a BRC-29 key to self"). Every sat of the pool goes
+  to the LP's BRC-29 payout; the tokens to a module receiving key.
+- **Layout 1 (pools before 0.13.0) is dropped** (decided 2026-10-22; every
+  testnet pool is layout 2). `src/pool`: the v1 artifact
+  (`pool.v1.artifact.json`, `poolArtifactV1`) is deleted, `PoolVersion` is
+  `2`, `decode` matches layout 2 only (a layout-1 script, the testnet's
+  AMM1 pool included, is no pool), `Pool.affirmation` (the v1 payload) is
+  gone, `planClose` / `close` take the LP's `outputs` only (no `bsvFee`, no
+  `Close(sig, bsvFee)` arguments). `src/lp/recover.ts`: the walk back to a
+  v1 deploy's input 0 (`keyInputCandidates`, `findLpKey`), the pre-0.13.0 LP
+  keys (`lpDerivation`, `lpKeyId`, `legacyLpKeyId`, `LP_KEY_PREFIX`, the
+  `P1SAT_PROTOCOL` keys), `keyInput` and the `notMine` / `noDeploy` notices
+  are gone: the deploy history's keys, then the browser's kept keys.
+  Positions: no `legacy` flag; the Close card's "tokens land in the swap
+  basket" text is gone.
+- **Move back sweeps the token's sats rows.** Sats rows now name the token
+  whose swap staged them (`{sats: true, assetId, …}`; `sendSatsToSwapBasket`
+  takes the token id); Move back's createAction takes every `amm-swap` row
+  of the token, the token rows and its sats rows, as explicit inputs; the one
+  token output is unchanged and the wallet's change absorbs the sats. The
+  legs still select any sats row of the exact amount.
+- **Deterministic payout keys for swap legs.** A leg's payout key (the
+  BRC-29 sats payment, or the BRC-207 receipt) and the taker's own
+  commission key are derived from the leg's first staged `amm-swap` input,
+  `<txid>.<vout>` (display hex): tokens in, its first token row (the swap's
+  input 2); sats in, its sats row (input 1). derivationSuffix =
+  base64(sha256(UTF-8 of that text)); derivationPrefix = base64("amm swap")
+  for the payout, base64("amm swap commission") for the commission
+  (`legDerivation`, `legKeyInputOf`). The receipt's sender is still the
+  pool's validator; the BRC-29 sender the user. `planSwapLeg` sizes the leg
+  with placeholder addresses and makes no wallet call; `prepareSwap` derives
+  the keys and re-plans (the sats must match). The pending-payout records
+  are written exactly as before (David: "just because it is deterministic
+  doesn't mean we will know that we didn't complete the internalization").
+- vitest 203; zig 79.
+
 ## 0.29.0 (2026-11-02)
 
 Pages only (web/ui). Decided with David after walking the swap, deploy and

@@ -245,8 +245,6 @@ export interface Position {
   /** Fees the pool has earned the LP, when it can be told. */
   feesEarnedSats?: bigint;
   validator: ValidatorRef;
-  /** A pool deployed before 0.13.0 (layout 1): its Close pays the tokens to the LP key, so they land in the swap basket (Move back). */
-  legacy?: boolean;
   /** The validator rescinded the pool (0.13.0): no swaps; the LP closes it. */
   rescinded?: boolean;
 }
@@ -276,8 +274,6 @@ export interface RecoverResult {
 
 export interface CloseRequest {
   outpoint: string;
-  /** The miner fee left from the pool, sats. 0 = the wallet's own action pays it (0.29.0; a pool from before 0.13.0 needs more than 0). */
-  bsvFee: bigint;
 }
 
 export interface CloseResult {
@@ -285,8 +281,6 @@ export interface CloseResult {
   /** Returned to the wallet. */
   sats: bigint;
   tokens: bigint;
-  /** Where the tokens went: the wallet's balance (0.13.0, through the module), or the swap basket (a pool before 0.13.0: Move back). */
-  tokensTo: "wallet" | "swap basket";
 }
 
 /** One of the user's own 1Color tokens. */
@@ -957,7 +951,7 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
       else x.r.result.error ??= `the swap basket send has no sats output for this leg${why}`;
     });
   } else if (shortSats.length > 0) {
-    const s = await sendSatsToSwapBasket(wallet, shortSats.map((x) => x.planned.funding.satoshis), { sym: p.sym });
+    const s = await sendSatsToSwapBasket(wallet, tokenId, shortSats.map((x) => x.planned.funding.satoshis), { sym: p.sym });
     sent = s.tx;
     const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
     shortSats.forEach((x, n) => {
@@ -1055,7 +1049,6 @@ export async function myPositions(): Promise<Position[]> {
       sats: pos.sats,
       tokens: pos.pool.state.tokenReserve,
       validator: { identityKey: identity, live: live ? validatorStatus(identity, live).live : false },
-      ...(pos.pool.version === 1 ? { legacy: true } : {}),
       ...(PoolTemplate.rescinded(pos.pool) ? { rescinded: true } : {}),
     });
   }
@@ -1160,8 +1153,7 @@ export async function deployPosition(req: DeployRequest): Promise<DeployResult> 
 
 /**
  * Closes a position (src/lp/close.ts): everything in the pool returns to the
- * wallet, less `bsvFee` (the miner fee left from the pool; 0: 0.29.0, the
- * wallet's own action pays it); submitted to this skein's overlay.
+ * wallet (its own action pays the miner fee); submitted to this skein's overlay.
  */
 export async function closePosition(req: CloseRequest): Promise<CloseResult> {
   const { wallet, signedFor } = needWallet();
@@ -1179,19 +1171,17 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
     meta: { ...(m?.sym ? { sym: m.sym } : {}), ...(m?.dec !== undefined ? { dec: m.dec } : {}) },
     poolOutput: pos.output,
     lpKey: pos.row.lpKey,
-    bsvFee: req.bsvFee,
-    satsPerKb: FEE_RATE_SATS_PER_KB,
   });
   const base = await tokenBaseOf(pos.row.tokenId);
   const steak = await submitToOverlay(base, prepared.topic, prepared.beef);
   // The module takes the tokens in only once the topic admits them (0.29.0: waited for here, as Move back does).
-  if (prepared.receipt && !(steak.steak?.[prepared.topic]?.outputsToAdmit.includes(prepared.receipt.outputIndex) ?? false)) {
+  if (!(steak.steak?.[prepared.topic]?.outputsToAdmit.includes(prepared.receipt.outputIndex) ?? false)) {
     await awaitAdmitted(signedFor(base), base, sdkTokenId(pos.row.tokenId), prepared.txid, prepared.receipt.outputIndex).catch(() => false);
   }
   await completeClose(wallet, prepared, context.payouts);
   loaded.delete(req.outpoint);
   emit();
-  return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount, tokensTo: prepared.version === 2 ? "wallet" : "swap basket" };
+  return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount };
 }
 
 /**

@@ -81,13 +81,14 @@ export function p2pkhHexOf(publicKey: string): string {
   return new P2PKH().lock(PublicKey.fromString(publicKey).toAddress()).toHex();
 }
 
-/** A fresh payout key: random prefix and suffix, sender = the user's identity. */
+/** A payout key: random prefix and suffix unless `derivation` names them (0.29.1: a swap leg's, derived from its input), sender = the user's identity. */
 export async function newBrc29Payout(
   wallet: WalletInterface,
   identityKey?: string,
+  derivation?: { derivationPrefix: string; derivationSuffix: string },
 ): Promise<{ remittance: PaymentRemittance; publicKey: string; lockingScript: string }> {
   const senderIdentityKey = identityKey ?? (await identityKeyOf(wallet));
-  const remittance: PaymentRemittance = { derivationPrefix: randomBase64(), derivationSuffix: randomBase64(), senderIdentityKey };
+  const remittance: PaymentRemittance = { derivationPrefix: derivation?.derivationPrefix ?? randomBase64(), derivationSuffix: derivation?.derivationSuffix ?? randomBase64(), senderIdentityKey };
   const publicKey = await brc29PublicKey(wallet, remittance);
   return { remittance, publicKey, lockingScript: p2pkhHexOf(publicKey) };
 }

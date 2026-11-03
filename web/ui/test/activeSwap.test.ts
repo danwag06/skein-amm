@@ -117,14 +117,14 @@ function fakeWallet(rows: { tx: Transaction; row: Record<string, unknown> }[] = 
   return { wallet: w as unknown as WalletInterface, calls };
 }
 
-/** An `amm-swap` sats row of `satoshis` under keyID `keyID` (0.29.0). */
-function satsRow(satoshis: number, keyID: string) {
+/** An `amm-swap` sats row of `satoshis` under keyID `keyID`, staged for `assetId`'s swap (0.29.0; 0.29.1 the assetId). */
+function satsRow(satoshis: number, keyID: string, assetId = TOKEN) {
   const tx = new Transaction();
   tx.addInput({ sourceTXID: "78".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
   tx.addOutput({ satoshis, lockingScript: new P2PKH().lock(PublicKey.fromString(side.publicKey({ protocolID: SWAP, keyID, counterparty: "self", forSelf: true })).toAddress()) });
   return {
     tx,
-    row: { outpoint: `${tx.id("hex")}.0`, satoshis, spendable: true, lockingScript: tx.outputs[0]!.lockingScript.toHex(), customInstructions: JSON.stringify({ sats: true, protocolID: SWAP, keyID, counterparty: "self" }) },
+    row: { outpoint: `${tx.id("hex")}.0`, satoshis, spendable: true, lockingScript: tx.outputs[0]!.lockingScript.toHex(), customInstructions: JSON.stringify({ sats: true, assetId, protocolID: SWAP, keyID, counterparty: "self" }) },
   };
 }
 
@@ -157,7 +157,7 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
     ]);
     // Token outputs: destinations (no basket; filed after, by insertion). Sats outputs: filed in amm-swap by the createAction.
     expect(create.outputs!.map((o) => o.basket)).toEqual([undefined, undefined, "amm-swap", "amm-swap"]);
-    expect(JSON.parse(create.outputs![2]!.customInstructions!)).toEqual({ sats: true, protocolID: SWAP, keyID: keys[2]!.keyID, counterparty: "self" });
+    expect(JSON.parse(create.outputs![2]!.customInstructions!)).toEqual({ sats: true, assetId: TOKEN, protocolID: SWAP, keyID: keys[2]!.keyID, counterparty: "self" });
     expect(submitted).toEqual([TOPIC]);
 
     expect(s.holdings.map((h) => [h.outpoint, h.amount, h.keyID])).toEqual([
@@ -187,7 +187,7 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
 
   it("sats only (a sats-in swap, or tokens already staged): a plain createAction, no p color labels, the sats outputs filed in amm-swap; nothing submitted, nothing internalized", async () => {
     const { wallet, calls } = fakeWallet();
-    const s = await sendSatsToSwapBasket(wallet, [20_123, 9], { sym: "TST" });
+    const s = await sendSatsToSwapBasket(wallet, TOKEN, [20_123, 9], { sym: "TST" });
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.labels).toEqual(["amm-swap"]);
     expect(create.inputs).toBeUndefined();
@@ -207,7 +207,7 @@ describe("into the swap basket (0.29.0): ONE send per swap — the module send w
   it("nothing to send, or a wallet that refuses: an error, nothing filed", async () => {
     const { wallet, calls } = fakeWallet();
     await expect(sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [], sats: [] })).rejects.toThrow(/nothing to send/);
-    await expect(sendSatsToSwapBasket(wallet, [])).rejects.toThrow(/nothing to send/);
+    await expect(sendSatsToSwapBasket(wallet, TOKEN, [])).rejects.toThrow(/nothing to send/);
     (wallet as unknown as { createAction: () => Promise<never> }).createAction = async () => {
       throw new Error("BRC-207: the user declined the color_send request");
     };
@@ -220,7 +220,9 @@ describe("move back (0.29.0): ONE wallet createAction — every amm-swap output 
   it("createAction {inputBEEF, inputs (108-byte unlocks), one 1Color output carrying the receipt, no basket} → signAction with the page's unlocks; the wallet funds it; submitted; taken in with the receipt; no relinquishOutput", async () => {
     const a = swapRow(30n, "amm-swap-a");
     const b = swapRow(12n, "amm-swap-b");
-    const { wallet, calls } = fakeWallet([a, b, satsRow(77, "amm-swap-s")]);
+    const mine = satsRow(77, "amm-swap-s");
+    const others = satsRow(66, "amm-swap-o", `${"ab".repeat(32)}_0`);
+    const { wallet, calls } = fakeWallet([a, b, mine, others]);
     const store = new PendingPayoutStore(memKV());
     const submitted: { topic: string; beef: number[] }[] = [];
     const r = await moveBack({
@@ -234,14 +236,16 @@ describe("move back (0.29.0): ONE wallet createAction — every amm-swap output 
     });
     expect(r.amount).toBe(42n);
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
-    // The token's rows only (not the sats row), each as an explicit input the page unlocks; their sources in inputBEEF.
+    // The token's rows and (0.29.1) the sats row staged for its legs — not another token's — each an explicit input the page unlocks; their sources in inputBEEF.
     expect(create.inputs).toEqual([
       { outpoint: a.row.outpoint, unlockingScriptLength: 108, inputDescription: "TST in the swap basket" },
       { outpoint: b.row.outpoint, unlockingScriptLength: 108, inputDescription: "TST in the swap basket" },
+      { outpoint: mine.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats staged for a TST swap" },
     ]);
     const ib = Beef.fromBinary(Array.from(create.inputBEEF!));
     expect(ib.findTxid(a.tx.id("hex"))).toBeTruthy();
     expect(ib.findTxid(b.tx.id("hex"))).toBeTruthy();
+    expect(ib.findTxid(mine.tx.id("hex"))).toBeTruthy();
     expect(create.labels).toEqual(["amm-swap"]); // no p color labels: the module is not in the path
     expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
     expect(create.outputs).toHaveLength(1);
@@ -253,16 +257,18 @@ describe("move back (0.29.0): ONE wallet createAction — every amm-swap output 
     const recv = side.publicKey({ protocolID: colorProtocolID(TOKEN, receipt.derivationPrefix, receipt.derivationSuffix), keyID: "color", counterparty: side.identityKey, forSelf: true });
     expect(o.lockingScript).toBe(tokenP2pkhScript(TOKEN, 42n, recv));
 
-    // signAction: the page's unlocks for inputs 0 and 1 (the wallet's funding is its own).
+    // signAction: the page's unlocks for inputs 0-2 (the wallet's funding is its own).
     const sa = calls.find((c) => c.method === "signAction")!.args as { reference: string; spends: Record<number, { unlockingScript: string }>; options?: unknown };
     expect(sa.reference).toBe("ref-mb");
-    expect(Object.keys(sa.spends)).toEqual(["0", "1"]);
+    expect(Object.keys(sa.spends)).toEqual(["0", "1", "2"]);
     expect(sa.options).toEqual({ acceptDelayedBroadcast: false });
     const tx = Transaction.fromAtomicBEEF(r.beef);
     expect(tx.id("hex")).toBe(r.txid);
-    expect(tx.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([a.row.outpoint, b.row.outpoint, `${fund.id("hex")}.0`]);
-    for (let n = 0; n < 3; n++) expect(spendValid(tx, n)).toBe(true);
-    for (const n of [0, 1]) expect(tx.inputs[n]!.unlockingScript!.toHex()).toBe(sa.spends[n]!.unlockingScript);
+    expect(tx.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([a.row.outpoint, b.row.outpoint, mine.row.outpoint, `${fund.id("hex")}.0`]);
+    for (let n = 0; n < 4; n++) expect(spendValid(tx, n)).toBe(true);
+    // The sats are absorbed by the wallet's change: the only page output is the 1-sat token output.
+    expect(create.outputs).toHaveLength(1);
+    for (const n of [0, 1, 2]) expect(tx.inputs[n]!.unlockingScript!.toHex()).toBe(sa.spends[n]!.unlockingScript);
     expect(submitted.map((x) => x.topic)).toEqual([TOPIC]);
     expect(submitted[0]!.beef).toEqual(r.beef);
     expect(r.submitted).toBe(`admitted under ${TOPIC} (outputs 0)`);

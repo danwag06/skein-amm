@@ -10,7 +10,7 @@
  */
 import { colorReceiptInstructions } from "@1sat/actions";
 import { colorProtocolID } from "@bsv/color-permission-module";
-import { BigNumber, ECDSA, Beef, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
+import { BigNumber, ECDSA, Beef, Hash, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { computeSwap, type Leg, type PoolState } from "@amm-poc/matching-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BRC29, brc29Side, isBrc29 } from "./brc29Wallet";
@@ -31,7 +31,11 @@ import { buildMarketView, marginalPrice, validatorStatus } from "../src/market/v
 import { buildPlanRequest, goneFromLookup, livePools, quote, type SwapForm } from "../src/market/plan";
 import { PEER, beatEntry, liveFor } from "./liveRead";
 import {
+  LEG_COMMISSION_PREFIX,
+  LEG_PAYOUT_PREFIX,
   assetIdOf,
+  legDerivation,
+  legKeyInputOf,
   pendingSwapPayouts,
   planSwapLeg,
   prepareSwap,
@@ -478,6 +482,55 @@ describe("the leg's sats (0.29.0: an amm-swap output)", () => {
     const { wallet, calls } = fakeWallet();
     await expect(planSwapLeg({ wallet, tokenId: TOKEN_ID, direction: "bsvToToken", leg: legFor(pool, "bsvToToken", 20_000n), pool, poolOutput: { beef: atomic(poolDeploy), outputIndex: 0 }, commissionPkh: null, satsPerKb: RATE })).rejects.toThrow(/the pool moved/);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("the payout keys (0.29.1): derived from the leg's first staged input, recomputable from the swap alone", () => {
+  const b64 = (t: string) => Utils.toBase64(Utils.toArray(t, "utf8"));
+  const suffixOf = (outpoint: string) => Utils.toBase64(Hash.sha256(Utils.toArray(outpoint, "utf8")) as number[]);
+
+  it("the rule: prefix base64(\"amm swap\") (payout) or base64(\"amm swap commission\") (own commission), suffix base64(sha256(\"<txid>.<vout>\"))", () => {
+    expect(LEG_PAYOUT_PREFIX).toBe(b64("amm swap"));
+    expect(LEG_COMMISSION_PREFIX).toBe(b64("amm swap commission"));
+    const op = `${"ab".repeat(32)}.3`;
+    expect(legDerivation(op, "payout")).toEqual({ derivationPrefix: b64("amm swap"), derivationSuffix: suffixOf(op) });
+    expect(legDerivation(op, "commission")).toEqual({ derivationPrefix: b64("amm swap commission"), derivationSuffix: suffixOf(op) });
+  });
+
+  it("sats in, own commission: from input 1 (the sats row) alone — the token payout's receipt key (sender the validator) and the commission's BRC-29 key match outputs 1 and 4", async () => {
+    const { prepared, satsInput, side } = await satsIn(fakeWallet(), null);
+    const tx = Transaction.fromBinary(prepared.swap.toBinary()); // nothing but the transaction
+    const keyInput = legKeyInputOf(tx, true);
+    expect(keyInput).toBe(satsInput.outpoint);
+    const pay = legDerivation(keyInput, "payout");
+    if (prepared.payout.kind !== "color") throw new Error("expected a receipt");
+    expect(prepared.payout.receipt).toMatchObject(pay);
+    const recv = side.publicKey({ protocolID: colorProtocolID(SDK_ID, pay.derivationPrefix, pay.derivationSuffix), keyID: "color", counterparty: v.identity, forSelf: true });
+    expect(tx.outputs[1]!.lockingScript.toHex().endsWith(new P2PKH().lock(PublicKey.fromString(recv).toAddress()).toHex())).toBe(true);
+    const com = legDerivation(keyInput, "commission");
+    const own = side.privateKey({ protocolID: BRC29, keyID: `${com.derivationPrefix} ${com.derivationSuffix}`, counterparty: side.identityKey });
+    expect(tx.outputs[4]!.lockingScript.toHex()).toBe(new P2PKH().lock(own.toAddress()).toHex());
+    // The pending-payout records are still written (the receipt and the remittance in them, now derived).
+    const recs = pendingSwapPayouts(prepared, TOKEN_ID, 1);
+    expect(recs.map((r) => [r.vout, r.receipt?.derivationSuffix ?? r.remittance?.derivationSuffix])).toEqual([[1, pay.derivationSuffix], [4, com.derivationSuffix]]);
+  });
+
+  it("tokens in, own commission: from input 2 (the first token row) alone — the BRC-29 payout (sender the user) and the commission's receipt key match outputs 1 and 4; the same inputs give the same keys", async () => {
+    const w = fakeWallet({ fundingVout: 2 });
+    const { prepared, side } = await tokensIn(w, null);
+    const tx = Transaction.fromBinary(prepared.swap.toBinary());
+    const keyInput = legKeyInputOf(tx, false);
+    expect(keyInput).toBe(`${poolDeploy.id("hex")}.1`);
+    const pay = legDerivation(keyInput, "payout");
+    const payKey = side.privateKey({ protocolID: BRC29, keyID: `${pay.derivationPrefix} ${pay.derivationSuffix}`, counterparty: side.identityKey });
+    expect(tx.outputs[1]!.lockingScript.toHex()).toBe(new P2PKH().lock(payKey.toAddress()).toHex());
+    const com = legDerivation(keyInput, "commission");
+    const recv = side.publicKey({ protocolID: colorProtocolID(SDK_ID, com.derivationPrefix, com.derivationSuffix), keyID: "color", counterparty: v.identity, forSelf: true });
+    expect(tx.outputs[4]!.lockingScript.toHex().endsWith(new P2PKH().lock(PublicKey.fromString(recv).toAddress()).toHex())).toBe(true);
+    // Deterministic: prepared again over the same staged inputs, the same outputs.
+    const pool = stateOf(swap1, v.identity);
+    const again = await prepareSwap({ wallet: w.wallet, tokenId: TOKEN_ID, direction: "tokenToBsv", leg: legFor(pool, "tokenToBsv", 50_000n), pool, poolOutput: { beef: atomic(swap1), outputIndex: 0 }, commissionPkh: null, tokenInputs: prepared.tokenInputs, satsInput: prepared.funding.input, satsPerKb: RATE, now: 1_000 });
+    expect(again.swap.outputs.map((o) => o.lockingScript.toHex())).toEqual(tx.outputs.map((o) => o.lockingScript.toHex()));
   });
 });
 

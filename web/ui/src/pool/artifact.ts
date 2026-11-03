@@ -1,6 +1,5 @@
 import type { RunarArtifact } from "runar-sdk";
 import poolArtifactJson from "./pool.artifact.json";
-import poolArtifactV1Json from "./pool.v1.artifact.json";
 
 /**
  * The compiled Pool contract (pool/Pool.runar.go), as the Go compiler writes
@@ -34,21 +33,13 @@ function resolveCodeSepSlots(a: RunarArtifact): RunarArtifact {
   return { ...a, script };
 }
 
-/**
- * The 0.9.0-0.12.x contract (layout 1, kept so a pool deployed before 0.13.0
- * still decodes, closes and recovers): state TokenReserve, LpPubKey,
- * ValidatorPubKey, ValidatorIdentity; Swap, and Close(sig, bsvFee) whose
- * outputs are the contract's (everything to the LP key). Never deployed again.
- */
-export const poolArtifactV1 = poolArtifactV1Json as unknown as RunarArtifact;
+/** A pool's layout: 2, the only one (0.29.1: layout 1, the 0.9.0-0.12.x contract, is dropped). */
+export type PoolVersion = 2;
 
-/** A pool's layout: 2 from 0.13.0, 1 before. */
-export type PoolVersion = 1 | 2;
-
-export function artifactOf(version: PoolVersion): RunarArtifact {
-  return version === 2 ? poolArtifact : poolArtifactV1;
+export function artifactOf(_version: PoolVersion): RunarArtifact {
+  return poolArtifact;
 }
 
-/** Public method indices (the method selector pushed last in a call). Rescind is layout 2's only. */
+/** Public method indices (the method selector pushed last in a call). */
 export const METHOD_INDEX = { swap: 0, close: 1, rescind: 2 } as const;
 export type PoolMethod = keyof typeof METHOD_INDEX;

@@ -6,14 +6,13 @@
  *
  *   0x20 <assetId:32> <push tokenReserve> OP_2DROP || code || OP_RETURN || state
  *
- * Two layouts (artifact.ts `PoolVersion`). Layout 2 (skein-amm 0.13.0): `state` is
+ * One layout (artifact.ts `PoolVersion`; 0.29.1: layout 1, 0.9.0-0.12.x, dropped). Layout 2 (skein-amm 0.13.0): `state` is
  * TokenReserve (8 bytes LE sign-magnitude) ‖ LpPubKey ‖ ValidatorPubKey ‖ ValidatorIdentity
  * (33 each) ‖ Nonce (32) ‖ Affirmation (its length byte, then the validator's DER signature
  * over sha256 of `affirmationMessage`, docs/AMM.md "The deploy and the affirmation"); no
  * payload; methods Swap, Close (the LP's, outputs free) and Rescind (the validator's: the
- * ValidatorPubKey cleared to 33 zero bytes). Layout 1 (0.9.0-0.12.x, decoded and closed, never
- * deployed again): the state's first four fields; a deploy's affirmation as its 1Color payload
- * (`Pool.affirmation`); Close(sig, bsvFee) with the contract's outputs.
+ * ValidatorPubKey cleared to 33 zero bytes). A layout-1 script (the 0.9.0-0.12.x contract)
+ * decodes as no pool.
  *
  * `code` is the artifact's template with the readonly constructor args
  * (assetId, lpFeeBps, validatorFeeBps, commissionBps) spliced in.
@@ -101,7 +100,7 @@ export const RESCINDED_KEY = "00".repeat(33);
 
 /** A decoded pool locking script. */
 export interface Pool {
-  /** The layout (artifact.ts): 2 from 0.13.0, 1 before. */
+  /** The layout (artifact.ts): 2. */
   version: PoolVersion;
   args: PoolArgs;
   state: PoolFields;
@@ -109,8 +108,6 @@ export interface Pool {
   code: string;
   /** `code || OP_RETURN || state` (hex): the script runar-sdk sees. */
   contractScript: string;
-  /** Layout 1: a deploy's affirmation (0.11.0), the 1Color payload, a DER signature (hex); absent on a continuation. Layout 2 keeps it in `state.affirmation`. */
-  affirmation?: string;
 }
 
 /** A pool output being spent. */
@@ -199,10 +196,8 @@ export interface SwapExpectation {
 }
 
 export interface CloseParams extends CallCommon {
-  /** Layout 1: the miner fee left from the pool's sats (0 <= bsvFee <= the pool's sats; 0: funded from `inputs`). Layout 2: unused (0n). */
-  bsvFee: bigint;
-  /** Layout 2: the outputs, the LP's choice (the contract leaves them free). */
-  outputs?: { satoshis: bigint; script: string }[];
+  /** The outputs, the LP's choice (the contract leaves them free). */
+  outputs: { satoshis: bigint; script: string }[];
   /** The LP's key; when given, the LP slot is signed here. */
   lpKey?: PoolSigner;
 }
@@ -304,15 +299,13 @@ function stateHex(version: PoolVersion, state: PoolFields): string {
     lpPubKey: state.lpPubKey,
     validatorPubKey: state.validatorPubKey,
     validatorIdentity: state.validatorIdentity,
+    nonce: state.nonce ?? "00".repeat(32),
+    affirmation: state.affirmation ?? "",
   };
-  if (version === 2) {
-    fields.nonce = state.nonce ?? "00".repeat(32);
-    fields.affirmation = state.affirmation ?? "";
-  }
   return serializeState(artifactOf(version).stateFields!, fields);
 }
 
-/** Whether `method` of the layout takes Rúnar's change parameters (`_changePKH`, `_changeAmount`): a method that writes outputs. Layout 2's Close writes none. */
+/** Whether `method` takes Rúnar's change parameters (`_changePKH`, `_changeAmount`): a method that writes outputs. Close writes none. */
 function takesChange(version: PoolVersion, method: PoolMethod): boolean {
   const m = artifactOf(version).abi.methods.find((x) => x.name === method);
   return Boolean(m?.params.some((p) => p.name === "_changePKH"));
@@ -342,8 +335,7 @@ function isHex(s: unknown, bytes: number): s is string {
 
 export class PoolTemplate {
   /**
-   * Decodes a pool locking script: a 1Color value prefix with a 32-byte id (and,
-   * on a deploy, the affirmation as its payload, 0.11.0), then the Pool artifact
+   * Decodes a pool locking script: a 1Color value prefix with a 32-byte id (no payload), then the Pool artifact
    * (template bytes between the constructor slots), then the state. Also requires
    * prefix id == assetId and prefix amount == TokenReserve (the admission check of
    * Pool.runar.go's doc). Returns null for anything else.
@@ -355,7 +347,7 @@ export class PoolTemplate {
     if (prefix.idBytes?.length !== 32) return null;
 
     const contractScript = toHex(bytes.slice(prefix.length));
-    for (const version of [2, 1] as const) {
+    for (const version of [2] as const) {
       const artifact = artifactOf(version);
       if (!matchesArtifact(artifact, contractScript)) continue;
       const ctor = extractConstructorArgs(artifact, contractScript);
@@ -370,18 +362,17 @@ export class PoolTemplate {
       const { tokenReserve, lpPubKey, validatorPubKey, validatorIdentity, nonce, affirmation } = raw;
       if (!isHex(assetId, 32) || typeof lpFeeBps !== "bigint" || typeof validatorFeeBps !== "bigint" || typeof commissionBps !== "bigint") return null;
       if (typeof tokenReserve !== "bigint" || !isHex(lpPubKey, 33) || !isHex(validatorPubKey, 33) || !isHex(validatorIdentity, 33)) return null;
-      if (version === 2 && (!isHex(nonce, 32) || typeof affirmation !== "string" || !/^[0-9a-f]*$/.test(affirmation))) return null;
-      if (version === 2 && prefix.payload !== undefined) return null; // layout 2 writes no payload
+      if (!isHex(nonce, 32) || typeof affirmation !== "string" || !/^[0-9a-f]*$/.test(affirmation)) return null;
+      if (prefix.payload !== undefined) return null; // a pool writes no payload
       if (assetId !== toHex(prefix.idBytes) || tokenReserve !== prefix.amount) return null;
 
       const opReturn = findLastOpReturn(contractScript);
       return {
         version,
         args: { assetId, lpFeeBps, validatorFeeBps, commissionBps },
-        state: { tokenReserve, lpPubKey, validatorPubKey, validatorIdentity, ...(version === 2 ? { nonce: nonce as string, affirmation: affirmation as string } : {}) },
+        state: { tokenReserve, lpPubKey, validatorPubKey, validatorIdentity, nonce: nonce as string, affirmation: affirmation as string },
         code: contractScript.slice(0, opReturn),
         contractScript,
-        ...(version === 1 && prefix.payload !== undefined ? { affirmation: toHex(prefix.payload) } : {}),
       };
     }
     return null;
@@ -638,10 +629,8 @@ export class PoolTemplate {
 
   /**
    * Close (method 1; skein-amm 0.9.0, David Case 2026-10-09: a position is deployed or closed,
-   * never resized in place), the LP's, built here. Layout 2 (0.13.0): the outputs are the LP's
-   * (`outputs`), then change. Layout 1: 0 the BSV payout (the pool's sats less `bsvFee`, to the
-   * LP key's P2PKH; only when nonzero), then every token to the same key, then change. No
-   * continuation.
+   * never resized in place), the LP's, built here: the outputs are the LP's (`outputs`), then
+   * change. No continuation.
    */
   static async close(p: CloseParams): Promise<PoolCall> {
     const plan = PoolTemplate.planClose(p);
@@ -660,29 +649,14 @@ export class PoolTemplate {
   }
 
   /**
-   * The Close call without its funding (as `planSwap` for Swap), the LP's slot empty.
-   * Layout 2 (0.13.0: `Close(lpSig)`, outputs free): `outputs` are the LP's choice, passed
-   * through (at least one); `bsvFee` is unused. Layout 1 (`Close(sig, bsvFee)`): the outputs the
-   * contract requires — the BSV payout when nonzero, the tokens, each to Hash160 of the LpPubKey;
-   * `bsvFee` (0..the pool's sats) is left for the miner; at 0 the fee and the token output's sat
-   * come from another input (its change after the contract's outputs).
+   * The Close call without its funding (as `planSwap` for Swap), the LP's slot empty
+   * (`Close(lpSig)`, outputs free): `outputs` are the LP's choice, passed through (at least one).
    */
-  static planClose(p: { pool: PoolUtxo; bsvFee: bigint; outputs?: { satoshis: bigint; script: string }[] }): CallPlan {
+  static planClose(p: { pool: PoolUtxo; outputs: { satoshis: bigint; script: string }[] }): CallPlan {
     const pool = decodeUtxo(p.pool);
-    const { args, state } = pool;
-    const sats = BigInt(p.pool.satoshis);
     const next = { pool, satoshis: 0, script: new LockingScript() };
-    if (pool.version === 2) {
-      const outputs = p.outputs ?? [];
-      if (outputs.length === 0) throw new PoolBuildError("invalid", "a Close needs the LP's outputs");
-      return { pool, poolUtxo: p.pool, method: "close", outputs, args: [EMPTY_SIG], sigSlots: { lp: 0 }, next };
-    }
-    if (p.bsvFee < 0n || p.bsvFee > sats) throw new PoolBuildError("invalid", `bsvFee must be 0 to the pool's ${sats} sats`);
-    const lpPkh = pkhOf(state.lpPubKey);
-    const outputs: { satoshis: bigint; script: string }[] = [];
-    if (sats - p.bsvFee > 0n) outputs.push({ satoshis: sats - p.bsvFee, script: p2pkhHex(lpPkh) });
-    outputs.push({ satoshis: 1n, script: tokenP2pkhHex(args.assetId, state.tokenReserve, lpPkh) });
-    return { pool, poolUtxo: p.pool, method: "close", outputs, args: [EMPTY_SIG, p.bsvFee], sigSlots: { lp: 0 }, next };
+    if (p.outputs.length === 0) throw new PoolBuildError("invalid", "a Close needs the LP's outputs");
+    return { pool, poolUtxo: p.pool, method: "close", outputs: p.outputs, args: [EMPTY_SIG], sigSlots: { lp: 0 }, next };
   }
 
   // -------------------------------------------------------------------------

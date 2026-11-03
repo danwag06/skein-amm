@@ -50,9 +50,9 @@ compiled template is 3,568 bytes (0.12.x: 2,657), a pool output 4,011 bytes
 with its args and a 71-byte DER (0.12.x: 2,996): the variable-length
 Affirmation costs each method a state parser, and Rescind its own copy of
 the continuation writer. A pool deployed before 0.13.0 (layout 1: the first
-four state fields, `Close(sig, bsvFee)`) is still decoded, closed and
-recovered by the pages; amm-lookup and amm-validator know layout 2 only
-(below, "Not wired").
+four state fields, `Close(sig, bsvFee)`) is no pool to the pages since
+0.29.1 (David: dropped, every testnet pool is layout 2); amm-lookup and
+amm-validator know layout 2 only (below, "Not wired").
 
 - **Indexed** (amm-lookup, `pool.check`): at output 0; the prefix's id and
   amount equal the AssetId and TokenReserve the code and state carry (the
@@ -248,7 +248,7 @@ counterparty}`).
   (amount in + 1 sat for the token payout + the miner fee) are ONE
   `amm-swap` output, staged by one plain createAction (no `p color` labels;
   a P2PKH to an `amm swap` key, filed in `amm-swap` with `{sats: true,
-  protocolID, keyID, counterparty}`) before the legs; no funding transaction,
+  assetId, protocolID, keyID, counterparty}`) before the legs; no funding transaction,
   no `1sat-deposit`. The token payout is locked to a module receiving key
   whose sender is the pool's ValidatorIdentity; accepted, the page takes it
   in through the module with its receipt.
@@ -271,45 +271,46 @@ counterparty}`).
   Liquidity's Recover takes the pool's outpoint (`<txid>.<vout>` or
   `<txid>_<vout>`, the deploy's or a later continuation), follows it to its
   current output (`GET <base>/spends`), reads that output's BEEF from
-  BRC-207's `color-spendability` at `ls_color_<tokenId>` (0.20.1; `ls_color {txid, outputIndex}` before) and decodes the pool. A pool before
-  0.13.0: walks the BEEF back to the deploy (the transaction whose pool
-  output carries the affirmation as its payload) and derives the LP key
-  from the deploy's input 0 (`lpKeyId`, else the pre-BRC-29
-  `legacyLpKeyId`). A pool from 0.13.0 on: its LP keyID is random and on no
-  chain, so the keyIDs this browser kept for deploys whose row was not
-  filed are tried; none: "not kept in this browser", nothing filed. Each
-  candidate is checked with `getPublicKey` against the pool's LpPubKey. On a match it files the
+  BRC-207's `color-spendability` at `ls_color_<tokenId>` (0.20.1; `ls_color {txid, outputIndex}` before) and decodes the pool. Its LP keyID is random and on no
+  chain, so the keyIDs of the wallet's deploy history (0.28.0), then those
+  this browser kept for deploys whose row was not filed, are tried; none:
+  "not kept in this browser", nothing filed. Each candidate is checked with
+  `getPublicKey` against the pool's LpPubKey. On a match it files the
   current output in `amm-pools` with `internalizeAction` (basket
   insertion, tag `amm-pool`, the deploy's `poolCustomInstructions`, label
-  `amm-pool-deploy`); otherwise it files nothing ("This pool's LP key is
-  not this wallet's."). A pool the wallet already files is left alone.
+  `amm-pool-deploy`). A pool the wallet already files is left alone.
+  (0.29.1: the pre-0.13.0 LP keys, `lpKeyId` / `legacyLpKeyId`, are gone.)
   The row is then an ordinary position: Close as below.
-- **Close** (0.13.0: `Close(lpSig)`, outputs free). `bsvFee` 0 (0.29.0): ONE
+- **Close** (0.13.0: `Close(lpSig)`, outputs free; 0.29.1: ONE path). ONE
   wallet createAction — the pool an explicit input (`inputBEEF` the lookup's,
   `unlockingScriptLength` the call's), the outputs below with the payout's
   remittance and the receipt as their customInstructions; the wallet pays
   the fee and adds change; the page fills the pool input (`callUnlock` + the
   LP's `createSignature` over the wallet's transaction) at signAction; no
-  funding transaction. `bsvFee` > 0: the miner fee left from the pool, the
-  close built here. Either way the sats less `bsvFee` to the LP key, a BRC-29 wallet
+  funding transaction, no fee from the pool. Every sat of the pool to the LP key, a BRC-29 wallet
   payment to self; every token, one sat, to a NEW module receiving key of
   the user's own (`newReceivingKey`, sender the user's identity), taken in
   through the module with its receipt (a second `internalizeAction`; kept in
   pending payouts if the module does not take it at once). No `amm-swap`,
-  no Move back. A pool before 0.13.0 closes as 0.12.x did (the contract's
-  outputs, the tokens to the LP key, filed in `amm-swap`, Move back), its
-  fee from the pool (0.29.0: `bsvFee` 0 refused). No relinquishOutput: the
-  wallet marks the pool row spent itself. A
+  no Move back. No relinquishOutput: the wallet marks the pool row spent
+  itself. A
   rescinded pool is shown as such and closes as any.
 - **Move back** (Your tokens; 0.29.0: ONE wallet createAction). Every
-  `amm-swap` token output of the token an explicit input (`inputBEEF` from
+  `amm-swap` token output of the token, and (0.29.1) the sats rows staged
+  for its legs (their `assetId`; the wallet's change takes their sats), an explicit input (`inputBEEF` from
   the basket, the page's unlocks at signAction), one output to a module
   receiving key of the user's own (sender: the user's identity) carrying the
   receipt as its customInstructions, no basket; the wallet funds the fee,
   adds change, broadcasts and marks the inputs spent; then submitted to
   `tm_color_<assetId>` and taken in through the module. No relinquishOutput.
-  A swap that got stuck, and a
-  pre-0.13.0 position's closed tokens, come back this way.
+  A swap that got stuck comes back this way.
+- **Payout keys** (0.29.1): a swap leg's payout key (the BRC-29 sats payment,
+  or the BRC-207 receipt for tokens) and the taker's own commission key are
+  derived from the leg's first staged `amm-swap` input `<txid>.<vout>`
+  (tokens in: its first token row; sats in: its sats row):
+  derivationSuffix = base64(sha256(UTF-8 of that text)), derivationPrefix =
+  base64("amm swap") for the payout, base64("amm swap commission") for the
+  commission; the pending-payout records are written as before.
 - **Pending payouts** (`wallet/pendingPayouts.ts`) keep both kinds: a
   BRC-29 remittance or a module receipt, retried with the final
   transaction's BEEF.

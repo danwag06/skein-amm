@@ -11,7 +11,9 @@
  *      leg's sats are exact: what the contract's outputs take beyond the
  *      pool's and the token inputs' sats (amount in + 1 sat per 1Color output
  *      the taker pays for), plus the miner fee of the final swap
- *      (`swapFunding`).
+ *      (`swapFunding`). Sized with placeholder addresses: the payout keys
+ *      (and the taker's own commission key) are derived at step 3 from the
+ *      leg's first staged input (`legDerivation`, 0.29.1), not random.
  *   2. **The leg's inputs** (0.29.0, David Case 2026-11-02): every one an
  *      output of the active swap basket `amm-swap` (src/market/activeSwap.ts):
  *      ONE sats output of exactly that amount (`SatsInput`) and, token → sats,
@@ -175,7 +177,7 @@ export function selectExactTokenInputs(candidates: TokenInput[], amount: bigint)
 // Sats inputs (0.29.0)
 // ---------------------------------------------------------------------------
 
-/** An `amm-swap` sats output (customInstructions `{sats: true, protocolID, keyID, counterparty}`): a plain P2PKH to an "amm swap" key. */
+/** An `amm-swap` sats output (customInstructions `{sats: true, assetId, protocolID, keyID, counterparty}`): a plain P2PKH to an "amm swap" key. */
 export interface SatsInput {
   /** `txid.vout` */
   outpoint: string;
@@ -186,6 +188,8 @@ export interface SatsInput {
   protocolID: WalletProtocol;
   keyID: string;
   counterparty: string;
+  /** The token whose swap staged it (`<txid>_<vout>`, 0.29.1), when its row names one. */
+  assetId?: string;
 }
 
 const P2PKH_RE = /^76a914[0-9a-f]{40}88ac$/i;
@@ -195,7 +199,7 @@ export function satsInputsOf(rows: { outpoint: string; satoshis: number; locking
   const out: SatsInput[] = [];
   for (const r of rows) {
     if (!r.lockingScript || !P2PKH_RE.test(r.lockingScript)) continue;
-    let ci: { sats?: unknown; protocolID?: unknown; keyID?: unknown; counterparty?: unknown } = {};
+    let ci: { sats?: unknown; assetId?: unknown; protocolID?: unknown; keyID?: unknown; counterparty?: unknown } = {};
     try {
       ci = JSON.parse(r.customInstructions ?? "{}");
     } catch {
@@ -213,6 +217,7 @@ export function satsInputsOf(rows: { outpoint: string; satoshis: number; locking
       protocolID: ci.protocolID as WalletProtocol,
       keyID: ci.keyID,
       counterparty: typeof ci.counterparty === "string" ? ci.counterparty : "self",
+      ...(typeof ci.assetId === "string" ? { assetId: ci.assetId } : {}),
     });
   }
   return out;
@@ -346,17 +351,18 @@ export interface PlanLegInput {
   satsPerKb: number;
 }
 
-/** Step 1: the leg's plan, payout keys and exact sats (`funding.satoshis`: the `amm-swap` sats output the leg spends). */
+/** Step 1: the leg's plan (placeholder addresses) and exact sats (`funding.satoshis`: the `amm-swap` sats output the leg spends). */
 export interface PlannedLeg {
   /** The pool outpoint `<txid>_<vout>`. */
   pool: string;
   validator: string;
   bsvIn: boolean;
   poolUtxo: PoolUtxo;
+  /** Sized with placeholder payout and commission addresses (prepareSwap re-plans with the derived keys). */
   plan: CallPlan;
   funding: SwapFunding;
-  payout: SwapPayout;
-  commission: SwapCommission;
+  commissionAmount: bigint;
+  commissionTo: SwapCommission["to"];
 }
 
 export interface PrepareSwapInput extends PlanLegInput {
@@ -412,50 +418,42 @@ export interface SwapCommission {
 
 const ZERO_PKH = "00".repeat(20);
 
-/** Step 1 (see the module comment). Throws `PoolBuildError` / `LegShapeError`; nothing is created in the wallet but payout keys. */
-export async function planSwapLeg(i: PlanLegInput): Promise<PlannedLeg> {
-  const { wallet, leg, pool } = i;
-  const bsvIn = i.direction === "bsvToToken";
-  const poolUtxo = poolUtxoFrom(i.poolOutput);
-  if (`${poolUtxo.txid}_${poolUtxo.vout}` !== leg.outpoint) {
-    throw new LegShapeError(`the pool moved: the lookup's tip is ${poolUtxo.txid}.${poolUtxo.vout}, the plan priced ${outpointText(leg.outpoint)}`);
-  }
-  const tokenInputs = i.tokenInputs ?? [];
-  const tokensIn = tokenInputs.reduce((a, t) => a + t.amount, 0n);
-  if (bsvIn ? tokenInputs.length > 0 : tokensIn !== leg.amountIn) {
-    throw new LegShapeError(`token inputs carry ${tokensIn}, the leg needs exactly ${bsvIn ? 0n : leg.amountIn}`);
-  }
+/** BRC-29 / BRC-207 derivationPrefix of a leg's payout (0.29.1): base64 of the UTF-8 text "amm swap". */
+export const LEG_PAYOUT_PREFIX = Utils.toBase64(Utils.toArray("amm swap", "utf8"));
+/** derivationPrefix of the taker's own commission output (0.29.1): base64 of "amm swap commission". */
+export const LEG_COMMISSION_PREFIX = Utils.toBase64(Utils.toArray("amm swap commission", "utf8"));
 
-  const decoded = PoolTemplate.decode(poolUtxo.script);
-  const poolArgs = decoded?.args;
-  if (!decoded || !poolArgs) throw new LegShapeError(`${outpointText(leg.outpoint)} is not a pool output`);
-  const commissionAmount = (leg.amountIn * poolArgs.commissionBps + 9999n) / 10000n;
-  const commissionTo: SwapCommission["to"] = commissionAmount === 0n ? "none" : i.commissionPkh ? "relay" : "own";
+/**
+ * The derivation of a leg's payout keys (0.29.1, David Case 2026-11-02: deterministic from what
+ * the leg spends). `keyInput` is the leg's first staged `amm-swap` input, `<txid>.<vout>` (txid in
+ * display hex, lowercase): tokens in, its first token input (the swap's input 2); sats in, its sats
+ * input (input 1). derivationSuffix = base64(sha256(UTF-8 of that text)); derivationPrefix
+ * `LEG_PAYOUT_PREFIX` for the payout, `LEG_COMMISSION_PREFIX` for the taker's own commission. The
+ * same pair keys the BRC-29 payment (keyID "<prefix> <suffix>", sender the user) and the BRC-207
+ * receipt (`p color <assetTag> <prefixHex> <suffixHex>`, sender the pool's validator). A staged
+ * output is spent by one transaction only, so the keys are the leg's alone.
+ */
+export function legDerivation(keyInput: string, which: "payout" | "commission"): { derivationPrefix: string; derivationSuffix: string } {
+  return {
+    derivationPrefix: which === "payout" ? LEG_PAYOUT_PREFIX : LEG_COMMISSION_PREFIX,
+    derivationSuffix: Utils.toBase64(Hash.sha256(Utils.toArray(keyInput, "utf8")) as number[]),
+  };
+}
 
-  // The payout key: tokens to a module receiving key from the pool's validator (0.12.0), sats as a BRC-29 payment to self.
-  // The taker's own commission (in the input asset) is keyed the same way, the other way round.
-  const identity = !bsvIn || commissionTo === "own" ? await identityKeyOf(wallet) : "";
-  // The module's asset id form, `<txid>_0`.
-  const sdkId = sdkTokenId(i.tokenId);
-  const validatorIdentity = decoded.state.validatorIdentity;
-  const brc29 = bsvIn ? null : await newBrc29Payout(wallet, identity);
-  const tokenKey = bsvIn ? await newReceivingKey(wallet, sdkId, validatorIdentity) : null;
-  const payoutKey = brc29 ? brc29.publicKey : tokenKey!.publicKey;
-  const userPkh = toHex(PublicKey.fromString(payoutKey).toHash() as number[]);
+/** The leg's key input in a swap transaction (see `legDerivation`): input 2 when it spends tokens, else input 1. */
+export function legKeyInputOf(swap: Transaction, bsvIn: boolean): string {
+  const inp = swap.inputs[bsvIn ? 1 : 2];
+  if (!inp) throw new LegShapeError("the swap has no staged input to key its payout by");
+  return `${inp.sourceTXID ?? inp.sourceTransaction!.id("hex")}.${inp.sourceOutputIndex}`;
+}
 
-  let ownCommission: { brc29: Awaited<ReturnType<typeof newBrc29Payout>> | null; token: Awaited<ReturnType<typeof newReceivingKey>> | null; pkh: string } | null = null;
-  if (commissionTo === "own") {
-    const own = bsvIn ? await newBrc29Payout(wallet, identity) : null;
-    const token = bsvIn ? null : await newReceivingKey(wallet, sdkId, validatorIdentity);
-    const key = own ? own.publicKey : token!.publicKey;
-    ownCommission = { brc29: own, token, pkh: toHex(PublicKey.fromString(key).toHash() as number[]) };
-  }
-  const commissionPkh = ownCommission?.pkh ?? i.commissionPkh ?? ZERO_PKH;
-
-  const plan = PoolTemplate.planSwap({
+/** The plan with the given payout and commission addresses (`planSwap`, the leg's quote as the expectation). */
+function legPlan(i: PlanLegInput, poolUtxo: PoolUtxo, userPkh: string, commissionPkh: string) {
+  const { leg, pool } = i;
+  return PoolTemplate.planSwap({
     pool: poolUtxo,
     amountIn: leg.amountIn,
-    bsvIn,
+    bsvIn: i.direction === "bsvToToken",
     userPkh,
     commissionPkh,
     expect: {
@@ -470,11 +468,74 @@ export async function planSwapLeg(i: PlanLegInput): Promise<PlannedLeg> {
       amountOut: leg.amountOut,
     },
   });
+}
+
+/**
+ * Step 1 (see the module comment): the leg's plan and exact sats, sized with placeholder payout
+ * and commission addresses (20 bytes each: the sizes are the same). No wallet call: the payout
+ * keys are derived at step 3 from the leg's staged input (`legDerivation`). Throws
+ * `PoolBuildError` / `LegShapeError`.
+ */
+export async function planSwapLeg(i: PlanLegInput): Promise<PlannedLeg> {
+  const { leg } = i;
+  const bsvIn = i.direction === "bsvToToken";
+  const poolUtxo = poolUtxoFrom(i.poolOutput);
+  if (`${poolUtxo.txid}_${poolUtxo.vout}` !== leg.outpoint) {
+    throw new LegShapeError(`the pool moved: the lookup's tip is ${poolUtxo.txid}.${poolUtxo.vout}, the plan priced ${outpointText(leg.outpoint)}`);
+  }
+  const tokenInputs = i.tokenInputs ?? [];
+  const tokensIn = tokenInputs.reduce((a, t) => a + t.amount, 0n);
+  if (bsvIn ? tokenInputs.length > 0 : tokensIn !== leg.amountIn) {
+    throw new LegShapeError(`token inputs carry ${tokensIn}, the leg needs exactly ${bsvIn ? 0n : leg.amountIn}`);
+  }
+  const decoded = PoolTemplate.decode(poolUtxo.script);
+  if (!decoded) throw new LegShapeError(`${outpointText(leg.outpoint)} is not a pool output`);
+  const commissionAmount = (leg.amountIn * decoded.args.commissionBps + 9999n) / 10000n;
+  const commissionTo: SwapCommission["to"] = commissionAmount === 0n ? "none" : i.commissionPkh ? "relay" : "own";
+  const plan = legPlan(i, poolUtxo, ZERO_PKH, i.commissionPkh ?? ZERO_PKH);
+  return { pool: leg.outpoint, validator: i.pool.validatorIdentityKey, bsvIn, poolUtxo, plan, funding: swapFunding(plan, tokenInputs, i.satsPerKb), commissionAmount, commissionTo };
+}
+
+/** Steps 1 (unless `planned` is given) and 3 (see the module comment). Throws `PoolBuildError` / `LegShapeError`; the wallet is left as it was. */
+export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
+  const { wallet } = i;
+  const planned = i.planned ?? (await planSwapLeg(i));
+  const { poolUtxo, bsvIn, commissionTo, commissionAmount } = planned;
+  const tokenInputs = i.tokenInputs ?? [];
+  const tokensIn = tokenInputs.reduce((a, t) => a + t.amount, 0n);
+  if (bsvIn ? tokenInputs.length > 0 : tokensIn !== i.leg.amountIn) {
+    throw new LegShapeError(`token inputs carry ${tokensIn}, the leg needs exactly ${bsvIn ? 0n : i.leg.amountIn}`);
+  }
+  const sats = i.satsInput;
+
+  // The payout keys (0.29.1): derived from the leg's first staged input.
+  const keyInput = bsvIn ? sats.outpoint : tokenInputs[0]!.outpoint;
+  const decoded = PoolTemplate.decode(poolUtxo.script)!;
+  const identity = !bsvIn || commissionTo === "own" ? await identityKeyOf(wallet) : "";
+  const sdkId = sdkTokenId(i.tokenId);
+  const validatorIdentity = decoded.state.validatorIdentity;
+  const pay = legDerivation(keyInput, "payout");
+  const brc29 = bsvIn ? null : await newBrc29Payout(wallet, identity, pay);
+  const tokenKey = bsvIn ? await newReceivingKey(wallet, sdkId, validatorIdentity, pay) : null;
+  const userPkh = toHex(PublicKey.fromString(brc29 ? brc29.publicKey : tokenKey!.publicKey).toHash() as number[]);
+  let ownCommission: { brc29: Awaited<ReturnType<typeof newBrc29Payout>> | null; token: Awaited<ReturnType<typeof newReceivingKey>> | null; pkh: string } | null = null;
+  if (commissionTo === "own") {
+    const com = legDerivation(keyInput, "commission");
+    const own = bsvIn ? await newBrc29Payout(wallet, identity, com) : null;
+    const token = bsvIn ? null : await newReceivingKey(wallet, sdkId, validatorIdentity, com);
+    ownCommission = { brc29: own, token, pkh: toHex(PublicKey.fromString(own ? own.publicKey : token!.publicKey).toHash() as number[]) };
+  }
+  const commissionPkh = ownCommission?.pkh ?? i.commissionPkh ?? ZERO_PKH;
+  const plan = legPlan(i, poolUtxo, userPkh, commissionPkh);
+
+  // The leg's sats were sized for these token inputs: the same count and sats, or the fee is off.
+  const amounts = swapFunding(plan, tokenInputs, i.satsPerKb);
+  if (amounts.satoshis !== planned.funding.satoshis) throw new LegShapeError(`the token inputs need ${amounts.satoshis} sats with the leg, it was planned with ${planned.funding.satoshis}`);
+  if (sats.satoshis !== amounts.satoshis) throw new LegShapeError(`the swap basket's sats output ${sats.outpoint} holds ${sats.satoshis} sats, the leg needs exactly ${amounts.satoshis}`);
 
   const payout: SwapPayout = brc29
     ? { kind: "brc29", outputIndex: 1, satoshis: Number(plan.outputs[1]!.satoshis), lockingScript: plan.outputs[1]!.script, remittance: brc29.remittance }
     : { kind: "color", outputIndex: 1, satoshis: Number(plan.outputs[1]!.satoshis), lockingScript: plan.outputs[1]!.script, receipt: tokenKey!.receipt };
-
   // The commission is the last output when there is one (Pool.runar.go Swap).
   const commission: SwapCommission = { amount: commissionAmount, pkh: commissionPkh, to: commissionTo };
   if (ownCommission) {
@@ -484,25 +545,6 @@ export async function planSwapLeg(i: PlanLegInput): Promise<PlannedLeg> {
       ? { kind: "brc29", outputIndex: at, satoshis: Number(out.satoshis), lockingScript: out.script, remittance: ownCommission.brc29.remittance }
       : { kind: "color", outputIndex: at, satoshis: Number(out.satoshis), lockingScript: out.script, receipt: ownCommission.token!.receipt };
   }
-
-  return { pool: leg.outpoint, validator: pool.validatorIdentityKey, bsvIn, poolUtxo, plan, funding: swapFunding(plan, tokenInputs, i.satsPerKb), payout, commission };
-}
-
-/** Steps 1 (unless `planned` is given) and 3 (see the module comment). Throws `PoolBuildError` / `LegShapeError`; the wallet is left as it was. */
-export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
-  const { wallet } = i;
-  const planned = i.planned ?? (await planSwapLeg(i));
-  const { plan, poolUtxo } = planned;
-  const tokenInputs = i.tokenInputs ?? [];
-  const tokensIn = tokenInputs.reduce((a, t) => a + t.amount, 0n);
-  if (planned.bsvIn ? tokenInputs.length > 0 : tokensIn !== i.leg.amountIn) {
-    throw new LegShapeError(`token inputs carry ${tokensIn}, the leg needs exactly ${planned.bsvIn ? 0n : i.leg.amountIn}`);
-  }
-  // The leg's sats were sized for these token inputs: the same count and sats, or the fee is off.
-  const amounts = swapFunding(plan, tokenInputs, i.satsPerKb);
-  if (amounts.satoshis !== planned.funding.satoshis) throw new LegShapeError(`the token inputs need ${amounts.satoshis} sats with the leg, it was planned with ${planned.funding.satoshis}`);
-  const sats = i.satsInput;
-  if (sats.satoshis !== amounts.satoshis) throw new LegShapeError(`the swap basket's sats output ${sats.outpoint} holds ${sats.satoshis} sats, the leg needs exactly ${amounts.satoshis}`);
 
   // The inputs' source transactions: the active swap basket's.
   const beef = i.holdingBeef ?? (await basketBeef(wallet, SWAP_BASKET));
@@ -534,8 +576,8 @@ export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
     funding: { ...amounts, input: sats, atomicBeef: beef.toBinaryAtomic(sats.txid), txid: sats.txid, outpoint: sats.outpoint },
     swap,
     tokenInputs,
-    payout: planned.payout,
-    commission: planned.commission,
+    payout,
+    commission,
   };
 }
 

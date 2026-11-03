@@ -53,10 +53,11 @@ export function swapInstructions(o: { assetId: string; amount: bigint; protocolI
 /**
  * customInstructions of an `amm-swap` SATS output (0.29.0): a swap leg's sats (the miner fee; sats
  * in, also the amount in and the token payout's sat), staged in the swap basket by the same send as
- * the tokens; `sats: true` tells it from a token row. The key that spends it, as for a token row.
+ * the tokens; `sats: true` tells it from a token row; `assetId` (0.29.1) names the token whose swap
+ * staged it (Move back sweeps it with that token's rows). The key that spends it, as for a token row.
  */
-export function swapSatsInstructions(o: { protocolID: WalletProtocol; keyID: string; counterparty: string }): string {
-  return JSON.stringify({ sats: true, protocolID: o.protocolID, keyID: o.keyID, counterparty: o.counterparty });
+export function swapSatsInstructions(o: { assetId: string; protocolID: WalletProtocol; keyID: string; counterparty: string }): string {
+  return JSON.stringify({ sats: true, assetId: o.assetId, protocolID: o.protocolID, keyID: o.keyID, counterparty: o.counterparty });
 }
 
 /** `p color balance <assetTag>`: the selector of one asset's value balance. */
@@ -96,9 +97,15 @@ export interface ReceivingKey {
   pkh: string;
 }
 
-export async function newReceivingKey(wallet: WalletInterface, assetId: string, senderIdentityKey: string): Promise<ReceivingKey> {
-  const derivationPrefix = randomBase64(16);
-  const derivationSuffix = randomBase64(16);
+/** A receiving key: random prefix and suffix unless `derivation` names them (0.29.1: a swap leg's, derived from its input). */
+export async function newReceivingKey(
+  wallet: WalletInterface,
+  assetId: string,
+  senderIdentityKey: string,
+  derivation?: { derivationPrefix: string; derivationSuffix: string },
+): Promise<ReceivingKey> {
+  const derivationPrefix = derivation?.derivationPrefix ?? randomBase64(16);
+  const derivationSuffix = derivation?.derivationSuffix ?? randomBase64(16);
   const { publicKey } = await wallet.getPublicKey({
     protocolID: colorProtocolID(assetId, derivationPrefix, derivationSuffix),
     keyID: COLOR_KEY_ID,

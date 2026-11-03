@@ -3,7 +3,7 @@
 **skein-amm 0.13.0: the validator's nonce, no input named, the LP's Close**
 (David Case, 2026-10-22; docs/AMM.md). The pool's state carries the
 validator's key, nonce and affirmation (layout 2, `src/pool/artifact.ts`;
-layout 1, before 0.13.0, still decodes, closes and recovers).
+0.29.1: layout 1, before 0.13.0, is dropped — it decodes as no pool).
 
 - **Pool deploy** (`deployPool`): the LP key is a BRC-29 key to self under
   a fresh random keyID (`newLpKey`), kept in this browser
@@ -17,15 +17,14 @@ layout 1, before 0.13.0, still decodes, closes and recovers).
   `randomizeOutputs: false` (the module selects the token inputs and adds
   their change; the input BEEF of its own inputs is the module's). The row's
   customInstructions carry the nonce.
-- **Close** (`prepareClose`, layout 2: `Close(lpSig)`, outputs free): the
-  sats (less `bsvFee`) to the LP key as a BRC-29 payment to self, every token
+- **Close** (`prepareClose`, `Close(lpSig)`, outputs free; 0.29.1: one wallet
+  createAction, the wallet pays the miner): every sat to the LP key as a BRC-29 payment to self, every token
   to a NEW module receiving key of the user's own (sender the user's
   identity), taken in through the module with its receipt (a second
   `internalizeAction`; kept in pending payouts when the module does not take
-  it at once). No `amm-swap`, no Move back. Layout 1: as 0.12.x (the
-  contract's outputs, the tokens into `amm-swap`).
-- **Recover** (`recoverPosition`): layout 1 as 0.12.1; layout 2 tries the LP
-  keyIDs this browser kept (a 0.13.0 pool's LP keyID is on no chain).
+  it at once). No `amm-swap`, no Move back.
+- **Recover** (`recoverPosition`): tries the LP keyIDs of the deploy history,
+  then those this browser kept (a 0.13.0 pool's LP keyID is on no chain).
 - **Positions**: a rescinded pool (the validator's Rescind: ValidatorPubKey
   cleared) is shown as such; the LP closes it as any.
 
@@ -76,7 +75,7 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
   keyID, counterparty}`. 0.29.0: the same send also stages each uncovered
   leg's sats (one P2PKH output of exactly the leg's miner fee to a fresh
   `amm swap` key, filed in `amm-swap` by the createAction, customInstructions
-  `{sats: true, protocolID, keyID, counterparty}`); sats in: a plain
+  `{sats: true, assetId, protocolID, keyID, counterparty}`); sats in: a plain
   createAction with each leg's sats output (amount in + 1 + fee). No
   funding transaction. The legs are built, signed (`createSignature` under
   each row's key), relayed and settled as before; taking an accepted swap in
@@ -1206,9 +1205,8 @@ tree-shakes it out.
   with its constructor slots (runar-sdk `matchesArtifact`,
   `extractConstructorArgs`; layout 2's codeSepIndex slots resolved to OP_1 in
   the artifact, `src/pool/artifact.ts`), the state (`extractStateFromScript`);
-  layout 2 first, then layout 1 (whose deploy carries the affirmation as its
-  payload: `affirmation`); requires prefix id == assetId and prefix amount ==
-  TokenReserve. Null otherwise. `version` says which.
+  layout 2 only (0.29.1); requires prefix id == assetId and prefix amount ==
+  TokenReserve, no payload. Null otherwise.
 - `lockDeploy(args, state)` (layout 2): the prefix plus runar-sdk's locking
   script, the key, nonce and affirmation in state (or still to come).
 - `affirmationMessage(pool, satoshis)`, `affirmed(script, satoshis)`
@@ -1216,8 +1214,7 @@ tree-shakes it out.
   (docs/AMM.md "The deploy and the affirmation"; src/pool.zig
   `affirmMessage`), and whether a pool attests itself (the key derived from
   the identity and the nonce, the signature verifying). `rescinded(pool)`.
-- `planClose` / `close`: layout 2 takes the LP's `outputs` (Close has no
-  change parameters); layout 1 the contract's, `bsvFee`.
+- `planClose` / `close`: the LP's `outputs` (Close has no change parameters).
 - `swap`, `addLiquidity`, `removeLiquidity`: the whole transaction the
   contract enforces (pool at output 0; payouts; LP / validator fees and the
   commission to `commissionPkh` on swap, each only when nonzero; change), the pool input's unlocking
