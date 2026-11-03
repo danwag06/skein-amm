@@ -4,6 +4,23 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.29.4 (2026-11-02)
+
+- **The deploy's LP keyID is in its pool output description, not a label**
+  (David: a per-deploy label asks for permission every time). The LP key
+  stays random. The deploy createAction's pool output description is the
+  readable text as before plus the suffix: `AMM pool: <SYM> / BSV · amm-lp
+  <the derivationSuffix's 16 bytes, lowercase hex>` (`lpKeyDescription`).
+  The readable part stays at most 50 characters, and the sdk takes up to
+  2000 bytes. The wallet's permissions manager stores it encrypted and
+  answers it verbatim through `listActions`. Recover and Positions read it
+  from `listActions({labels: ["amm-pool-deploy"], includeOutputs,
+  includeOutputLockingScripts})`, output by output (`lpKeyIdOfDescription`).
+  The `amm-lp <hex>` label, `lpKeyLabel` and `lpKeyIdOfLabels` are gone.
+  Recover's internalize writes no description: a BRC-100 internalize output
+  has none. The deploy's own action still names the key.
+- vitest 205; zig 79.
+
 ## 0.29.3 (2026-11-02)
 
 Pages only (web/ui). David's D and E, decided 2026-11-02.

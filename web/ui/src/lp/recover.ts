@@ -12,9 +12,9 @@
  *      outputIndex}`, as Close takes it), decoded with `PoolTemplate`: the
  *      asset id, the LpPubKey, the validator and the fees.
  *   2. The LP key. First (0.28.0) the LP keys of the wallet's own deploy
- *      history (`history`: src/lp/positions.ts `historyPoolRows`: 0.29.3, the
- *      `amm-lp <hex>` label of each `amm-pool-deploy` action, written by the
- *      deploy itself), each tried (`getPublicKey`, BRC-29 to self) against the
+ *      history (`history`: src/lp/positions.ts `historyPoolRows`: 0.29.4, the
+ *      `… · amm-lp <hex>` description of each `amm-pool-deploy` action's pool
+ *      output, written by the deploy itself), each tried (`getPublicKey`, BRC-29 to self) against the
  *      LpPubKey. No match: refused, nothing filed — a row is never filed for a
  *      pool this wallet cannot close. Nothing is kept in the browser.
  *   3. `internalizeAction`: the pool's current output, basket insertion into
@@ -32,7 +32,7 @@ import type { LookupOutput } from "../lib/overlay";
 import type { Spend } from "../lib/skein";
 import { parseOutpoint, sdkTokenId, tokenIdOfWire } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
-import { lpKeyLabel, poolCustomInstructions, type BasketFiling, type BasketRow } from "./poolDeploy";
+import { poolCustomInstructions, type BasketFiling, type BasketRow } from "./poolDeploy";
 import { POOL_TAG, isPoolRow } from "./poolRows";
 import { positionRowsOf } from "./positions";
 
@@ -93,15 +93,6 @@ export interface RecoveredPosition {
   filed: boolean;
 }
 
-/** The recovered action's LP key label (`lpKeyLabel`), when the keyID is a deploy's. */
-function lpLabelOf(keyID: string): string[] {
-  try {
-    return [lpKeyLabel(keyID)];
-  } catch {
-    return [];
-  }
-}
-
 /** Steps 1-3 (see the module comment). Throws `RecoverError` with the page's notice; nothing is filed then. */
 export async function recoverPosition(i: RecoverInput): Promise<RecoveredPosition> {
   const pasted = parsePoolOutpoint(i.outpoint);
@@ -160,7 +151,7 @@ export async function recoverPosition(i: RecoverInput): Promise<RecoveredPositio
     }),
   };
   const row: InternalizeOutput = { outputIndex: filing.outputIndex, protocol: "basket insertion", insertionRemittance: { basket: filing.basket, tags: filing.tags, customInstructions: filing.customInstructions } };
-  const internalizeArgs = { tx: output.beef, outputs: [row], description: describe(`AMM pool recover: ${sym ?? "token"}`), labels: ["amm-pool-deploy", ...lpLabelOf(lp.keyID)] };
+  const internalizeArgs = { tx: output.beef, outputs: [row], description: describe(`AMM pool recover: ${sym ?? "token"}`), labels: ["amm-pool-deploy"] };
   const r = await i.wallet.internalizeAction(internalizeArgs);
   return {
     outpoint: current,

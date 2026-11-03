@@ -6,8 +6,8 @@ validator's key, nonce and affirmation (layout 2, `src/pool/artifact.ts`;
 0.29.1: layout 1, before 0.13.0, is dropped — it decodes as no pool).
 
 - **Pool deploy** (`deployPool`): the LP key is a BRC-29 key to self under
-  a fresh random keyID (`newLpKey`), named in the deploy action by the label
-  `amm-lp <hex>` (0.29.3; nothing kept in the browser);
+  a fresh random keyID (`newLpKey`), named in the pool output's description
+  `AMM pool: <SYM> / BSV · amm-lp <hex>` (0.29.4; nothing kept in the browser);
   `amm.pool.affirm {pool, satoshis}` (the pool as proposed: ValidatorPubKey
   33 zero bytes, Nonce 32 zero bytes, Affirmation empty) →
   `{validatorPubKey, nonce, signature}`, checked (the key the validator's
@@ -24,7 +24,7 @@ validator's key, nonce and affirmation (layout 2, `src/pool/artifact.ts`;
   in the same call; the pool's sats go to the wallet's change. No take-in, no
   `amm-swap`, no Move back.
 - **Recover** (`recoverPosition`): tries the LP keyIDs of the deploy history,
-  read from each deploy action's `amm-lp <hex>` label (0.29.3; a 0.13.0 pool's LP keyID is on no chain).
+  read from each deploy's pool output description (0.29.4; a 0.13.0 pool's LP keyID is on no chain).
 - **Positions**: a rescinded pool (the validator's Rescind: ValidatorPubKey
   cleared) is shown as such; the LP closes it as any.
 

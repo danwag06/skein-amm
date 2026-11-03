@@ -30,8 +30,8 @@ import { PoolTemplate, RESCINDED_KEY } from "../src/pool";
 import { type SignedFetch } from "../src/lib/overlay";
 import {
   POOL_TAG,
-  lpKeyIdOfLabels,
-  lpKeyLabel,
+  lpKeyDescription,
+  lpKeyIdOfDescription,
   assetIdHex,
   deployPool,
   isPoolRow,
@@ -295,13 +295,15 @@ describe("pool deploy (0.13.0): the validator's affirmation, then one createActi
     expect(lpReq.keyID).toMatch(/^YW1tLWxw [A-Za-z0-9+/]{22}==$/); // base64("amm-lp"), 16 random bytes
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.inputs).toBeUndefined();
-    expect(create.outputs).toEqual([{ lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), satoshis: 1_000_000, outputDescription: "AMM pool: TST / BSV" }]);
+    // 0.29.4: the readable text as before, then the LP keyID's suffix bytes (hex) after ` · amm-lp `.
+    const suffixHex = Utils.toHex(Utils.toArray(lpReq.keyID.split(" ")[1]!, "base64"));
+    expect(suffixHex).toMatch(/^[0-9a-f]{32}$/);
+    expect(create.outputs).toEqual([{ lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), satoshis: 1_000_000, outputDescription: `AMM pool: TST / BSV · amm-lp ${suffixHex}` }]);
+    expect(lpKeyDescription("AMM pool: TST / BSV", lpReq.keyID)).toBe(create.outputs![0]!.outputDescription);
+    expect(lpKeyIdOfDescription(create.outputs![0]!.outputDescription)).toBe(lpReq.keyID);
+    expect(lpKeyIdOfDescription("AMM pool: TST / BSV")).toBeNull();
     expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
-    // 0.29.3: the LP keyID in the deploy's own action, as the label `amm-lp <the suffix's bytes, hex>`.
-    expect(create.labels!.slice(-2)).toEqual(["amm-pool-deploy", lpKeyLabel(lpReq.keyID)]);
-    expect(create.labels!.at(-1)).toMatch(/^amm-lp [0-9a-f]{32}$/);
-    expect(create.labels!.at(-1)).toBe(`amm-lp ${Utils.toHex(Utils.toArray(lpReq.keyID.split(" ")[1]!, "base64"))}`);
-    expect(lpKeyIdOfLabels(create.labels!.map((l) => l.toLowerCase()))).toBe(lpReq.keyID);
+    expect(create.labels!.at(-1)).toBe("amm-pool-deploy"); // 0.29.4: no per-deploy label
     const plan = ColorPlan.fromLabels(create.labels)!;
     expect(plan).toMatchObject({ version: 1, assets: [SDK_ID], operations: [{ assetId: SDK_ID, operation: "transfer" }], inputPositions: [], ownedOutputs: [], changePositions: [], sighashTypes: [] });
 

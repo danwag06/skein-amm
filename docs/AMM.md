@@ -231,9 +231,9 @@ counterparty}`).
   sats, tokens = sats ÷ price in the token's decimals; no pools, no
   filling. The LP key: a BRC-29 key to self under a
   fresh random keyID (derivationPrefix base64("amm-lp"), derivationSuffix
-  16 random bytes), named in the deploy's own action by the label `amm-lp
-  <the suffix's 16 bytes, hex>` (0.29.3; labels are lowercased by the wallet,
-  hence hex), nothing kept in the browser. `amm.pool.terms`;
+  16 random bytes), named in the deploy's pool output description: `AMM pool:
+  <SYM> / BSV · amm-lp <the suffix's 16 bytes, lowercase hex>` (0.29.4; 0.29.3
+  used a label, which prompted on every deploy), nothing kept in the browser. `amm.pool.terms`;
   `amm.pool.affirm {pool, satoshis}` → `{validatorPubKey, nonce,
   signature}`, checked and written into the pool's state; one
   `createAction`: outputs [the pool] (a transfer to a foreign script), no
@@ -273,10 +273,10 @@ counterparty}`).
   `<txid>_<vout>`, the deploy's or a later continuation), follows it to its
   current output (`GET <base>/spends`), reads that output's BEEF from
   BRC-207's `color-spendability` at `ls_color_<tokenId>` (0.20.1; `ls_color {txid, outputIndex}` before) and decodes the pool. Its LP keyID is random and on no
-  chain, so the keyIDs of the wallet's deploy history are tried (0.29.3: the
-  `amm-lp <hex>` label of each `amm-pool-deploy` action, read with
-  `listActions({labels: ["amm-pool-deploy"], includeLabels, includeOutputs,
-  includeOutputLockingScripts})`, the pool from the output's script; the
+  chain, so the keyIDs of the wallet's deploy history are tried (0.29.4: the
+  `… · amm-lp <hex>` description of each `amm-pool-deploy` action's pool
+  output, read through the manager with `listActions({labels:
+  ["amm-pool-deploy"], includeOutputs, includeOutputLockingScripts})`, the pool from the output's script; the
   first source for Positions too); none: "not in this wallet's deploy
   history", nothing filed. Each candidate is checked with
   `getPublicKey` against the pool's LpPubKey. On a match it files the
@@ -763,7 +763,7 @@ terms are root's message to `/@<tokenId>` (no page for it).
   the LP key from its deploy's input 0).
 - **Recovering a 0.13.0 pool from another wallet.** Its LP keyID is random
   and named only in the deploying wallet (its row, and since 0.29.3 its
-  deploy action's `amm-lp` label): another wallet cannot recover it. The
+  deploy's pool output description): another wallet cannot recover it. The
   validator can still Rescind it.
 
 - **A paused submission asks nobody** (skein-overlay 0.20.0, the settled
@@ -813,7 +813,7 @@ terms are root's message to `/@<tokenId>` (no page for it).
   `listActions({labels: ["amm-pool-deploy"], includeOutputs: true})` and
   take every output filed in `amm-pools` as a pool row, deduped with the
   basket's, each followed by `/spends` as before; Recover tries those rows'
-  LP keys (0.29.3: from the action's `amm-lp` label; nothing in the browser).
+  LP keys (0.29.4: from the pool output's description; nothing in the browser).
 - **Unfinished steps.** A swap payout the wallet did not take in at once is
   listed in the browser (`wallet/pendingPayouts.ts`, no key material since
   0.29.3) and finished from Your tokens' "Unfinished" card.

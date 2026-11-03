@@ -7,11 +7,12 @@
  *
  *   1. The LP key: a BRC-29 key to self under a fresh random keyID
  *      (`newLpKey`: derivationPrefix base64("amm-lp"), derivationSuffix 16
- *      random bytes), kept in the position row and (0.29.3, David) in the
- *      deploy's own action as the label `amm-lp <the suffix's 16 bytes, hex>`
- *      (`lpKeyLabel`), written in the same createAction that makes the
- *      transaction: the deploy history alone gives it back (`lpKeyIdOfLabels`;
- *      Recover and Positions read it first). Nothing is kept in the browser.
+ *      random bytes), kept in the position row and (0.29.4, David) in the
+ *      pool output's description in the same createAction that makes the
+ *      transaction: `AMM pool: <SYM> / BSV · amm-lp <the suffix's 16 bytes,
+ *      hex>` (`lpKeyDescription`): the deploy history alone gives it back
+ *      (`lpKeyIdOfDescription`; Recover and Positions read it first). Nothing
+ *      is kept in the browser.
  *   2. `amm.pool.terms` (the validator and its fees), then `amm.pool.affirm
  *      {pool, satoshis}`: the proposed pool output, its ValidatorPubKey,
  *      Nonce and Affirmation still to come (33 zero bytes, 32 zero bytes,
@@ -68,27 +69,27 @@ function describe(text: string): string {
   return text.length <= 50 ? text : `${text.slice(0, 49)}…`;
 }
 
-/** The prefix of the deploy action's LP key label (0.29.3): `amm-lp <hex>`. */
-export const LP_KEY_LABEL_PREFIX = "amm-lp ";
+/** The marker the deploy's pool output description ends with (0.29.4): ` · amm-lp <hex>`. */
+export const LP_KEY_MARK = " · amm-lp ";
 
 /**
- * The deploy action's label naming its LP keyID (0.29.3): `amm-lp ` and the derivationSuffix's
- * bytes in lowercase hex (labels are lowercased by the wallet, base64 is not case-safe): 7 + 32
- * characters for a 16-byte suffix, far under BRC-100's 300. The module ignores it (not `p color`).
+ * The pool output's description in the deploy createAction (0.29.4, David Case 2026-11-02): the
+ * readable text as before (`AMM pool: <SYM> / BSV`, at most 50 characters) then ` · amm-lp ` and
+ * the LP keyID's derivationSuffix bytes in lowercase hex (16 bytes: 32 characters). The sdk takes
+ * up to 2000 bytes; the wallet's permissions manager stores it encrypted and decrypts it on the
+ * way out (listActions through the manager answers it verbatim).
  */
-export function lpKeyLabel(keyID: string): string {
+export function lpKeyDescription(readable: string, keyID: string): string {
   const suffix = keyID.split(" ")[1];
   if (keyID.split(" ")[0] !== LP_DERIVATION_PREFIX || !suffix) throw new PoolDeployError(`not a deploy LP keyID: ${keyID}`);
-  return `${LP_KEY_LABEL_PREFIX}${toHex(Utils.toArray(suffix, "base64"))}`;
+  return `${readable}${LP_KEY_MARK}${toHex(Utils.toArray(suffix, "base64"))}`;
 }
 
-/** The LP keyID an action's labels name (`lpKeyLabel`), or null. */
-export function lpKeyIdOfLabels(labels: string[] | undefined): string | null {
-  for (const l of labels ?? []) {
-    const m = /^amm-lp ([0-9a-f]{2,128})$/.exec(l);
-    if (m && m[1]!.length % 2 === 0) return `${LP_DERIVATION_PREFIX} ${Utils.toBase64(Utils.toArray(m[1]!, "hex"))}`;
-  }
-  return null;
+/** The LP keyID an output description names (`lpKeyDescription`), or null. */
+export function lpKeyIdOfDescription(description: string | undefined): string | null {
+  const m = / · amm-lp ([0-9a-f]{2,128})$/.exec(description ?? "");
+  if (!m || m[1]!.length % 2 !== 0) return null;
+  return `${LP_DERIVATION_PREFIX} ${Utils.toBase64(Utils.toArray(m[1]!, "hex"))}`;
 }
 
 /** A new pool's LP key derivation (0.13.0): derivationPrefix base64("amm-lp"), derivationSuffix 16 random bytes, base64. */
@@ -374,10 +375,10 @@ export async function deployPool(i: DeployPoolInput): Promise<DeployedPool> {
 
   // 3. The deploy: the pool alone; the module selects the token inputs and adds their change.
   const sym = meta.sym ?? "token";
-  const outputs: CreateActionOutput[] = [{ lockingScript, satoshis: Number(plan.sats), outputDescription: describe(`AMM pool: ${sym} / BSV`) }];
+  const outputs: CreateActionOutput[] = [{ lockingScript, satoshis: Number(plan.sats), outputDescription: lpKeyDescription(describe(`AMM pool: ${sym} / BSV`), lpKey.keyID) }];
   const createArgs = {
     description: describe(`AMM pool deploy: ${sym}`),
-    labels: [...transferPlanLabels(sdkId), "amm-pool-deploy", lpKeyLabel(lpKey.keyID)],
+    labels: [...transferPlanLabels(sdkId), "amm-pool-deploy"],
     outputs,
     options: { randomizeOutputs: false, acceptDelayedBroadcast: false },
   };

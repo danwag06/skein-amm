@@ -8,10 +8,10 @@
  * current output (each swap's continuation), or closed (by the LP or by the
  * validator, docs/AMM.md "The validator's Close").
  *
- * 0.29.3: the deploy HISTORY is the first source (`historyPoolRows`): each
- * `amm-pool-deploy` action's label `amm-lp <hex>` names its LP keyID and its
- * output's script is the pool (no customInstructions needed: BRC-100's
- * listActions does not answer them). 0.28.0: the rows also come from the wallet's HISTORY (`historyPoolRows`):
+ * 0.29.3: the deploy HISTORY is the first source (`historyPoolRows`): 0.29.4,
+ * each `amm-pool-deploy` action's pool output names its LP keyID in its
+ * description (`… · amm-lp <hex>`) and its script is the pool (no
+ * customInstructions needed: BRC-100's listActions does not answer them). 0.28.0: the rows also come from the wallet's HISTORY (`historyPoolRows`):
  * `listOutputs` answers spendable outputs only, so a pool output the wallet
  * itself spent (the LP swapped against its own pool) left no row and the
  * position vanished; the deploys' actions (label `amm-pool-deploy`) still
@@ -30,7 +30,7 @@ import { readSpend, type Spend } from "../lib/skein";
 import { colorQuery, parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
 import { POOL_TAG, isPoolRow } from "./poolRows";
-import { LP_KEY_PROTOCOL, lpKeyIdOfLabels, poolCustomInstructions, type BasketRow } from "./poolDeploy";
+import { LP_KEY_PROTOCOL, lpKeyIdOfDescription, poolCustomInstructions, type BasketRow } from "./poolDeploy";
 
 /** The wallet key that is a pool's LpPubKey (a BRC-29 key to self, or a pre-BRC-29 1Sat key). */
 export interface LpKeyRef {
@@ -65,12 +65,12 @@ export async function historyPoolRows(wallet: WalletInterface): Promise<BasketRo
   const limit = 1000;
   try {
     for (let offset = 0; offset < 100_000; offset += limit) {
-      const r = await wallet.listActions({ labels: [POOL_DEPLOY_LABEL], includeLabels: true, includeOutputs: true, includeOutputLockingScripts: true, includeCustomInstructions: true, limit, offset } as Parameters<WalletInterface["listActions"]>[0]);
+      const r = await wallet.listActions({ labels: [POOL_DEPLOY_LABEL], includeOutputs: true, includeOutputLockingScripts: true, includeCustomInstructions: true, limit, offset } as Parameters<WalletInterface["listActions"]>[0]);
       for (const a of r.actions ?? []) {
-        // 0.29.3: the LP keyID from the action's own label (`amm-lp <hex>`), the pool from its output's script.
-        const keyID = lpKeyIdOfLabels(a.labels);
         for (const o of a.outputs ?? []) {
           const outpoint = `${a.txid}.${o.outputIndex}`;
+          // 0.29.4: the LP keyID from the pool output's description (`… · amm-lp <hex>`), the pool from its script.
+          const keyID = lpKeyIdOfDescription(o.outputDescription);
           const pool = keyID && o.lockingScript ? PoolTemplate.decode(o.lockingScript) : null;
           if (pool && keyID) {
             const tokenId = sdkTokenId(tokenIdOfWire(Utils.toArray(pool.args.assetId, "hex")));
