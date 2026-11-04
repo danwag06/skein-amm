@@ -83,8 +83,16 @@ order) ‖ vout, big-endian u32:
 | map | key → value | |
 |---|---|---|
 | `pools` | `tp ‖ outpoint → record` (a CID link) | an unspent listed pool output the topic admitted (0.13.0: a self-attesting pool, or a Swap's continuation of a listed pool naming the next key) |
-| `byValidator` | `validatorIdentityKey (33 bytes) ‖ tp ‖ outpoint → null` | a set index for the validator query |
+| `byValidator` | `validatorIdentityKey (33 bytes) ‖ tp ‖ outpoint → null` | a set index for the validator queries; from 0.33.0 a spent pool keeps its row (only `rejected` removes it), `{validatorIdentityKey}` filtering to the live ones |
+| `byLp` (0.33.0) | `lpPubKey (33 bytes) ‖ tp ‖ outpoint → null` | every listed pool of an LP key, live and spent; only `rejected` removes it |
+| `rescinded` (0.33.0) | `tp ‖ lpPubKey → pool record` (a CID link, as `pools`) | the output a validator's Rescind of a listed pool of that key wrote (not listed); removed when the Rescind is rejected |
 | `spentPools` | `tp ‖ outpoint → record` (a CID link) | a checked pool a spend consumed, kept for `rejected` to give back and for `{outpoint}` to follow |
+| `fees` (0.33.0) | `tp ‖ lpPubKey (33 bytes) ‖ swap txid → fee row` (a CID link) | one row per Swap admitted, under its pool's LP key: `{kind: "amm-swap-fees", lp, validator, commission, bsvIn, commissionPkh}`, the three fees in the input asset (src/pool.zig `feesOf`, the outputs where the relay's pair check finds them) |
+| `byCommission` (0.33.0) | `commissionPkh (20 bytes) ‖ tp ‖ swap txid → the same fee row` | the Swaps that paid a commission (not 0) to that key hash |
+
+The fee rows exist for Swaps admitted from 0.33.0 on: a Swap admitted
+before has none (no backfill). `admitted` writes them for a listed Swap
+continuation; `rejected` removes them.
 
 The record (`{kind: "amm-pool", txid, vout, bsvReserve, tokenReserve,
 liquidityFeeBps, validationFeeBps, commissionBps, lpPubKey,
@@ -110,8 +118,7 @@ refused.
 - `{tokenId}`: every live pool of the token, a freeform list in the
   engine's `PoolState` shape plus `outpoint: "<txid>_<vout>"`.
 - `{tokenId, outpoint}`: that pool, or its newest continuation, `{current,
-  hops, fees}` (`fees` 0.32.0: `{sats, tokens, swaps}` of the pool's
-  lineage, as `{tokenId, lpPubKey}` below). From an outpoint that is not live, the walk follows the spends
+  hops}`. From an outpoint that is not live, the walk follows the spends
   forward: a hop is a checked pool this topic indexed and a spend consumed
   (`spentPools`), its spender is the chain state's (`spentBy`, the chain
   app's `chain/state`, read only), and the continuation is output 0 of the
@@ -123,22 +130,27 @@ refused.
   outpoint, whose BEEF the engine builds from the chain state.
 - `{tokenId, validatorIdentityKey}`: that validator's live pools of the
   token, via `byValidator`.
-- `{tokenId, lpPubKey}` (0.32.0): the LP fees the pool lineage of that
-  LpPubKey earned (one deploy and its Swap continuations; the key is constant
-  along it and unique per deploy), `{lpPubKey, root, sats, tokens, swaps,
-  current}`: `root` the deploy's pool outpoint, `sats` the fees of sats-in
-  Swaps, `tokens` those of token-in Swaps (in the token's units), `swaps` the
-  Swaps counted, `current` the live pool (`PoolState` shape) or null once the
-  LP's Close or the validator's Rescind ended it. Read at query time, nothing
-  kept: the deploy is the listed pool of that key (`pools` or `spentPools`)
-  whose output attests itself (`affirmed`, its transaction from the chain
-  state); the walk follows the spends as `{outpoint}` does, and each spender
-  whose output 0 is listed is a Swap whose LP fee output is read with
-  src/pool.zig `lpFeeOf` (the call `parseSwapCall`, the positions
-  `feeLayout`: the layout amm-p2p's relay checks a pair by). A rejected Swap
-  is not in the lineage (`rejected` drops it from the maps). A key with no
-  pool here answers zeros, `root` and `current` null. The fees stay on chain
-  at the LP's key; nobody sweeps them yet.
+
+The fee queries (0.33.0) take a list and answer one record per key, in the
+list's order; an unknown key answers zeros. From the fee rows only, so for
+Swaps admitted from 0.33.0 on:
+
+- `{tokenId, lpPubKeys: [<hex 33>]}` → `[{lpPubKey, status, outpoint?,
+  current?, sats, tokens, swaps}]`: the LP fees of the pool of that LpPubKey
+  (`sats` from sats-in Swaps, `tokens` from token-in) and its state:
+  `status: "live"` with `outpoint` and `current` (`PoolState` shape), found
+  through `byLp` (its pools, the live one in `pools`); `"rescinded"` with
+  `outpoint` and `current` (the Rescind's output and its pool state, what
+  the LP's Close takes back) when the
+  key's `rescinded` record names an output the chain state has unspent;
+  else `"closed"` (the Close spent it, or no pool of the key here);
+- `{tokenId, validatorIdentityKeys: [<hex 33>]}` →
+  `[{validatorIdentityKey, sats, tokens, swaps, pools}]`: the validator fees
+  over the rows of all its pools, closed included (`byValidator` → each
+  pool's LpPubKey → its rows); `pools` the distinct pools (LP keys) counted;
+- `{tokenId, commissionPkhs: [<hex 20>]}` → `[{commissionPkh, sats, tokens,
+  swaps}]`: the commissions the Swaps naming that key hash paid
+  (`byCommission`).
 
 ### The engine's `PoolState` shape
 

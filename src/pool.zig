@@ -572,23 +572,40 @@ pub fn feeLayout(call: SwapCall, cont: Pool) error{ LpFeeBps, ValidatorFeeBps, C
     return l;
 }
 
-/// A Swap's fee to the LP: `amount` in the input asset (sats when `bsv_in`, else token units).
-pub const LpFee = struct { amount: u64, bsv_in: bool };
+/// What a Swap paid (0.33.0): its three fees, each in the input asset (sats when `bsv_in`, else token
+/// units), and the commission's key hash (the call's `commissionPkh`).
+pub const SwapFees = struct {
+    lp: u64,
+    validator: u64,
+    commission: u64,
+    bsv_in: bool,
+    commission_pkh: [20]u8,
+};
 
-/// The LP's fee a Swap transaction paid: the call on input `pool_input` (`parseSwapCall`), the
-/// continuation at output 0, the fee output where `feeLayout` puts it, checked to be the
-/// contract's (`payoutScript` of the fee to Hash160 of the continuation's LpPubKey, its
-/// `payoutSats`). A zero fee (a pool charging none) is `amount = 0`. Null when the transaction
-/// is not such a Swap (no call, no continuation, or the fee output not the contract's).
-pub fn lpFeeOf(a: std.mem.Allocator, tx: c.bsvz.transaction.Transaction, pool_input: usize) !?LpFee {
+/// The fees a Swap transaction paid: the call on input `pool_input` (`parseSwapCall`), the
+/// continuation at output 0, the fee outputs where `feeLayout` puts them, each checked to hold the
+/// contract's amount (`payoutSats`) and the LP's and the commission's their payout script
+/// (`payoutScript` to Hash160 of the continuation's LpPubKey, to the call's commissionPkh); a zero
+/// fee has no output. Null when the transaction is not such a Swap (no call, no continuation, a fee
+/// output missing or not the contract's).
+pub fn feesOf(a: std.mem.Allocator, tx: c.bsvz.transaction.Transaction, pool_input: usize) !?SwapFees {
     if (pool_input >= tx.inputs.len or tx.outputs.len < 2) return null;
     const call = (try parseSwapCall(a, tx.inputs[pool_input].unlocking_script.bytes)) orelse return null;
+    if (call.commission_pkh.len != 20) return null;
     const cont = poolOfScript(tx.outputs[0].locking_script.bytes) orelse return null;
     const l = feeLayout(call, cont) catch return null;
-    const at = l.lp_at orelse return .{ .amount = 0, .bsv_in = call.bsv_in };
-    if (at >= tx.outputs.len) return null;
-    const o = tx.outputs[at];
-    const want = try payoutScript(a, cont.asset_id, l.lp_fee, bsvz.crypto.hash.hash160(&cont.lp).bytes, call.bsv_in);
-    if (o.satoshis < 0 or @as(u64, @intCast(o.satoshis)) != payoutSats(l.lp_fee, call.bsv_in) or !std.mem.eql(u8, o.locking_script.bytes, want)) return null;
-    return .{ .amount = l.lp_fee, .bsv_in = call.bsv_in };
+    if (l.end > tx.outputs.len) return null;
+    const pkh = call.commission_pkh[0..20].*;
+    const checks = [_]struct { at: ?usize, amount: u64, to: ?[20]u8 }{
+        .{ .at = l.lp_at, .amount = l.lp_fee, .to = bsvz.crypto.hash.hash160(&cont.lp).bytes },
+        .{ .at = l.validator_at, .amount = l.validator_fee, .to = null },
+        .{ .at = l.commission_at, .amount = l.commission, .to = pkh },
+    };
+    for (checks) |k| {
+        const at = k.at orelse continue;
+        const o = tx.outputs[at];
+        if (o.satoshis < 0 or @as(u64, @intCast(o.satoshis)) != payoutSats(k.amount, call.bsv_in)) return null;
+        if (k.to) |to| if (!std.mem.eql(u8, o.locking_script.bytes, try payoutScript(a, cont.asset_id, k.amount, to, call.bsv_in))) return null;
+    }
+    return .{ .lp = l.lp_fee, .validator = l.validator_fee, .commission = l.commission, .bsv_in = call.bsv_in, .commission_pkh = pkh };
 }

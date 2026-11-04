@@ -384,24 +384,38 @@ Rescind's included; `closed` once a Close spent it). The current output's BEEF c
 `color-spendability` at `ls_color_<tokenId>` (0.20.1; `ls_color {txid, outputIndex}` before).
 
 
-## LP fees (0.32.0)
+## Fees (0.33.0)
 
-Each Swap pays the LP fee as its own output to Hash160 of the pool's LpPubKey, in the input
-asset (sats on a sats-in Swap, a 1Color value output on a token-in Swap); nobody sweeps them
-yet and a Close leaves them on chain. `ls_amm_<assetId>` reports what a pool lineage earned:
+Each Swap pays three fees in the input asset (sats on a sats-in Swap, a 1Color value output on a
+token-in Swap), each its own output (pool/Pool.runar.go `Swap`): the LP's to Hash160 of the pool's
+LpPubKey, the validator's to Hash160 of its key, the commission to the call's `commissionPkh`.
+Nobody sweeps them yet; a Close leaves them on chain.
 
-- `{tokenId, lpPubKey}` → `{lpPubKey, root, sats, tokens, swaps, current}` (freeform):
-  `root` the deploy's pool outpoint, `sats` and `tokens` the LP fees of sats-in and token-in
-  Swaps, `swaps` the Swaps counted, `current` the live pool or null once closed; a key with no
-  pool here: zeros, `root` and `current` null.
-- `{tokenId, outpoint}` → `{current, hops, fees: {sats, tokens, swaps}}`, the same totals
-  for that pool's lineage.
+`ls_amm_<assetId>` keeps a fee ROW per Swap, written when it admits the Swap's continuation and
+removed when a rejection takes it back: under the pool's LpPubKey (the pool's id: constant along its
+continuations, one per deploy) `{lp, validator, commission, bsvIn, commissionPkh}`, read by
+src/pool.zig `feesOf` where the relay's pair check finds them (`feeLayout`); and, a commission not
+0, a membership row under the commission's key hash. Queries are prefix scans and sums.
 
-Read at query time, nothing kept (programs/amm-lookup README, "Queries"): the lineage's deploy
-is the listed pool of that key that attests itself; the walk follows the spends as
-`{outpoint}` does; each Swap's LP fee output is found by src/pool.zig `lpFeeOf`, over the one
-`parseSwapCall` and `feeLayout` amm-p2p's relay checks a pair with. A rejected Swap is not in
-the lineage. The pages (Liquidity) ask per position's LpPubKey.
+**Fee rows exist for Swaps admitted after 0.33.0 was installed.** Earlier Swaps have none: nothing
+is backfilled or migrated.
+
+The queries, every one naming its token (`tokenId`; programs/amm-lookup README, "Queries"):
+
+| query | answer |
+|---|---|
+| `{tokenId}` | every live pool, `PoolState` shape plus `outpoint` |
+| `{tokenId, outpoint, beef?}` | that pool or its newest continuation, `{current, hops}`; with `beef: true` the output-list form |
+| `{tokenId, validatorIdentityKey}` | that validator's live pools |
+| `{tokenId, lpPubKeys: [<hex 33>]}` | `[{lpPubKey, status, outpoint?, current?, sats, tokens, swaps}]`: the LP fees per pool (sats from sats-in Swaps, tokens from token-in) and its state: `live` (`outpoint`, `current` the `PoolState`), `rescinded` (`outpoint` and `current`: the Rescind's output and its pool state, what the Close takes back), `closed` |
+| `{tokenId, validatorIdentityKeys: [<hex 33>]}` | `[{validatorIdentityKey, sats, tokens, swaps, pools}]`: the validator fees over all its pools' rows, closed included |
+| `{tokenId, commissionPkhs: [<hex 20>]}` | `[{commissionPkh, sats, tokens, swaps}]`: the commissions paid to each key hash |
+
+A list query answers one record per key, in order; an unknown key answers zeros (`status: "closed"`,
+`pools` 0). Every one is prefix scans over the lookup's indexes (`byLp`, `byValidator`,
+`byCommission`, `fees`), no scan of all pools. The pages (Liquidity) load the positions with
+`{lpPubKeys}`, once per token with all the wallet's LP keys for it: the state and the fees of each,
+nothing read per position until the LP acts on one (Close, Recover).
 
 ## Prices (0.9.0)
 
@@ -432,7 +446,7 @@ topic manager's beat carries no prices.
 | route | what |
 |---|---|
 | `POST /submit` | BRC-22 (`X-Topics` a registered topic): the request waits on the submission and answers the STEAK; 400 for a BEEF that does not verify or a rejected transaction; 503 + Retry-After while undecided (skein-overlay 0.9.1; 0.7.3–0.9.0 answered `{id}`) |
-| `POST /lookup` | BRC-24: `ls_amm_<assetId>` (0.21.0) `{tokenId}`, `{tokenId, outpoint, beef?}` (0.32.0: plus `fees: {sats, tokens, swaps}`), `{tokenId, validatorIdentityKey}` (listed pools only), `{tokenId, lpPubKey}` (0.32.0: the LP fees, "LP fees" below); a token instance's `ls_color_<assetId>`; the discovery instance's `ls_color` (skein-1color README; 0.20.0) |
+| `POST /lookup` | BRC-24: `ls_amm_<assetId>` (0.21.0) `{tokenId}`, `{tokenId, outpoint, beef?}`, `{tokenId, validatorIdentityKey}` (listed pools only); 0.33.0: `{tokenId, lpPubKeys}`, `{tokenId, validatorIdentityKeys}`, `{tokenId, commissionPkhs}` (the fee rows, "Fees" below); a token instance's `ls_color_<assetId>`; the discovery instance's `ls_color` (skein-1color README; 0.20.0) |
 | `GET /requests` | amm-p2p `requests` (0.9.0): the holders' listing requests not yet registered, newest first, `[{tokenId, from, at}]`; a read. The config app's in 0.17.0; removed in 0.19.0 |
 | `GET /spends?outpoint=<txid>.<vout>` | amm-p2p `spends` (0.9.0): the chain state of an outpoint, a pool followed to its current output, `{outpoint, spentBy?, current?, hops, closed}`; a read |
 | `GET /listTopicManagers`, `/listLookupServiceProviders`, `/getDocumentationFor…` | the listings (each program's `metadata` / `documentation`); reads since 0.5.0 |

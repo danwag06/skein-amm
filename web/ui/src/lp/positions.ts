@@ -1,4 +1,8 @@
 /**
+ * 0.33.0: the rows are read here; their pools' state and fees come from ONE `ls_amm_<assetId>`
+ * `{tokenId, lpPubKeys}` query per token (src/data/exchange.ts `myPositions`), not from `/spends` per
+ * row as below; the pool output's BEEF (`colorOutput`) is read only when the LP acts (Close).
+ *
  * The connected wallet's positions (skein-amm 0.9.0, David Case 2026-10-09;
  * 0.12.0: the rows in the exchange's basket `amm-pools`, no claim): the pool
  * rows its deploys filed (op `amm-pool`, the LP key in their
@@ -23,10 +27,9 @@
  * output if admitted and unspent, with its BEEF; `ls_color {txid,
  * outputIndex}` until 0.19.0).
  */
-import { Transaction, Utils, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
-import { PoolTemplate, type Pool } from "../pool";
-import { lookup, lpFeesOf, parseOutputList, type LpFees, type LookupOutput, type SignedFetch } from "../lib/overlay";
-import { readSpend, type Spend } from "../lib/skein";
+import { Utils, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
+import { PoolTemplate } from "../pool";
+import { lookup, parseOutputList, type LookupOutput, type SignedFetch } from "../lib/overlay";
 import { colorQuery, parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
 import { POOL_TAG, isPoolRow } from "./poolRows";
@@ -87,7 +90,7 @@ export async function historyPoolRows(wallet: WalletInterface): Promise<BasketRo
           }
           // A wallet that answers the output's customInstructions (0.28.0): the filed row as it is.
           if (o.basket !== POOLS_BASKET) continue;
-          const row: BasketRow = { outpoint, satoshis: o.satoshis, ...(o.tags ? { tags: o.tags } : {}), ...(o.customInstructions ? { customInstructions: o.customInstructions } : {}) };
+          const row: BasketRow = { outpoint, satoshis: o.satoshis, ...(o.lockingScript ? { lockingScript: o.lockingScript } : {}), ...(o.tags ? { tags: o.tags } : {}), ...(o.customInstructions ? { customInstructions: o.customInstructions } : {}) };
           if (isPoolRow(row)) out.push(row);
         }
       }
@@ -158,57 +161,6 @@ export async function colorOutput(af: SignedFetch | null, base: string, tokenId:
   const o = outs.find((x) => x.outputIndex === op.vout) ?? outs[0];
   if (!o) throw new Error(`${service}: no unspent output ${outpoint}`);
   return o;
-}
-
-export interface LoadedPosition {
-  row: PositionRow;
-  /** The pool's current output (`<txid>.<vout>`); null when closed. */
-  current: string | null;
-  closed: boolean;
-  /** The current output, decoded, with its BEEF (absent when closed or not found). */
-  output?: LookupOutput;
-  pool?: Pool;
-  sats?: bigint;
-}
-
-/** One row read from the chain state (and, when live, its current output). */
-export async function loadPosition(
-  af: SignedFetch | null,
-  base: string,
-  row: PositionRow,
-  spendOf: (outpoint: string) => Promise<Spend> = (o) => readSpend(base, o),
-  outputOf: (outpoint: string) => Promise<LookupOutput> = (o) => colorOutput(af, base, row.tokenId, o),
-): Promise<LoadedPosition> {
-  const s = await spendOf(row.deployOutpoint);
-  const current = s.closed ? null : (s.current ?? (s.spentBy ? null : row.deployOutpoint));
-  const out: LoadedPosition = { row, current, closed: s.closed };
-  if (!current) return out;
-  const output = await outputOf(current);
-  const tx = Transaction.fromAtomicBEEF(output.beef);
-  const o = tx.outputs[output.outputIndex];
-  const pool = o ? PoolTemplate.decode(o.lockingScript) : null;
-  if (!pool || !o) return out;
-  return { ...out, output, pool, sats: BigInt(o.satoshis ?? 0) };
-}
-
-/**
- * A position's LP fees (0.32.0): `ls_amm_<assetId>`'s `{tokenId, lpPubKey}` at the token's instance,
- * the pool lineage of that LpPubKey (constant along it, one per deploy) totalled by the lookup.
- * Null when the instance does not answer (an older lookup): the page then shows no fees line.
- */
-export async function positionFees(
-  af: SignedFetch | null,
-  base: string,
-  tokenId: string,
-  lpPubKey: string,
-  feesOf: (lpPubKey: string) => Promise<LpFees> = (k) => lpFeesOf(af, base, tokenId, k),
-): Promise<{ sats: bigint; tokens: bigint } | null> {
-  try {
-    const f = await feesOf(lpPubKey);
-    return { sats: f.sats, tokens: f.tokens };
-  } catch {
-    return null;
-  }
 }
 
 /** One token's positions summed (0.32.0): the Liquidity page's line above the cards. */

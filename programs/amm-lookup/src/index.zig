@@ -57,7 +57,18 @@ pub const service_name = "ls_amm";
 /// `rejected` can give back exactly what was indexed before, without re-judging it. `beat`:
 /// `body → <the last beat body's record>`, so a hook beats only when the body changes. (0.9.0's
 /// `claims` and `spentClaims` are gone with the claim, 0.11.0.)
-pub const maps = [_][]const u8{ "pools", "byValidator", "spentPools", "beat" };
+/// The fee rows (0.33.0, David Case 2026-11-04): `fees`: `tp ‖ LpPubKey ‖ swap txid → <record
+/// {kind: "amm-swap-fees", lp, validator, commission, bsvIn, commissionPkh}>`, one per Swap admitted
+/// (the pool's LP key is its id: constant along its continuations, one per deploy); `byCommission`:
+/// `commissionPkh ‖ tp ‖ swap txid → <the same record>` when the commission is not 0. Written by
+/// `admitted`, removed by `rejected`; rows exist for Swaps admitted from 0.33.0 on. `rescinded`
+/// (0.33.0): `tp ‖ LpPubKey → <outpoint record {txid, vout}>`, the output a validator's Rescind of a
+/// listed pool wrote (not listed: the LP's Close acts on it; its pool record, as `pools` keeps one),
+/// removed when the Rescind is rejected.
+/// `byLp` (0.33.0): `LpPubKey ‖ tp ‖ outpoint → null`, every listed pool of that LP key, live or
+/// spent (the hops of its lineage), removed only when the transaction that listed it is rejected;
+/// `byValidator` likewise from 0.33.0 (its single-key query still answers the live pools only).
+pub const maps = [_][]const u8{ "pools", "byValidator", "spentPools", "beat", "fees", "byCommission", "rescinded", "byLp" };
 
 fn cat(a: Allocator, parts: []const []const u8) ![]u8 {
     return std.mem.concat(a, u8, parts);
@@ -186,18 +197,26 @@ fn linkPool(a: Allocator, svc: *Service, tp: []const u8, txid: [32]u8, vout: u32
     _ = try removePool(a, svc, tp, txid, vout);
     try svc.map("pools").putLink(try poolKey(a, tp, txid, vout), cid);
     try svc.map("byValidator").add(try identityKey(a, try identityOf(a, svc, cid), tp, txid, vout));
+    try svc.map("byLp").add(try identityKey(a, try lpOf(a, svc, cid), tp, txid, vout));
+}
+
+fn lpOf(a: Allocator, svc: *Service, cid: []const u8) ![]const u8 {
+    const rec = try svc.store.getValue(a, cid);
+    const lp = rec.getBytes("lpPubKey") orelse return error.BadIndex;
+    if (lp.len != 33) return error.BadIndex;
+    return lp;
 }
 
 fn putPool(a: Allocator, svc: *Service, tp: []const u8, pf: PoolFields) !void {
     try linkPool(a, svc, tp, pf.txid, pf.vout, try svc.store.putValue(a, try recordValue(a, pf)));
 }
 
-/// Drop a live pool; → its record's CID, when it was indexed.
+/// Drop a live pool; → its record's CID, when it was indexed. Its `byValidator` and `byLp`
+/// memberships stay (0.33.0: a spent pool is still that validator's and that LP's; `rejected` drops them).
 fn removePool(a: Allocator, svc: *Service, tp: []const u8, txid: [32]u8, vout: u32) !?[]const u8 {
     const key = try poolKey(a, tp, txid, vout);
     const cid = (try svc.map("pools").link(key)) orelse return null;
     _ = try svc.map("pools").remove(key);
-    _ = try svc.map("byValidator").remove(try identityKey(a, try identityOf(a, svc, cid), tp, txid, vout));
     return cid;
 }
 
@@ -207,18 +226,84 @@ fn removePool(a: Allocator, svc: *Service, tp: []const u8, txid: [32]u8, vout: u
 /// a Swap's continuation of a listed pool (`tx` calls Swap on an output in `pools` — `spent` runs
 /// after `admitted`, so it is still there — and names its next key), or a pool that attests
 /// itself (pool.zig `affirmed`). Anything else is never listed.
-fn listedAt(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, vout: u32) !bool {
+fn listedAt(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, vout: u32) !?Listing {
     const o = tx.tx.outputs[vout];
-    const p = pool.poolOfScript(o.locking_script.bytes) orelse return false;
-    if (p.rescinded()) return false;
-    for (tx.tx.inputs) |in| {
+    const p = pool.poolOfScript(o.locking_script.bytes) orelse return null;
+    if (p.rescinded()) return null;
+    for (tx.tx.inputs, 0..) |in, i| {
         const op = in.previous_outpoint;
         const cid = (try svc.map("pools").link(try poolKey(a, tp, op.txid.bytes, op.index))) orelse continue;
         if (pool.methodOf(in.unlocking_script.bytes) != .swap) continue;
         const identity = try identityOf(a, svc, cid);
-        if (vout == 0 and pool.nextKeyOf(a, p, identity[0..33].*, op.txid.bytes, op.index)) return true;
+        if (vout == 0 and pool.nextKeyOf(a, p, identity[0..33].*, op.txid.bytes, op.index)) return .{ .swap = i };
     }
-    return pool.affirmed(a, o.locking_script.bytes, @intCast(o.satoshis));
+    return if (pool.affirmed(a, o.locking_script.bytes, @intCast(o.satoshis))) .deploy else null;
+}
+
+/// Whether `tx` is a validator's Rescind of a listed pool of LpPubKey `lp` (0.33.0): output 0 a
+/// rescinded pool of that key, an input spending a listed pool (`pools`: `spent` runs after
+/// `admitted`) of the same key with the Rescind method.
+fn rescindOf(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, lp: [33]u8) !bool {
+    const p = pool.poolOfScript(tx.tx.outputs[0].locking_script.bytes) orelse return false;
+    if (!p.rescinded()) return false;
+    for (tx.tx.inputs) |in| {
+        if (pool.methodOf(in.unlocking_script.bytes) != .rescind) continue;
+        const op = in.previous_outpoint;
+        const cid = (try svc.map("pools").link(try poolKey(a, tp, op.txid.bytes, op.index))) orelse continue;
+        const rec = try svc.store.getValue(a, cid);
+        if (std.mem.eql(u8, rec.getBytes("lpPubKey") orelse continue, &lp)) return true;
+    }
+    return false;
+}
+
+/// Why a pool output is listed (`listedAt`): an affirmed deploy, or the Swap continuation of the
+/// listed pool input `swap` spends.
+const Listing = union(enum) { deploy, swap: usize };
+
+// ---------------------------------------------------------------- the fee rows (0.33.0)
+
+fn feeKey(a: Allocator, tp: []const u8, lp: []const u8, txid: [32]u8) ![]u8 {
+    return cat(a, &.{ tp, lp, &txid });
+}
+
+fn commissionKey(a: Allocator, pkh: []const u8, tp: []const u8, txid: [32]u8) ![]u8 {
+    return cat(a, &.{ pkh, tp, &txid });
+}
+
+/// The Swap `tx` (its pool input `input`, its continuation of LpPubKey `lp` at output 0): its fee row
+/// under the LP key, and (a commission not 0) its membership under the commission's key hash. The
+/// fees are src/pool.zig `feesOf`'s, read where the relay's pair check lays them out (`feeLayout`);
+/// a Swap whose fee outputs are not the contract's writes nothing.
+fn putFees(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, input: usize, lp: []const u8) !void {
+    const f = (try pool.feesOf(a, tx.tx, input)) orelse return;
+    const rec = try svc.store.putValue(a, .{ .map = try a.dupe(Entry, &.{
+        .{ .key = "kind", .value = .{ .text = "amm-swap-fees" } },
+        .{ .key = "lp", .value = .{ .uint = f.lp } },
+        .{ .key = "validator", .value = .{ .uint = f.validator } },
+        .{ .key = "commission", .value = .{ .uint = f.commission } },
+        .{ .key = "bsvIn", .value = .{ .boolean = f.bsv_in } },
+        .{ .key = "commissionPkh", .value = .{ .bytes = try a.dupe(u8, &f.commission_pkh) } },
+    }) });
+    try svc.map("fees").putLink(try feeKey(a, tp, lp, tx.txid), rec);
+    if (f.commission > 0) try svc.map("byCommission").putLink(try commissionKey(a, &f.commission_pkh, tp, tx.txid), rec);
+}
+
+/// A rejected transaction's fee row and its commission membership, gone (the keys from the
+/// transaction: its continuation's LpPubKey at output 0, its txid; the key hash from the row).
+fn removeFees(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx) !void {
+    if (tx.tx.outputs.len == 0) return;
+    const p = pool.poolOfScript(tx.tx.outputs[0].locking_script.bytes) orelse return;
+    // A rejected Rescind: its output was never the pool's (0.33.0).
+    const rk = try cat(a, &.{ tp, &p.lp });
+    if (try svc.map("rescinded").link(rk)) |rc| {
+        const r = try svc.store.getValue(a, rc);
+        if (std.mem.eql(u8, r.getBytes("txid") orelse "", &tx.txid)) _ = try svc.map("rescinded").remove(rk);
+    }
+    const key = try feeKey(a, tp, &p.lp, tx.txid);
+    const cid = (try svc.map("fees").link(key)) orelse return;
+    const rec = try svc.store.getValue(a, cid);
+    _ = try svc.map("fees").remove(key);
+    if (rec.getBytes("commissionPkh")) |pkh| _ = try svc.map("byCommission").remove(try commissionKey(a, pkh, tp, tx.txid));
 }
 
 // ---------------------------------------------------------------- hooks (#50)
@@ -237,8 +322,17 @@ pub fn admitted(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx, o
         if (vout >= tx.tx.outputs.len) continue;
         const o = tx.tx.outputs[vout];
         const pf = poolAt(tx.txid, vout, o.locking_script.bytes, @intCast(o.satoshis)) orelse continue;
-        if (!try listedAt(a, svc, tp, tx, vout)) continue;
+        if (vout == 0 and try rescindOf(a, svc, tp, tx, pf.lp)) {
+            // The rescinded pool's record (`recordValue`: txid, vout, its reserves and fees): what the Close takes back.
+            try svc.map("rescinded").putLink(try cat(a, &.{ tp, &pf.lp }), try svc.store.putValue(a, try recordValue(a, pf)));
+            continue;
+        }
+        const why = (try listedAt(a, svc, tp, tx, vout)) orelse continue;
         try putPool(a, svc, tp, pf);
+        switch (why) {
+            .swap => |i| try putFees(a, svc, tp, tx, i, &pf.lp),
+            .deploy => {},
+        }
     }
     try beatIfChanged(a, svc);
 }
@@ -263,10 +357,16 @@ pub fn spent(a: Allocator, svc: *Service, topic: []const u8, outpoint: lookup.Ou
 /// as indexed (and checked) when first admitted.
 pub fn rejected(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx) anyerror!void {
     const tp = try topicPrefix(a, topic);
+    try removeFees(a, svc, tp, tx);
     for (0..tx.tx.outputs.len) |vout| {
-        _ = try removePool(a, svc, tp, tx.txid, @intCast(vout));
         const key = try poolKey(a, tp, tx.txid, @intCast(vout));
+        const was = (try removePool(a, svc, tp, tx.txid, @intCast(vout))) orelse try svc.map("spentPools").link(key);
         _ = try svc.map("spentPools").remove(key);
+        // 0.33.0: the rejected transaction's pools leave `byValidator` and `byLp` (a spend keeps them there).
+        if (was) |cid| {
+            _ = try svc.map("byValidator").remove(try identityKey(a, try identityOf(a, svc, cid), tp, tx.txid, @intCast(vout)));
+            _ = try svc.map("byLp").remove(try identityKey(a, try lpOf(a, svc, cid), tp, tx.txid, @intCast(vout)));
+        }
     }
     for (tx.tx.inputs) |in| {
         const txid = in.previous_outpoint.txid.bytes;
@@ -476,111 +576,153 @@ fn answerOutpoint(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, start
     }
     if (want_beef) return .{ .output_list = try a.dupe(lookup.Output, &.{.{ .txid = txid, .vout = vout }}) };
     const current = try poolStateValue(a, rec.?, try outpointStr(a, txid, vout));
-    const f = (try lpFees(a, svc, ch, tp, rec.?.getBytes("lpPubKey") orelse return error.BadIndex)) orelse Fees{ .root = .{ .txid = txid, .vout = vout } };
     return .{ .freeform = .{ .map = try a.dupe(Entry, &.{
         .{ .key = "current", .value = current },
         .{ .key = "hops", .value = .{ .uint = hops } },
-        .{ .key = "fees", .value = .{ .map = try a.dupe(Entry, &.{
-            .{ .key = "sats", .value = .{ .uint = f.sats } },
-            .{ .key = "tokens", .value = .{ .uint = f.tokens } },
-            .{ .key = "swaps", .value = .{ .uint = f.swaps } },
-        }) } },
     }) } };
 }
 
-// ---------------------------------------------------------------- the LP fees (0.32.0)
+// ---------------------------------------------------------------- the fee queries (0.33.0): a set in, a set out
 
-/// An outpoint, as the maps name it.
-const Op = struct { txid: [32]u8, vout: u32 };
+/// A list of hex keys of `len` bytes (a query's `lpPubKeys`, `validatorIdentityKeys`, `commissionPkhs`).
+fn hexList(a: Allocator, v: Value, len: usize) ![]const []const u8 {
+    if (v != .array) return error.BadQuery;
+    const out = try a.alloc([]const u8, v.array.len);
+    for (v.array, out) |x, *o| {
+        if (x != .text or x.text.len != len * 2) return error.BadQuery;
+        const b = try a.alloc(u8, len);
+        _ = std.fmt.hexToBytes(b, x.text) catch return error.BadQuery;
+        o.* = b;
+    }
+    return out;
+}
 
-/// A pool lineage's LP fees (one deploy and its Swap continuations; the LpPubKey is constant
-/// along it and unique per deploy): `sats` from sats-in Swaps, `tokens` from token-in Swaps,
-/// `swaps` counted; `root` the deploy's pool outpoint; `current` the live pool's record and
-/// outpoint, null once the lineage ended (the LP's Close, the validator's Rescind).
-const Fees = struct {
+/// A sum of fee rows: one amount of each row (`field`), into `sats` (sats-in Swaps) or `tokens`
+/// (token-in Swaps), and the rows counted.
+const Sum = struct {
     sats: u64 = 0,
     tokens: u64 = 0,
     swaps: u64 = 0,
-    root: Op,
-    current: ?struct { rec: Value, op: Op } = null,
+    fn add(self: *Sum, rec: Value, field: []const u8) void {
+        const amt = rec.getUint(field) orelse 0;
+        if (rec.getBool("bsvIn") orelse false) self.sats += amt else self.tokens += amt;
+        self.swaps += 1;
+    }
 };
 
-/// The fees the lineage of LpPubKey `lp` earned, read at query time (nothing kept): its deploy
-/// is the listed pool of that key (`pools` or `spentPools`) whose output attests itself
-/// (pool.zig `affirmed`, the listing's rule (a)); from there the walk follows the spends as
-/// `{outpoint}` does (`spentPools` → the chain state's `spentBy`), and each spender whose output
-/// 0 is listed is a Swap: its LP fee is pool.zig `lpFeeOf`'s, the output the relay's pair check
-/// lays out (`feeLayout`). A spender that lists nothing (a Close, a Rescind) ends it. Null when
-/// no listed pool here has that key.
-fn lpFees(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, lp: []const u8) !?Fees {
-    var root: ?Op = null;
-    var any = false;
-    scan: for ([_][]const u8{ "pools", "spentPools" }) |m| for (try svc.map(m).prefixed(tp)) |kv| {
-        if (kv.value != .cid) continue;
-        const rec = try svc.store.getValue(a, kv.value.cid);
-        if (!std.mem.eql(u8, rec.getBytes("lpPubKey") orelse continue, lp)) continue;
-        any = true;
-        const op = try w.store.outpointOf(kv.key[tp.len..]);
-        const raw = (try ch.txRaw(op.txid)) orelse return error.UnknownTransaction;
-        const tx = w.bsvz.transaction.Transaction.parse(a, raw) catch return error.BadTransaction;
-        if (op.vout >= tx.outputs.len) return error.BadIndex;
-        const o = tx.outputs[op.vout];
-        if (pool.affirmed(a, o.locking_script.bytes, @intCast(o.satoshis))) {
-            root = .{ .txid = op.txid, .vout = op.vout };
-            break :scan;
-        }
-    };
-    if (!any) return null;
-    var f: Fees = .{ .root = root orelse return error.UnknownOutpoint };
-    var at = f.root;
-    while (true) {
-        if (try svc.map("pools").link(try poolKey(a, tp, at.txid, at.vout))) |cid| {
-            f.current = .{ .rec = try svc.store.getValue(a, cid), .op = at };
-            return f;
-        }
-        if (!try svc.map("spentPools").has(try poolKey(a, tp, at.txid, at.vout))) return error.UnknownOutpoint;
-        const sp = (try ch.spentBy(at.txid, at.vout)) orelse return error.UnknownOutpoint;
-        const listed = try svc.map("pools").has(try poolKey(a, tp, sp, 0)) or try svc.map("spentPools").has(try poolKey(a, tp, sp, 0));
-        if (!listed) return f; // a Close or a Rescind: the lineage ended
-        const raw = (try ch.txRaw(sp)) orelse return error.UnknownTransaction;
-        const tx = w.bsvz.transaction.Transaction.parse(a, raw) catch return error.BadTransaction;
-        const input = for (tx.inputs, 0..) |in, i| {
-            if (in.previous_outpoint.index == at.vout and std.mem.eql(u8, &in.previous_outpoint.txid.bytes, &at.txid)) break i;
-        } else return error.BadIndex;
-        // A Swap whose fee output is not the contract's (pool.zig `lpFeeOf` null) adds no fee; it still counts.
-        if (try pool.lpFeeOf(a, tx, input)) |fee| {
-            if (fee.bsv_in) f.sats += fee.amount else f.tokens += fee.amount;
-        }
-        f.swaps += 1;
-        at = .{ .txid = sp, .vout = 0 };
+fn sumUnder(a: Allocator, svc: *Service, map_name: []const u8, prefix: []const u8, field: []const u8, sum: *Sum) !void {
+    for (try svc.map(map_name).prefixed(prefix)) |kv| {
+        if (kv.value != .cid) return error.BadIndex;
+        sum.add(try svc.store.getValue(a, kv.value.cid), field);
     }
 }
 
-/// `{lpPubKey}` (0.32.0): `{lpPubKey, root, sats, tokens, swaps, current}`, the LP fees that
-/// key's pool lineage earned (`lpFees`); `current` its live pool, null once closed. A key with no
-/// pool here answers zeros, `root` and `current` null.
-fn answerLp(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, hex: []const u8) !lookup.Answer {
-    if (hex.len != 66) return error.BadQuery;
-    var lp: [33]u8 = undefined;
-    _ = std.fmt.hexToBytes(&lp, hex) catch return error.BadQuery;
-    const got = try lpFees(a, svc, ch, tp, &lp);
-    const f = got orelse Fees{ .root = undefined };
-    const current: Value = if (f.current) |c| try poolStateValue(a, c.rec, try outpointStr(a, c.op.txid, c.op.vout)) else .null;
-    return .{ .freeform = .{ .map = try a.dupe(Entry, &.{
-        .{ .key = "lpPubKey", .value = .{ .text = try hexOf(a, &lp) } },
-        .{ .key = "root", .value = if (got != null) .{ .text = try outpointStr(a, f.root.txid, f.root.vout) } else .null },
-        .{ .key = "sats", .value = .{ .uint = f.sats } },
-        .{ .key = "tokens", .value = .{ .uint = f.tokens } },
-        .{ .key = "swaps", .value = .{ .uint = f.swaps } },
-        .{ .key = "current", .value = current },
-    }) } };
+fn sumEntries(s: Sum) [3]Entry {
+    return .{
+        .{ .key = "sats", .value = .{ .uint = s.sats } },
+        .{ .key = "tokens", .value = .{ .uint = s.tokens } },
+        .{ .key = "swaps", .value = .{ .uint = s.swaps } },
+    };
+}
+
+/// `{lpPubKeys}`: per key `{lpPubKey, status, outpoint?, current?, sats, tokens, swaps}` — the LP
+/// fees of its pool's Swaps (`fees` under the key) and the pool's state: `live` (its live pool:
+/// `outpoint`, `current` the `PoolState`), `rescinded` (the validator's Rescind wrote `outpoint`,
+/// unspent in the chain state: the LP's Close acts on it; `current` that output's pool state), else `closed` (spent, or no pool of the
+/// key here: an unknown key answers `closed` with zeros). The live pool is found through `byLp` (the
+/// key's pools, live and spent; the live one in `pools`); with none live, rescinded is told from
+/// closed by the `rescinded` record of the key (the Rescind's output) and the chain state: unspent
+/// (`spentBy` none) is rescinded, spent (the LP's Close) or no record is closed.
+fn answerLps(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, v: Value) !lookup.Answer {
+    const keys = try hexList(a, v, 33);
+    const out = try a.alloc(Value, keys.len);
+    for (keys, out) |k, *o| {
+        var sum: Sum = .{};
+        try sumUnder(a, svc, "fees", try cat(a, &.{ tp, k }), "lp", &sum);
+        var es: std.ArrayList(Entry) = .empty;
+        try es.append(a, .{ .key = "lpPubKey", .value = .{ .text = try hexOf(a, k) } });
+        var status: []const u8 = "closed";
+        // The key's listed pools (`byLp`, live and spent): the live one is in `pools`.
+        const prefix = try cat(a, &.{ k, tp });
+        for (try svc.map("byLp").prefixed(prefix)) |kv| {
+            const op = try w.store.outpointOf(kv.key[prefix.len..]);
+            const cid = (try svc.map("pools").link(try poolKey(a, tp, op.txid, op.vout))) orelse continue;
+            const rec = try svc.store.getValue(a, cid);
+            const text = try outpointStr(a, op.txid, op.vout);
+            status = "live";
+            try es.appendSlice(a, &.{
+                .{ .key = "outpoint", .value = .{ .text = text } },
+                .{ .key = "current", .value = try poolStateValue(a, rec, text) },
+            });
+            break;
+        }
+        if (std.mem.eql(u8, status, "closed")) if (try svc.map("rescinded").link(try cat(a, &.{ tp, k }))) |rc| {
+            const r = try svc.store.getValue(a, rc);
+            const txid = (r.getBytes("txid") orelse return error.BadIndex)[0..32].*;
+            const vout: u32 = @intCast(r.getUint("vout") orelse return error.BadIndex);
+            if ((try ch.spentBy(txid, vout)) == null) {
+                status = "rescinded";
+                const text = try outpointStr(a, txid, vout);
+                try es.appendSlice(a, &.{
+                    .{ .key = "outpoint", .value = .{ .text = text } },
+                    .{ .key = "current", .value = try poolStateValue(a, r, text) },
+                });
+            }
+        };
+        try es.append(a, .{ .key = "status", .value = .{ .text = status } });
+        try es.appendSlice(a, &sumEntries(sum));
+        o.* = .{ .map = es.items };
+    }
+    return .{ .freeform = .{ .array = out } };
+}
+
+/// `{validatorIdentityKeys}`: per key `{validatorIdentityKey, sats, tokens, swaps, pools}` — the
+/// validator fees over the fee rows of all its pools, closed included (`byValidator`, live and spent
+/// → each pool's LpPubKey → its rows); `pools` the distinct pools (LP keys) counted.
+fn answerValidators(a: Allocator, svc: *Service, tp: []const u8, v: Value) !lookup.Answer {
+    const keys = try hexList(a, v, 33);
+    const out = try a.alloc(Value, keys.len);
+    for (keys, out) |k, *o| {
+        var sum: Sum = .{};
+        var pools: u64 = 0;
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        const prefix = try cat(a, &.{ k, tp });
+        for (try svc.map("byValidator").prefixed(prefix)) |kv| {
+            const op = try w.store.outpointOf(kv.key[prefix.len..]);
+            const pk = try poolKey(a, tp, op.txid, op.vout);
+            const cid = (try svc.map("pools").link(pk)) orelse (try svc.map("spentPools").link(pk)) orelse continue;
+            const lp = try lpOf(a, svc, cid);
+            // One lineage's pools share its LP key and its rows: summed once.
+            if ((try seen.getOrPut(a, lp)).found_existing) continue;
+            try sumUnder(a, svc, "fees", try cat(a, &.{ tp, lp }), "validator", &sum);
+            pools += 1;
+        }
+        const se = sumEntries(sum);
+        o.* = .{ .map = try a.dupe(Entry, &.{ .{ .key = "validatorIdentityKey", .value = .{ .text = try hexOf(a, k) } }, se[0], se[1], se[2], .{ .key = "pools", .value = .{ .uint = pools } } }) };
+    }
+    return .{ .freeform = .{ .array = out } };
+}
+
+/// `{commissionPkhs}`: per key hash `{commissionPkh, sats, tokens, swaps}` — the commissions the
+/// Swaps naming it paid (`byCommission`).
+fn answerCommissions(a: Allocator, svc: *Service, tp: []const u8, v: Value) !lookup.Answer {
+    const keys = try hexList(a, v, 20);
+    const out = try a.alloc(Value, keys.len);
+    for (keys, out) |k, *o| {
+        var sum: Sum = .{};
+        try sumUnder(a, svc, "byCommission", try cat(a, &.{ k, tp }), "commission", &sum);
+        const se = sumEntries(sum);
+        o.* = .{ .map = try a.dupe(Entry, &.{ .{ .key = "commissionPkh", .value = .{ .text = try hexOf(a, k) } }, se[0], se[1], se[2] }) };
+    }
+    return .{ .freeform = .{ .array = out } };
 }
 
 /// `/lookup` (BRC-24, service `ls_amm_<assetId>`), every query naming its token
 /// (`tokenId`, `<txid>_<vout>`): `{tokenId}` every live pool of the token;
 /// `{tokenId, outpoint, beef?}` that pool (README, "Queries");
-/// `{tokenId, validatorIdentityKey}` that validator's pools of the token;
-/// `{tokenId, lpPubKey}` the LP fees that key's pool lineage earned (0.32.0).
+/// `{tokenId, validatorIdentityKey}` that validator's pools of the token; (0.33.0, a list in, one
+/// record per key out, from the fee rows) `{tokenId, lpPubKeys}`, `{tokenId, validatorIdentityKeys}`,
+/// `{tokenId, commissionPkhs}`.
 pub fn answer(a: Allocator, svc: *Service, ch: *Chain, query: Value) anyerror!lookup.Answer {
     if (query != .map) return error.BadQuery;
     const topic = try topicOf(a, query.getText("tokenId") orelse return error.BadQuery);
@@ -589,7 +731,9 @@ pub fn answer(a: Allocator, svc: *Service, ch: *Chain, query: Value) anyerror!lo
         return answerOutpoint(a, svc, ch, tp, try parseOutpoint(text), query.getBool("beef") orelse false);
     }
     if (query.getText("validatorIdentityKey")) |hex| return answerValidator(a, svc, tp, hex);
-    if (query.getText("lpPubKey")) |hex| return answerLp(a, svc, ch, tp, hex);
+    if (query.get("lpPubKeys")) |v| return answerLps(a, svc, ch, tp, v);
+    if (query.get("validatorIdentityKeys")) |v| return answerValidators(a, svc, tp, v);
+    if (query.get("commissionPkhs")) |v| return answerCommissions(a, svc, tp, v);
     return answerAll(a, svc, tp);
 }
 

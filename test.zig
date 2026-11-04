@@ -305,7 +305,7 @@ test "pool: quoteSwap and payoutScript reproduce the fixtures' swaps (the contra
     try testing.expect(pool.feeOf(1, -1) == null);
 }
 
-test "pool (0.32.0): parseSwapCall, feeLayout and lpFeeOf read the fixtures' swaps — the LP fee output where the relay looks, in the input asset, to Hash160 of the LpPubKey" {
+test "pool (0.33.0): parseSwapCall, feeLayout and feesOf read the fixtures' swaps — the three fee outputs where the relay looks, in the input asset; the LP's to Hash160 of the LpPubKey, the commission's to the call's commissionPkh" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -324,26 +324,37 @@ test "pool (0.32.0): parseSwapCall, feeLayout and lpFeeOf read the fixtures' swa
     try testing.expectEqual(@as(?usize, 3), l1.validator_at);
     try testing.expectEqual(@as(?usize, 4), l1.commission_at);
     try testing.expectEqual(@as(usize, 5), l1.end);
-    const fee1 = (try pool.lpFeeOf(a, sw1, 0)).?;
-    try testing.expectEqual(@as(u64, 60), fee1.amount);
+    const fee1 = (try pool.feesOf(a, sw1, 0)).?;
+    try testing.expectEqual(@as(u64, 60), fee1.lp);
+    try testing.expectEqual(@as(u64, 10), fee1.validator);
+    try testing.expectEqual(@as(u64, 20), fee1.commission);
     try testing.expect(fee1.bsv_in);
+    try testing.expectEqualSlices(u8, &key20(vec.commission_pkh), &fee1.commission_pkh);
     try testing.expectEqualSlices(u8, &pool.p2pkh(bsvz.crypto.hash.hash160(&key33(vec.lp)).bytes), sw1.outputs[2].locking_script.bytes);
 
     // Tokens in, 50,000: LP 150 tokens, a 1-sat token output.
-    const fee2 = (try pool.lpFeeOf(a, sw2, 0)).?;
-    try testing.expectEqual(@as(u64, 150), fee2.amount);
+    const fee2 = (try pool.feesOf(a, sw2, 0)).?;
+    try testing.expectEqual(@as(u64, 150), fee2.lp);
+    try testing.expectEqual(@as(u64, 25), fee2.validator);
+    try testing.expectEqual(@as(u64, 50), fee2.commission);
     try testing.expect(!fee2.bsv_in);
 
     // Not a Swap: a deploy has no call; a pool input that is not the call's; an LP output not the contract's.
     const pd = f.txs.get(w.beef.txidOf(f.raws.get("pool_deploy").?)).?;
-    try testing.expect((try pool.lpFeeOf(a, pd, 0)) == null);
-    try testing.expect((try pool.lpFeeOf(a, sw1, 1)) == null);
-    try testing.expect((try pool.lpFeeOf(a, sw1, 9)) == null);
+    try testing.expect((try pool.feesOf(a, pd, 0)) == null);
+    try testing.expect((try pool.feesOf(a, sw1, 1)) == null);
+    try testing.expect((try pool.feesOf(a, sw1, 9)) == null);
     const outs = try a.dupe(bsvz.transaction.Output, sw1.outputs);
     outs[2].satoshis += 1;
     var bad = sw1;
     bad.outputs = outs;
-    try testing.expect((try pool.lpFeeOf(a, bad, 0)) == null);
+    try testing.expect((try pool.feesOf(a, bad, 0)) == null);
+    // The commission paid to another key than the call names: not the contract's.
+    const outs2 = try a.dupe(bsvz.transaction.Output, sw1.outputs);
+    outs2[4].locking_script = bsvz.script.Script.init(&pool.p2pkh(.{0x77} ** 20));
+    var bad2 = sw1;
+    bad2.outputs = outs2;
+    try testing.expect((try pool.feesOf(a, bad2, 0)) == null);
 
     // A rate the contract's arithmetic is not defined for names itself.
     var neg = cont1;
@@ -355,6 +366,17 @@ test "pool (0.32.0): parseSwapCall, feeLayout and lpFeeOf read the fixtures' swa
     const l0 = try pool.feeLayout(call1, free);
     try testing.expectEqual(@as(?usize, null), l0.lp_at);
     try testing.expectEqual(@as(?usize, 2), l0.validator_at);
+    // No commission: no commission output (the continuation's CommissionBps OP_0, output 4 gone); its fees read as 0.
+    const script = try a.dupe(u8, sw1.outputs[0].locking_script.bytes);
+    script[script.len - brc162.decode(script).?.lock.len + 717] = 0x00;
+    var outs3: std.ArrayList(bsvz.transaction.Output) = .empty;
+    for (sw1.outputs, 0..) |o, i| if (i != 4) try outs3.append(a, o);
+    outs3.items[0].locking_script = bsvz.script.Script.init(script);
+    var nocom = sw1;
+    nocom.outputs = outs3.items;
+    const f0 = (try pool.feesOf(a, nocom, 0)).?;
+    try testing.expectEqual(@as(u64, 0), f0.commission);
+    try testing.expectEqual(@as(u64, 60), f0.lp);
 }
 
 test "pool: CommissionBps is read under the canonical-number rule" {

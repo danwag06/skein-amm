@@ -284,35 +284,49 @@ export async function lookupPoolOutput(af: SignedFetch | null, base: string, tok
   return outs[0]!;
 }
 
-/** The LP fees a pool lineage earned (skein-amm 0.32.0): `ls_amm_<assetId>`'s `{tokenId, lpPubKey}` answer. */
-export interface LpFees {
+/**
+ * One LP key's pool and fees (skein-amm 0.33.0): a record of `ls_amm_<assetId>`'s `{tokenId, lpPubKeys}`
+ * answer. `status` live (its live pool), rescinded (the validator's Rescind wrote `outpoint`: the LP's
+ * Close takes it back), closed (spent by the Close, or no pool of the key there).
+ */
+export interface LpPool {
   lpPubKey: string;
-  /** The deploy's pool outpoint (`<txid>_<vout>`); null for a key with no pool on this instance. */
-  root: string | null;
-  /** The fees of sats-in swaps. */
+  status: "live" | "rescinded" | "closed";
+  /** The output a Close acts on, `<txid>_<vout>` (live and rescinded). */
+  outpoint: string | null;
+  /** That output's pool state (live and rescinded). */
+  current: PoolState | null;
+  /** The LP fees of sats-in swaps. */
   sats: bigint;
-  /** The fees of token-in swaps, token base units. */
+  /** The LP fees of token-in swaps, token base units. */
   tokens: bigint;
   swaps: number;
-  /** The live pool; null once closed (or no pool). */
-  current: PoolState | null;
 }
 
 const wireBig = (x: unknown): bigint => (typeof x === "number" || typeof x === "string" || typeof x === "bigint" ? BigInt(x) : 0n);
 
-/** `{tokenId, lpPubKey}` at `ls_amm_<assetId>` (0.32.0): the LP fees the pool of that LpPubKey earned, read by the lookup along the pool's lineage. */
-export async function lpFeesOf(af: SignedFetch | null, base: string, tokenId: string, lpPubKey: string): Promise<LpFees> {
-  const a = (await lookup(af, base, ammLookupService(tokenId), { tokenId, lpPubKey })) as { type?: string; result?: Record<string, unknown> };
-  const r = a && a.type === "freeform" && a.result && typeof a.result === "object" && !Array.isArray(a.result) ? a.result : null;
-  if (!r) throw new Error(`lookup ${ammLookupService(tokenId)} ${tokenId}: no LP fees answer for ${lpPubKey}`);
-  return {
-    lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey : lpPubKey,
-    root: typeof r.root === "string" ? r.root : null,
-    sats: wireBig(r.sats),
-    tokens: wireBig(r.tokens),
-    swaps: Number(r.swaps ?? 0),
-    current: r.current && typeof r.current === "object" ? toPoolState(r.current as WirePoolState) : null,
-  };
+/**
+ * `{tokenId, lpPubKeys}` at `ls_amm_<assetId>` (0.33.0): one query for every LP key of a token, one record
+ * per key in the same order — each pool's state and the LP fees its swaps paid (fee rows exist for swaps
+ * the lookup admitted from skein-amm 0.33.0 on).
+ */
+export async function lpFeesOf(af: SignedFetch | null, base: string, tokenId: string, lpPubKeys: string[]): Promise<LpPool[]> {
+  const service = ammLookupService(tokenId);
+  const a = (await lookup(af, base, service, { tokenId, lpPubKeys })) as { type?: string; result?: unknown };
+  const rs = a && a.type === "freeform" && Array.isArray(a.result) ? (a.result as Record<string, unknown>[]) : null;
+  if (!rs || rs.length !== lpPubKeys.length) throw new Error(`lookup ${service} ${tokenId}: no LP pools answer`);
+  return rs.map((r, i) => {
+    const status = r.status === "live" || r.status === "rescinded" ? r.status : "closed";
+    return {
+      lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey : lpPubKeys[i]!,
+      status,
+      outpoint: typeof r.outpoint === "string" ? r.outpoint : null,
+      current: r.current && typeof r.current === "object" ? toPoolState(r.current as WirePoolState) : null,
+      sats: wireBig(r.sats),
+      tokens: wireBig(r.tokens),
+      swaps: Number(r.swaps ?? 0),
+    };
+  });
 }
 
 /**

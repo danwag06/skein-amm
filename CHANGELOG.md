@@ -4,6 +4,38 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.33.0 (2026-11-04)
+
+- **Fee rows in the pool lookup** (agent-env plans/fee-rows-and-reindex-2026-11-04.md, as
+  settled with David: no reindex, no backfill, no migration). `ls_amm_<assetId>` writes, when it
+  admits a Swap's continuation, ONE row per Swap under the pool's LpPubKey (`fees`: `{lp,
+  validator, commission, bsvIn, commissionPkh}`, the three fees in the input asset) and, a
+  commission not 0, a membership row under the commission's key hash (`byCommission`);
+  `rejected` removes both. **Fee rows exist for Swaps admitted after 0.33.0 is installed**; earlier
+  Swaps have none.
+- New indexes: `byLp` (`lpPubKey ‖ tp ‖ outpoint`, every listed pool of a key, live and spent);
+  `byValidator` now keeps a spent pool's row too (only `rejected` removes either), its single-key
+  query still answering the live pools; `rescinded` (`tp ‖ lpPubKey` → the pool record a
+  validator's Rescind wrote). The beat stays live-only.
+- **List queries**, a set in and one record per key out, prefix scans only (no scan of all pools):
+  `{tokenId, lpPubKeys}` → `[{lpPubKey, status, outpoint?, current?, sats, tokens, swaps}]`
+  (`status` live: its live pool; rescinded: the Rescind's output, unspent in the chain state, and
+  its state, what the LP's Close takes back; closed otherwise, an unknown key included);
+  `{tokenId, validatorIdentityKeys}` → `[{validatorIdentityKey, sats, tokens, swaps, pools}]` (the
+  validator fees over all its pools' rows, closed included; `pools` distinct LP keys);
+  `{tokenId, commissionPkhs}` → `[{commissionPkh, sats, tokens, swaps}]`. Unknown keys answer zeros.
+- **Removed**: 0.32.0's `{tokenId, lpPubKey}` query and its lineage walk; `{tokenId, outpoint}` is
+  `{current, hops}` again.
+- src/pool.zig `feesOf` (was `lpFeeOf`): the three fee outputs a Swap paid, each checked for the
+  contract's amount (the LP's and the commission's for their payout script), over the same
+  `parseSwapCall` / `feeLayout` the relay uses (relay unchanged).
+- Pages: Positions load with ONE `{tokenId, lpPubKeys}` query per token for all the wallet's LP
+  keys (the rows from `amm-pools` and the deploy history, as before; their LP key from the filed
+  output's script), each position's state and fees from its record; the token list read once; no
+  `/spends` and no color-spendability read on load — Close reads the pool output's BEEF when the
+  LP acts. A rescinded record keeps today's rescinded card. Manifest version and amm-setup's
+  version check 0.33.0.
+
 ## 0.32.0 (2026-11-04)
 
 - **LP fees per position** (agent-env plans/lp-fees-by-key-2026-11-04.md, as

@@ -116,8 +116,10 @@ interface Instance {
   terms: Record<string, unknown> | null;
   /** amm.swap.terms's minCommissionBps (0.16.0: the market record; unset 0). */
   minCommissionBps: number;
-  /** 0.32.0: `ls_amm_<tokenId>` `{tokenId, lpPubKey}` answers, by LpPubKey (unknown: zeros, root null, as the lookup answers). */
-  lpFees: Record<string, unknown>;
+  /** 0.33.0: `ls_amm_<tokenId>` `{tokenId, lpPubKeys}` records, by LpPubKey (unknown: closed with zeros, as the lookup answers). */
+  lpPools: Record<string, unknown>;
+  /** 0.33.0: the plain reads asked, by path (`/tokens`, `/spends`). */
+  reads: string[];
 }
 
 const enabledRow = (tokenId: string, sym: string, dec: number, since: number) => ({ tokenId, topic: `tm_color_${tokenId}`, sym, dec, status: "enabled", since });
@@ -149,7 +151,8 @@ function instance(): Instance {
     sent: [],
     calls: [],
     minCommissionBps: 0,
-    lpFees: {},
+    lpPools: {},
+    reads: [],
     terms: { validator: { "/": { bytes: Utils.toBase64(Utils.toArray(SKEIN, "hex")).replace(/=+$/, "") } }, peerId: PEER, lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 0 },
   };
 }
@@ -164,7 +167,10 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
   const u = new URL(url);
   if (u.pathname === "/@discovery/1color/color/tokens") return inst.discoveryList ? json(inst.discoveryList) : json({ error: "no instance discovery" }, 404);
   const path = u.pathname.replace(/^\/@[^/]+/, "").replace(/^\/amm/, "");
-  if (path === "/tokens") return signed(inst.enabled);
+  if (path === "/tokens") {
+    inst.reads.push("/tokens");
+    return signed(inst.enabled);
+  }
   if (path === "/defaults") return json(inst.defaults);
   if (path === "/discovery") return json(inst.discovery);
   if (path === "/listTopicManagers") return json(inst.topics);
@@ -173,6 +179,7 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     const t = decodeURIComponent(path.slice(7));
     return t in inst.live ? json(inst.live[t]) : json({}, 404);
   }
+  if (path === "/spends") inst.reads.push("/spends");
   if (path === "/spends") return json(inst.spends[u.searchParams.get("outpoint")!] ?? { outpoint: u.searchParams.get("outpoint"), hops: 0, closed: false });
   if (path === "/lookup") {
     const q = JSON.parse(String(init!.body)) as { service: string; query: Record<string, unknown> };
@@ -184,9 +191,8 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     if (atHostRoot) return q.service === "ls_color" && q.query.topic === "tm_color" && q.query.type === "color-admission" ? json(inst.deploys[op] ?? empty) : json({ status: "error", message: "Lookup service not supported" }, 400);
     // 0.21.0: the AMM lookup is `ls_amm_<tokenId>`; a plain `ls_amm` is no service here.
     const ammService = q.service === `ls_amm_${String(q.query.tokenId)}`;
-    if (ammService && typeof q.query.lpPubKey === "string") {
-      const k = q.query.lpPubKey;
-      return json({ type: "freeform", result: inst.lpFees[k] ?? { lpPubKey: k, root: null, sats: 0, tokens: 0, swaps: 0, current: null } });
+    if (ammService && Array.isArray(q.query.lpPubKeys)) {
+      return json({ type: "freeform", result: (q.query.lpPubKeys as string[]).map((k) => inst.lpPools[k] ?? { lpPubKey: k, status: "closed", sats: 0, tokens: 0, swaps: 0 }) });
     }
     if (ammService && q.query.beef) return json({ type: "output-list", outputs: [{ beef: atomic(poolDeploy, [fund, tokenDeploy]), outputIndex: 0 }] });
     if (ammService) return json({ type: "freeform", result: inst.pools[String(q.query.tokenId)] ?? [] });
@@ -433,51 +439,43 @@ describe("exchange.ts, wired", () => {
     expect(await walletSats()).toBe(3_500n);
   });
 
-  it("myPositions: the wallet's pool rows (amm-pools) read from the chain state — followed to the current output (its BEEF from the token instance's ls_color_<tokenId>, BRC-207 color-spendability, 0.20.1); closed ones left out", async () => {
+  it("myPositions (0.33.0): the wallet's pool rows grouped by token, ONE ls_amm_<tokenId> {tokenId, lpPubKeys} query per token for each pool's state and fees; the token list read once; no /spends and no color-spendability read on load", async () => {
     const pd = poolDeploy.id("hex");
-    const row = {
-      outpoint: `${pd}.0`,
-      satoshis: v.pool0.bsv,
-      lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(),
-      tags: ["amm-pool"],
-      customInstructions: JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } }),
-    };
-    connect({ pools: [row] });
-    inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, spentBy: swap1.id("hex"), current: `${swap1.id("hex")}.0`, hops: 1, closed: false };
-    inst.color[`${swap1.id("hex")}.0`] = { type: "output-list", outputs: [{ beef: atomic(swap1, [fund, tokenDeploy, poolDeploy]), outputIndex: 0 }] };
-    // 0.32.0: the LP fees by the pool's LpPubKey (the fixture swap: 20,000 sats in, 60 sats to the LP).
-    inst.lpFees[v.lp] = { lpPubKey: v.lp, root: `${pd}_0`, sats: 60, tokens: 0, swaps: 1, current: wirePool(swap1.id("hex"), v.pool1) };
-    const ps = await myPositions();
-    expect(ps).toEqual([
-      {
-        outpoint: `${swap1.id("hex")}.0`,
-        tokenId: TOKEN,
-        sym: "TST",
-        dec: 0,
-        sats: BigInt(v.pool1.bsv),
-        tokens: BigInt(v.pool1.tokens),
-        validator: { identityKey: SKEIN, live: true },
-        feesEarnedSats: 60n,
-        feesEarnedTokens: 0n,
-      },
+    const s1 = swap1.id("hex");
+    const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
+    const row = { outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci };
+    // A second row of the same pool (a Recover of its current output): one key, one position.
+    const again = { outpoint: `${s1}.0`, satoshis: v.pool1.bsv, lockingScript: swap1.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci };
+    connect({ pools: [row, again] });
+    inst.reads.length = 0;
+    // Live: the fixture swap paid the LP 60 sats.
+    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 0, swaps: 1 };
+    expect(await myPositions()).toEqual([
+      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 60n, feesEarnedTokens: 0n },
     ]);
-    expect(inst.lookups.filter((l) => l.service.startsWith("ls_amm")).map((l) => l.query)).toEqual([{ tokenId: TOKEN, lpPubKey: v.lp }]);
-    expect(inst.lookups.filter((l) => l.service.startsWith("ls_color"))).toEqual([
-      { url: `${ORIGIN}/@${TOKEN}/amm/lookup`, service: `ls_color_${TOKEN}`, query: { type: "color-spendability", version: 1, assetId: TOKEN, topic: TOPIC, outpoints: [`${swap1.id("hex")}.0`] } },
+    expect(inst.lookups.filter((l) => l.service.startsWith("ls_amm"))).toEqual([{ url: `${ORIGIN}/@${TOKEN}/amm/lookup`, service: `ls_amm_${TOKEN}`, query: { tokenId: TOKEN, lpPubKeys: [v.lp] } }]);
+    expect(inst.lookups.filter((l) => l.service.startsWith("ls_color"))).toEqual([]);
+    expect(inst.reads).toEqual(["/tokens"]);
+
+    // Rescinded: the card's status from the record, the Rescind's output and its state.
+    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "rescinded", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 150, swaps: 2 };
+    expect(await myPositions()).toEqual([
+      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, rescinded: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
     ]);
-    // Closed (0.32.0): kept, marked closed, for its fees (its LpPubKey from the filed output's script); and a close of a position not held is refused.
-    inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
-    inst.lpFees[v.lp] = { lpPubKey: v.lp, root: `${pd}_0`, sats: 60, tokens: 150, swaps: 2, current: null };
+
+    // Closed: kept, marked closed (no card), for its fees; a close of a position not held is refused.
+    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "closed", sats: 60, tokens: 150, swaps: 2 };
     expect(await myPositions()).toEqual([
       { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: 0n, tokens: 0n, validator: { identityKey: SKEIN, live: false }, closed: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
     ]);
-    await expect(closePosition({ outpoint: `${swap1.id("hex")}.0` })).rejects.toThrow(/No such position/);
+    await expect(closePosition({ outpoint: `${s1}.0` })).rejects.toThrow(/No such position/);
+    expect(inst.reads.filter((r) => r === "/spends")).toEqual([]);
   });
 
-  it("myPositions (0.28.0): a pool whose filed output the wallet itself spent (listOutputs has no row) is found in its deploy history (listActions amm-pool-deploy) and listed at its current output; a filed row for the same pool is not listed twice", async () => {
+  it("myPositions (0.28.0, 0.33.0): a pool found only in the deploy history (listActions amm-pool-deploy, its output script) is asked by its LP key and listed; a row with no script (no LP key) is not", async () => {
     const pd = poolDeploy.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
-    const deployAction = {
+    const action = (script?: string) => ({
       txid: pd,
       satoshis: 0,
       status: "completed",
@@ -487,23 +485,17 @@ describe("exchange.ts, wired", () => {
       version: 1,
       lockTime: 0,
       outputs: [
-        { outputIndex: 0, satoshis: v.pool0.bsv, spendable: false, basket: "amm-pools", tags: ["amm-pool"], customInstructions: ci, outputDescription: "AMM pool: TST / BSV" },
+        { outputIndex: 0, satoshis: v.pool0.bsv, spendable: false, basket: "amm-pools", tags: ["amm-pool"], customInstructions: ci, outputDescription: "AMM pool: TST / BSV", ...(script ? { lockingScript: script } : {}) },
         { outputIndex: 1, satoshis: 5, spendable: false, basket: "default", tags: [], outputDescription: "change" },
       ],
-    };
-    connect({ pools: [], actions: [deployAction] });
-    inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, spentBy: swap1.id("hex"), current: `${swap1.id("hex")}.0`, hops: 1, closed: false };
-    inst.color[`${swap1.id("hex")}.0`] = { type: "output-list", outputs: [{ beef: atomic(swap1, [fund, tokenDeploy, poolDeploy]), outputIndex: 0 }] };
-    const want = [{ outpoint: `${swap1.id("hex")}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 0n, feesEarnedTokens: 0n }];
-    expect(await myPositions()).toEqual(want);
-    // A filed row (a Recover of the current output) beside the history's: one position.
-    connect({ pools: [{ outpoint: `${swap1.id("hex")}.0`, satoshis: v.pool1.bsv, tags: ["amm-pool"], customInstructions: ci }], actions: [deployAction] });
-    inst.spends[`${swap1.id("hex")}.0`] = { outpoint: `${swap1.id("hex")}.0`, current: `${swap1.id("hex")}.0`, hops: 0, closed: false };
-    expect(await myPositions()).toEqual(want);
-    // Closed: no card (0.32.0: kept, marked closed, for its fees; this action's output names no LP keyID, so no LpPubKey: left out).
-    connect({ pools: [], actions: [deployAction] });
-    inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
-    expect((await myPositions()).filter((p) => !p.closed)).toEqual([]);
+    });
+    connect({ pools: [], actions: [action(poolDeploy.outputs[0]!.lockingScript.toHex())] });
+    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
+    expect(await myPositions()).toEqual([
+      { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 0n, feesEarnedTokens: 0n },
+    ]);
+    connect({ pools: [], actions: [action()] });
+    expect(await myPositions()).toEqual([]);
   });
 
   it("market terms (0.16.0): amm.swap.terms's minCommissionBps; swapPools lists the pools at or above it and counts the rest; quoteSwap plans over the listed ones only; no wallet, no minimum known, nothing hidden", async () => {

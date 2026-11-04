@@ -69,7 +69,7 @@ import { computeSwap, type PoolState, type Plan } from "@amm-poc/matching-engine
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
 import { deployQuery, outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
 import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB, REFRESH_MS, appName, tokenBase } from "../lib/config";
-import { ammLookupService, fetchLive, lookup, lookupPoolOutput, parseOutputList, parseTokenTopic, queryPools, type LiveAnswer, type SignedFetch, type TokenTopic } from "../lib/overlay";
+import { ammLookupService, fetchLive, lookup, lookupPoolOutput, lpFeesOf, type LpPool, parseOutputList, parseTokenTopic, queryPools, type LiveAnswer, type SignedFetch, type TokenTopic } from "../lib/overlay";
 import { authFetchPerInstance, instanceBase, readBeats, readDefaults, readDiscovery, readSpend, readTokenList, readTokens, sendMessage, type Beat, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "../lib/skein";
 import { liveSenders, pricesFromBeats, depthOf, type TokenPrice } from "../market/prices";
 import { buildPlanRequest, goneFromLookup, quote as planQuote } from "../market/plan";
@@ -84,8 +84,7 @@ import { basketRows } from "../lp/wallet";
 import { buildInventory, decodeTokenRow, deployIcon } from "../lp/inventory";
 import { imageDataUrl } from "../lp/images";
 import { deployPool } from "../lp/poolDeploy";
-import { PoolTemplate } from "../pool";
-import { colorOutput, historyPoolRows, mergePoolRows, positionRowsOf, loadPosition, positionFees, type LoadedPosition } from "../lp/positions";
+import { colorOutput, historyPoolRows, mergePoolRows, positionRowsOf, type PositionRow } from "../lp/positions";
 import { recoverPosition as recoverPoolRow } from "../lp/recover";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "../wallet/color";
 import { prepareClose, submitToOverlay } from "../lp/close";
@@ -1087,75 +1086,63 @@ export async function walletSats(): Promise<bigint> {
 // Liquidity
 // ---------------------------------------------------------------------------
 
-/** The positions last loaded, by the pool's current outpoint (`<txid>.<vout>`): what `closePosition` closes. */
-const loaded = new Map<string, LoadedPosition>();
+/** The positions last loaded, by the output a Close acts on (`<txid>.<vout>`): the wallet's row (its LP key) and the token. */
+const loaded = new Map<string, PositionRow>();
 
 /**
- * The connected wallet's positions: its pool rows (`amm-pools`, and 0.28.0 its deploy history's, spent ones too) read from the chain state (src/lp/positions.ts).
- * 0.32.0: each with the LP fees its pool earned (`feesEarnedSats`, `feesEarnedTokens`: `ls_amm_<assetId>` `{tokenId, lpPubKey}`), and the closed
- * ones too, marked `closed` (one per LpPubKey), for their fees.
+ * The connected wallet's positions (0.33.0): its pool rows (`amm-pools`, and 0.28.0 its deploy history's, spent ones
+ * too), grouped by token, each token's LP keys asked in ONE `ls_amm_<assetId>` `{tokenId, lpPubKeys}` query: each
+ * pool's state (live, rescinded, closed) and the LP fees its swaps paid (`feesEarnedSats`, `feesEarnedTokens`). The
+ * token list is read once; nothing is read per position (the pool output's BEEF is read when the LP acts on it:
+ * Close, Recover). Closed ones are marked `closed`, kept for their fees.
  */
 export async function myPositions(): Promise<Position[]> {
   const { wallet, signedFor } = needWallet();
-  const [poolRows, history, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), tokenMeta()]);
-  const rows = positionRowsOf(mergePoolRows(history, poolRows));
+  const [poolRows, history, list] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), enabledList().catch(() => [] as EnabledToken[])]);
+  const enabled = new Map(list.filter((t) => t.status === "enabled").map((t) => [t.tokenId, t]));
+  // The rows by token, one per LP key (the pool's key for its life: a filed row and a history row of one pool are one).
+  const byToken = new Map<string, Map<string, PositionRow>>();
+  for (const row of positionRowsOf(mergePoolRows(history, poolRows))) {
+    if (!row.lpPubKey || !enabled.has(row.tokenId)) continue;
+    const keys = byToken.get(row.tokenId) ?? new Map<string, PositionRow>();
+    if (!keys.has(row.lpPubKey)) keys.set(row.lpPubKey, row);
+    byToken.set(row.tokenId, keys);
+  }
   const out: Position[] = [];
-  loaded.clear();
-  const lives = new Map<string, Promise<LiveAnswer | null>>();
   const closed: Position[] = [];
-  const keys = new Set<string>();
-  const feesFor = async (base: string, tokenId: string, lpPubKey: string | undefined) => {
-    const f = lpPubKey ? await positionFees(signedFor(base), base, tokenId, lpPubKey) : null;
-    return f ? { feesEarnedSats: f.sats, feesEarnedTokens: f.tokens } : {};
-  };
-  for (const row of rows) {
-    let pos: LoadedPosition;
-    let base: string;
+  loaded.clear();
+  for (const [tokenId, keys] of byToken) {
+    const base = tokenBase(tokenId, context.base);
+    let pools: LpPool[];
     try {
-      base = await tokenBaseOf(row.tokenId);
-      pos = await loadPosition(signedFor(base), base, row);
+      pools = await lpFeesOf(signedFor(base), base, tokenId, [...keys.keys()]);
     } catch {
       continue;
     }
-    if (!pos.current || !pos.pool || pos.sats === undefined) {
-      // 0.32.0: closed, kept for its fees (one per pool: the LpPubKey is the pool's for its life).
-      if (!pos.closed || !row.lpPubKey || keys.has(row.lpPubKey)) continue;
-      keys.add(row.lpPubKey);
-      const m = meta.get(row.tokenId);
-      closed.push({
-        outpoint: row.deployOutpoint,
-        tokenId: row.tokenId,
-        sym: m?.sym ?? row.sym ?? row.tokenId.slice(0, 8),
-        dec: m?.dec ?? row.dec ?? 0,
-        ...(m?.icon ? { icon: m.icon } : {}),
-        sats: 0n,
-        tokens: 0n,
-        validator: { identityKey: row.validatorIdentity ?? "", live: false },
-        closed: true,
-        ...(await feesFor(base, row.tokenId, row.lpPubKey)),
+    const t = enabled.get(tokenId);
+    const meta = { sym: t?.sym ?? tokenId.slice(0, 8), dec: t?.dec ?? 0, ...(t?.icon ? { icon: t.icon } : {}) };
+    const live = pools.some((p) => p.current) ? await fetchLive(base, `tm_color_${sdkTokenId(tokenId)}`).catch(() => null) : null;
+    for (const p of pools) {
+      const row = keys.get(p.lpPubKey)!;
+      const fees = { feesEarnedSats: p.sats, feesEarnedTokens: p.tokens };
+      if (p.status === "closed" || !p.outpoint || !p.current) {
+        closed.push({ outpoint: row.deployOutpoint, tokenId, ...meta, sats: 0n, tokens: 0n, validator: { identityKey: row.validatorIdentity ?? "", live: false }, closed: true, ...fees });
+        continue;
+      }
+      const outpoint = p.outpoint.replace("_", ".");
+      loaded.set(outpoint, row);
+      const identity = p.current.validatorIdentityKey;
+      out.push({
+        outpoint,
+        tokenId,
+        ...meta,
+        sats: p.current.bsvReserve,
+        tokens: p.current.tokenReserve,
+        validator: { identityKey: identity, live: live ? validatorStatus(identity, live).live : false },
+        ...(p.status === "rescinded" ? { rescinded: true } : {}),
+        ...fees,
       });
-      continue;
     }
-    if (loaded.has(pos.current)) continue; // two rows followed to the same pool (a filed row and a history row)
-    loaded.set(pos.current, pos);
-    keys.add(pos.pool.state.lpPubKey);
-    const topic = `tm_color_${sdkTokenId(row.tokenId)}`;
-    if (!lives.has(topic)) lives.set(topic, fetchLive(base, topic).catch(() => null));
-    const live = await lives.get(topic)!;
-    const m = meta.get(row.tokenId);
-    const identity = pos.pool.state.validatorIdentity;
-    out.push({
-      outpoint: pos.current,
-      tokenId: row.tokenId,
-      sym: m?.sym ?? row.sym ?? row.tokenId.slice(0, 8),
-      dec: m?.dec ?? row.dec ?? 0,
-      ...(m?.icon ? { icon: m.icon } : {}),
-      sats: pos.sats,
-      tokens: pos.pool.state.tokenReserve,
-      validator: { identityKey: identity, live: live ? validatorStatus(identity, live).live : false },
-      ...(PoolTemplate.rescinded(pos.pool) ? { rescinded: true } : {}),
-      ...(await feesFor(base, row.tokenId, pos.pool.state.lpPubKey)),
-    });
   }
   return [...out, ...closed];
 }
@@ -1262,23 +1249,26 @@ export async function deployPosition(req: DeployRequest): Promise<DeployResult> 
  */
 export async function closePosition(req: CloseRequest): Promise<CloseResult> {
   const { wallet } = needWallet();
-  let pos = loaded.get(req.outpoint);
-  if (!pos) {
+  let row = loaded.get(req.outpoint);
+  if (!row) {
     await myPositions();
-    pos = loaded.get(req.outpoint);
+    row = loaded.get(req.outpoint);
   }
-  if (!pos || !pos.output) throw new Error("No such position");
-  const meta = await tokenMeta();
-  const m = meta.get(pos.row.tokenId);
+  if (!row) throw new Error("No such position");
+  const { signedFor } = needWallet();
+  const [meta, base] = await Promise.all([tokenMeta(), tokenBaseOf(row.tokenId)]);
+  const m = meta.get(row.tokenId);
+  // 0.33.0: the pool output's BEEF read now, when the LP acts (BRC-207 color-spendability at the token's instance).
+  const poolOutput = await colorOutput(signedFor(base), base, row.tokenId, req.outpoint);
   const prepared = await prepareClose({
     wallet,
-    tokenId: pos.row.tokenId,
+    tokenId: row.tokenId,
     meta: { ...(m?.sym ? { sym: m.sym } : {}), ...(m?.dec !== undefined ? { dec: m.dec } : {}) },
-    poolOutput: pos.output,
-    lpKey: pos.row.lpKey,
+    poolOutput,
+    lpKey: row.lpKey,
   });
   // The page's own submit (the wallet's module submitted at its overlay too; its failure does not undo the close).
-  await submitToOverlay(await tokenBaseOf(pos.row.tokenId), prepared.topic, prepared.beef).catch(() => undefined);
+  await submitToOverlay(base, prepared.topic, prepared.beef).catch(() => undefined);
   loaded.delete(req.outpoint);
   emit();
   return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount };

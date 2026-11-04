@@ -1,15 +1,18 @@
 /**
- * LP fees per position (skein-amm 0.32.0): `lpFeesOf` reads `ls_amm_<assetId>`'s `{tokenId, lpPubKey}`
- * answer, `positionFees` asks it per position (null when the instance does not answer), and
+ * LP pools and fees (skein-amm 0.33.0): `lpFeesOf` asks `ls_amm_<assetId>`'s `{tokenId, lpPubKeys}` once for every
+ * key of a token and reads one record per key (status live / rescinded / closed, the pool state, the LP fees);
  * `feesByToken` sums the positions, live and closed, per token (the Liquidity page's line).
  */
 import { describe, expect, it } from "vitest";
 import { lpFeesOf, type SignedFetch } from "../src/lib/overlay";
-import { feesByToken, positionFees } from "../src/lp/positions";
+import { feesByToken } from "../src/lp/positions";
 
 const TOKEN = `${"ab".repeat(32)}_0`;
-const LP = "03" + "11".repeat(32);
+const LP1 = "03" + "11".repeat(32);
+const LP2 = "02" + "22".repeat(32);
+const LP3 = "02" + "33".repeat(32);
 const BASE = "http://x.localhost/@" + TOKEN + "/amm";
+const wire = (outpoint: string) => ({ outpoint, bsvReserve: 10, tokenReserve: 20, liquidityFeeBps: 30, validationFeeBps: 5, commissionBps: 10, validatorIdentityKey: LP1 });
 
 function fakeLookup(result: unknown, status = 200): { af: SignedFetch; asked: unknown[] } {
   const asked: unknown[] = [];
@@ -24,31 +27,27 @@ function fakeLookup(result: unknown, status = 200): { af: SignedFetch; asked: un
   };
 }
 
-describe("LP fees (0.32.0)", () => {
-  it("lpFeesOf: the {tokenId, lpPubKey} query at ls_amm_<tokenId>; a live answer (current a pool), a closed one (current null), an unknown key (zeros, root null)", async () => {
-    const live = fakeLookup({
+describe("LP pools (0.33.0)", () => {
+  it("lpFeesOf: ONE {tokenId, lpPubKeys} query for all the keys; a live record (outpoint, current), a rescinded one (the Rescind's output and its state), a closed or unknown one (no outpoint, no current)", async () => {
+    const { af, asked } = fakeLookup({
       type: "freeform",
-      result: { lpPubKey: LP, root: `${"cd".repeat(32)}_0`, sats: 60, tokens: 150, swaps: 2, current: { outpoint: `${"ef".repeat(32)}_0`, bsvReserve: 10, tokenReserve: 20, liquidityFeeBps: 30, validationFeeBps: 5, commissionBps: 10, validatorIdentityKey: LP } },
+      result: [
+        { lpPubKey: LP1, status: "live", outpoint: `${"ef".repeat(32)}_0`, current: wire(`${"ef".repeat(32)}_0`), sats: 60, tokens: 150, swaps: 2 },
+        { lpPubKey: LP2, status: "rescinded", outpoint: `${"cd".repeat(32)}_0`, current: wire(`${"cd".repeat(32)}_0`), sats: 7, tokens: 0, swaps: 1 },
+        { lpPubKey: LP3, status: "closed", sats: 0, tokens: 0, swaps: 0 },
+      ],
     });
-    const f = await lpFeesOf(live.af, BASE, TOKEN, LP);
-    expect(live.asked).toEqual([{ service: `ls_amm_${TOKEN}`, query: { tokenId: TOKEN, lpPubKey: LP } }]);
-    expect(f).toMatchObject({ lpPubKey: LP, root: `${"cd".repeat(32)}_0`, sats: 60n, tokens: 150n, swaps: 2 });
-    expect(f.current?.bsvReserve).toBe(10n);
-
-    const closed = await lpFeesOf(fakeLookup({ type: "freeform", result: { lpPubKey: LP, root: `${"cd".repeat(32)}_0`, sats: 7, tokens: 0, swaps: 1, current: null } }).af, BASE, TOKEN, LP);
-    expect(closed).toEqual({ lpPubKey: LP, root: `${"cd".repeat(32)}_0`, sats: 7n, tokens: 0n, swaps: 1, current: null });
-
-    const unknown = await lpFeesOf(fakeLookup({ type: "freeform", result: { lpPubKey: LP, root: null, sats: 0, tokens: 0, swaps: 0, current: null } }).af, BASE, TOKEN, LP);
-    expect(unknown).toEqual({ lpPubKey: LP, root: null, sats: 0n, tokens: 0n, swaps: 0, current: null });
-
-    // An older lookup answers the pool list for any query: not an LP fees answer.
-    await expect(lpFeesOf(fakeLookup({ type: "freeform", result: [] }).af, BASE, TOKEN, LP)).rejects.toThrow(/no LP fees answer/);
+    const ps = await lpFeesOf(af, BASE, TOKEN, [LP1, LP2, LP3]);
+    expect(asked).toEqual([{ service: `ls_amm_${TOKEN}`, query: { tokenId: TOKEN, lpPubKeys: [LP1, LP2, LP3] } }]);
+    expect(ps[0]).toMatchObject({ lpPubKey: LP1, status: "live", outpoint: `${"ef".repeat(32)}_0`, sats: 60n, tokens: 150n, swaps: 2 });
+    expect(ps[0]!.current?.bsvReserve).toBe(10n);
+    expect(ps[1]).toMatchObject({ status: "rescinded", outpoint: `${"cd".repeat(32)}_0`, sats: 7n });
+    expect(ps[2]).toEqual({ lpPubKey: LP3, status: "closed", outpoint: null, current: null, sats: 0n, tokens: 0n, swaps: 0 });
   });
 
-  it("positionFees: the sats and tokens; zeros for an unknown key; null when the instance does not answer", async () => {
-    expect(await positionFees(null, BASE, TOKEN, LP, async () => ({ lpPubKey: LP, root: "r_0", sats: 60n, tokens: 150n, swaps: 2, current: null }))).toEqual({ sats: 60n, tokens: 150n });
-    expect(await positionFees(null, BASE, TOKEN, LP, async () => ({ lpPubKey: LP, root: null, sats: 0n, tokens: 0n, swaps: 0, current: null }))).toEqual({ sats: 0n, tokens: 0n });
-    expect(await positionFees(fakeLookup({ status: "error" }, 400).af, BASE, TOKEN, LP)).toBeNull();
+  it("lpFeesOf: an answer that is not one record per key (an older lookup's pool list, a short list) is refused", async () => {
+    await expect(lpFeesOf(fakeLookup({ type: "freeform", result: [] }).af, BASE, TOKEN, [LP1])).rejects.toThrow(/no LP pools answer/);
+    await expect(lpFeesOf(fakeLookup({ type: "freeform", result: { current: wire("x_0"), hops: 0 } }).af, BASE, TOKEN, [LP1])).rejects.toThrow(/no LP pools answer/);
   });
 
   it("feesByToken: one line per token, its positions counted (closed ones too), the fees summed; fees not told count as 0", () => {
