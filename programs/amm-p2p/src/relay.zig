@@ -45,7 +45,7 @@
 //! answer"), bounded by `expires` (the waker, `deadline`):
 //!
 //!   start                  emit dial {peer, protocol: /amm-validator/1/swap}; rest
-//!   {stream} (box dial)    emit send {stream, body: the package}; rest
+//!   {stream} (box dial)    emit send {stream, body: the package, naming the token's topic}; rest
 //!   {stream, body} (frame) the validator's answer: accepted | refused; emit close; done
 //!   closed | error         failed; done
 //!   woke at/after expires  timeout (close the stream if open); done
@@ -63,10 +63,14 @@
 //! at/after `expires`: timeout.
 //!
 //! The package is the signed-message package the validator's protocol reads
-//! (amm-validator README, "A direct call"): `{message, body}`, the mail record
-//! signed BRC-169's way by this instance's identity, recipient the validator,
-//! box `swap`, and the body `{tx: <BEEF: the funding transaction's ancestry,
-//! the funding transaction, the swap>, pool}`.
+//! (amm-validator README, "A direct call"): `{message, body, topic}`, the mail
+//! record signed BRC-169's way by this instance's identity, recipient the
+//! validator, box `swap`, and the body `{tx: <BEEF: the funding transaction's
+//! ancestry, the funding transaction, the swap>, pool}`. `topic` (0.31.0) is
+//! this instance's token topic `tm_color_<assetId>` (head `amm/token`): the
+//! validator's host runs several instances on one libp2p node and routes the
+//! stream by the first frame's top-level `topic` (skein `p2p.ts`
+//! `streamHandle`); unsigned, it routes only.
 //!
 //! **The affirmation** (`amm.pool/1`'s `affirm`, skein-amm 0.11.0, David Case 2026-10-21): the
 //! LP's page asks this skein's validator to affirm a proposed pool before its wallet builds the
@@ -474,11 +478,17 @@ pub const Signer = struct {
 pub const envelope_protocol = "metanet handles envelope";
 pub const envelope_key_id = "send";
 
-/// The direct call's frame: a signed-message package `{message, body}`
+/// The direct call's frame: a signed-message package `{message, body, topic?}`
 /// (skein docs/MESSAGES.md "Signed messages (#70)"; the shape amm-validator's
-/// `messages.open` checks with skein-sdk's `message.problem`). `nonce` makes
-/// the record unique to this swap.
-pub fn package(a: Allocator, signer: Signer, recipient: []const u8, box: []const u8, body: Value, nonce: [16]u8) ![]u8 {
+/// `messages.open` checks with skein-sdk's `message.problem`, reading `message`
+/// and `body` by name). `nonce` makes the record unique to this swap.
+/// `topic` (0.31.0): the token's overlay topic `tm_color_<assetId>`, at the
+/// frame's top level, where a host running several instances on one libp2p
+/// node reads it to pick the instance a stream is for (skein `p2p.ts`
+/// `streamHandle`: a first frame naming no topic, with several instances
+/// declaring the protocol, is answered `topic required` and closed). Outside
+/// the signed record: it routes, it authenticates nothing.
+pub fn package(a: Allocator, signer: Signer, recipient: []const u8, box: []const u8, body: Value, nonce: [16]u8, topic: ?[]const u8) ![]u8 {
     const body_bytes = try cbor.encode(a, body);
     const blk = try scbor.block(a, try scbor.decode(a, body_bytes));
     if (!eql(u8, blk.bytes, body_bytes)) return error.NotCanonical;
@@ -497,10 +507,13 @@ pub fn package(a: Allocator, signer: Signer, recipient: []const u8, box: []const
     std.crypto.hash.sha2.Sha256.hash(try scbor.encode(a, .{ .map = es.items }), &digest, .{});
     const sig = try signer.signFn(signer.ctx, a, digest);
     try es.append(a, .{ .key = "signature", .value = .{ .bytes = sig } });
-    return scbor.encode(a, .{ .map = try a.dupe(scbor.Entry, &.{
+    var top: std.ArrayList(scbor.Entry) = .empty;
+    try top.appendSlice(a, &.{
         .{ .key = "message", .value = .{ .map = es.items } },
         .{ .key = "body", .value = .{ .bytes = body_bytes } },
-    }) });
+    });
+    if (topic) |t| try top.append(a, .{ .key = "topic", .value = .{ .string = t } });
+    return scbor.encode(a, .{ .map = top.items });
 }
 
 /// The nonce of a swap's package: the first 16 bytes of sha256("amm-swap-relay" ‖ id).
@@ -520,13 +533,14 @@ pub fn nonceFor(kind: Kind, id: [32]u8) [16]u8 {
 }
 
 /// The package for a record, to the validator: a swap's request BEEF (from
-/// the pair the record keeps) and the pool in box `swap`.
-pub fn packageFor(a: Allocator, signer: Signer, rec: Record) ![]u8 {
+/// the pair the record keeps) and the pool in box `swap`; `topic` the token's
+/// overlay topic the dialled host routes the stream by (`package`).
+pub fn packageFor(a: Allocator, signer: Signer, rec: Record, topic: ?[]const u8) ![]u8 {
     const f = given(a, rec.funding) orelse return error.BadRecord;
     const s = given(a, rec.swap) orelse return error.BadRecord;
     const pair: Pair = .{ .funding = f, .swap = s, .pool = Outpoint.parse(rec.pool) orelse return error.BadRecord, .call = undefined, .continuation = undefined };
     const body = try requestBody(a, try requestBeef(a, pair), rec.pool);
-    return package(a, signer, &rec.validator, rec.kind.box(), body, nonceFor(rec.kind, rec.id));
+    return package(a, signer, &rec.validator, rec.kind.box(), body, nonceFor(rec.kind, rec.id), topic);
 }
 
 // ---------------------------------------------------------------- the affirmation (amm.pool/1, 0.13.0)

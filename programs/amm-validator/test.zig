@@ -1327,6 +1327,16 @@ test "direct call: the frame is a signed-message package for this validator and 
         .{ .key = "body", .value = (try scbor.decode(a, other)).get("body").? },
     }) });
     try expectUnauthenticated(try messages.open(a, swapped, me, .swap)); // a body the message does not name
+
+    // skein-amm 0.31.0: the relay's frame names the token's topic at its top level (the dialled host
+    // routes the stream by it); `open` reads `message` and `body` by name, the extra key changes nothing.
+    const with_topic = try scbor.encode(a, .{ .map = try a.dupe(scbor.Entry, &.{
+        .{ .key = "message", .value = pkg.get("message").? },
+        .{ .key = "body", .value = pkg.get("body").? },
+        .{ .key = "topic", .value = .{ .string = "tm_color_" ++ "ab" ** 32 ++ "_0" } },
+    }) });
+    const opened2 = try messages.open(a, with_topic, me, .swap);
+    try testing.expectEqualSlices(u8, "tx bytes", opened2.ok.body.getBytes("tx").?);
 }
 
 test "protocol: request bodies parse; bad ones are refused; replies encode" {

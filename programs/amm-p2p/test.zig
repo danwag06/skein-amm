@@ -622,8 +622,16 @@ test "relay: the one BEEF (the funding transaction's ancestry, the funding trans
     // The package: a mail record signed by this instance (BRC-169), recipient the validator, box `swap`.
     const rec: relay.Record = .{ .id = relay.idOf(p.swap), .funding = fbeef, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now };
     const signer = try keySigner(a, relay_priv);
-    const frame = try relay.packageFor(a, signer, rec);
+    const topic = try names.overlayOf(a, "ab" ** 32 ++ "_0");
+    try testing.expectEqualStrings("tm_color_" ++ "ab" ** 32 ++ "_0", topic);
+    try testing.expect(names.parse(topic).?.kind == .overlay);
+    const frame = try relay.packageFor(a, signer, rec, topic);
     const pkg = try scbor.decode(a, frame);
+    // 0.31.0: the frame names the token's topic at its top level, what the dialled host's stream
+    // routing reads off the first frame (skein p2p.ts streamHandle: dag-cbor {topic, …}).
+    try testing.expectEqualStrings(topic, scbor.Value.str(pkg.get("topic")).?);
+    // No topic given (the in-VM affirm; an instance before its deploy): none in the frame.
+    try testing.expect((try scbor.decode(a, try relay.packageFor(a, signer, rec, null))).get("topic") == null);
     const m = pkg.get("message").?;
     const body = scbor.Value.bytesOf(pkg.get("body")).?;
     try testing.expect((try message.problem(a, m, body)) == null);
