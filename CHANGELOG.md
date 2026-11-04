@@ -4,6 +4,14 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.31.3 (2026-11-04)
+
+- On skein-overlay v0.20.2 (`bin/overlay.wasm`) and skein-1color v0.13.3
+  (`bin/color-*.wasm`, unchanged): `rebeat` re-declares the liveness of the
+  configured lookup services (`config.overlay.lookups`) too, as the
+  registered ones'. Programs unchanged; manifest version and amm-setup's
+  version check 0.31.3.
+
 ## 0.31.2 (2026-11-04)
 
 - **`rebeat` re-declares the liveness window too** (agent-env
