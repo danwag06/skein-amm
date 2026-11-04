@@ -39,6 +39,13 @@ pub fn txidOf(name: []const u8) ?[32]u8 {
     return id;
 }
 
+/// A token's overlay topic from its asset id `<txid>_<vout>`: `tm_color_<assetId>` (BRC-207), what the
+/// host's `instances.topics` column holds for the token instance and what its libp2p stream routing
+/// (skein `p2p.ts` `streamHandle`) matches against a first frame's `topic`.
+pub fn overlayOf(a: std.mem.Allocator, asset_id: []const u8) ![]u8 {
+    return std.mem.concat(a, u8, &.{ topic_prefix, asset_id });
+}
+
 pub fn parse(name: []const u8) ?Topic {
     if (std.mem.endsWith(u8, name, live_suffix)) {
         const o = name[0 .. name.len - live_suffix.len];

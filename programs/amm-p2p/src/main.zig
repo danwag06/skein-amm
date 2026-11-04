@@ -273,6 +273,19 @@ fn headRecord(a: Allocator, name: []const u8) !?Value {
     return try vm.store().getValue(a, c);
 }
 
+/// This instance's token topic `tm_color_<assetId>` (0.31.0), from the head `amm/token` amm-setup
+/// writes at the deploy event (its `tokenId`), named by `names.overlayOf`; null before the deploy.
+/// The relay's dialled frame carries it so the validator's host picks the token instance on a node
+/// running several (skein `p2p.ts` `streamHandle`).
+fn tokenTopic(a: Allocator) !?[]const u8 {
+    const rec = (try headRecord(a, token_head)) orelse return null;
+    const id = rec.getText("tokenId") orelse return null;
+    return try names.overlayOf(a, id);
+}
+
+/// The head amm-setup writes the token record under (amm-setup `setup.token_head`).
+const token_head = relay.app_name ++ "/token";
+
 /// The read `/spends?outpoint=<txid>.<vout>` (filter `spends`): the chain state of an outpoint
 /// (reads.zig `spendOf`).
 fn spendsRead(a: Allocator, in: Value, arg: Value) !Value {
@@ -775,7 +788,7 @@ fn poolAffirm(c: *app.Call) !scbor.Value {
     const args = try fromSdk(a, c.args);
     const body = (try relay.affirmBody(a, args)) orelse return sk.report("bad_request: want {pool: bytes, satoshis: int}");
     const me = try signerIdentity(&signer_dummy, a);
-    const pkg = try relay.package(a, signer(), &me, relay.affirm_box, body, try relay.affirmNonce(a, body));
+    const pkg = try relay.package(a, signer(), &me, relay.affirm_box, body, try relay.affirmNonce(a, body), null); // in-VM: no stream to route
     const ans = try callValidator(a, ctx.in, relay.affirm_protocol, relay.affirm_box, pkg, null, null);
     return switch (relay.affirmAnswer(a, ans)) {
         .ok => |v| toSdk(a, v),
@@ -1133,7 +1146,7 @@ fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
         }
         const body = try s.getValue(a, r.getCid("body") orelse return error.BadInput);
         input = .{ .answer = libp2p.dialAnswer(r.getText("box") orelse "", body) catch .{ .closed = "BadAnswer" } };
-        if (input.answer == .opened and rec.status == .pending) pkg = try relay.packageFor(a, signer(), rec);
+        if (input.answer == .opened and rec.status == .pending) pkg = try relay.packageFor(a, signer(), rec, try tokenTopic(a));
     };
     if (input == .start and (in.getBool("woke") orelse false)) input = .woke;
 
@@ -1178,7 +1191,7 @@ fn localRelayStep(a: Allocator, in: Value, kind: relay.Kind, id: [32]u8, now: u6
     const input: relay.LocalInput = if (reply != null or resolved != null) .again else if (in.getBool("woke") orelse false) .woke else .start;
     var fx = relay.advanceLocal(rec, input, now);
     if (fx.call) {
-        const pkg = try relay.packageFor(a, signer(), rec.*);
+        const pkg = try relay.packageFor(a, signer(), rec.*, try tokenTopic(a));
         var why: []const u8 = "";
         const ans: ?Value = callValidator(a, in, kind.protocol(), kind.box(), pkg, reply, resolved) catch |e| blk: {
             why = std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (vm.lastError().len > 0) ": " else "", vm.lastError() }) catch @errorName(e);

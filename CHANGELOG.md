@@ -4,6 +4,20 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.31.0 (2026-11-04)
+
+- **The relay's dialled frame names the token's topic** (agent-env
+  plans/relay-dial-topic-2026-11-04.md). amm-p2p's package to a validator
+  on `/amm-validator/1/swap` is `{message, body, topic}`: `topic` =
+  `tm_color_<assetId>` from the head `amm/token` (`names.overlayOf`), at the
+  frame's top level, outside the signed record. A host running several
+  instances on one libp2p node routes a stream by its first frame's
+  `topic` (skein `p2p.ts` `streamHandle`); without it the rack answered
+  `topic required`, the relay recorded `bad_reply` and the page said "no
+  answer yet". amm-validator's `messages.open` reads `message` and `body`
+  by name and ignores `topic` (tested). The in-VM affirm package names no
+  topic; the local relay's package names it (harmless, the same frame).
+
 ## 0.30.0 (2026-11-04)
 
 - **Your tokens: Send a token to a BRC-169 handle** (David: "Yes";
