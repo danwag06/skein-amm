@@ -4,6 +4,36 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.30.0 (2026-11-04)
+
+- **Your tokens: Send a token to a BRC-169 handle** (David: "Yes";
+  agent-env plans/send-to-handle-2026-11-04.md). A row with a balance gets
+  "Send" beside its status; an inline form under the row (one open at a
+  time): Handle, Amount (`parseInput` with the token's decimals; nothing,
+  zero or more than the balance refused with one line before any wallet
+  call), Memo (optional); Send / Cancel, "Sending…" with every input
+  disabled. `sendTokens(tokenId, handle, amount, memo?)` calls @1sat/actions
+  `send1Color` (chain from `getNetwork`), which resolves the handle, builds
+  ONE createAction through the wallet's 1Color module (a BRC-177 noSend
+  handoff, label `p nosend expiry seconds 31536000`) and delivers it
+  (BRC-232) to the handle's messagebox; the recipient's wallet submits and
+  takes it in. Delivered: the form closes and the row says "Sent <amount>
+  <sym> to <handle>" with the txid (8 chars, full in the title) until the
+  row's next action. An error with no transaction: the SDK's text in the
+  form. Built but not delivered (`delivery-failed`): the row says the send
+  was built but not delivered and the tokens are in the pending send until
+  it expires; no retry, no abort.
+- **Manifest**: `[2, "metanet handles envelope"]` with counterparty
+  `anyone` (send1Color signs the envelope to `anyone`, the string the
+  manager keys the grant by), `[2, "message encryption"]` (no counterparty:
+  the recipient's key; wallet-toolbox's group check skips a level-2 entry
+  without one, so it is asked per send), `[1, "action label BRC-177 noSend
+  expiry"]` (the toolbox's built-in BRC-177 module takes every
+  `p nosend expiry …` label and asks this one fixed label, not
+  `action label p nosend …`). The per-asset key and the module's consent
+  for the `p color` transfer still prompt per send.
+- @1sat/actions 0.1.1 → 0.1.2. Pages only. vitest 229 (+15).
+
 ## 0.29.6 (2026-11-03)
 
 - **Unfinished: Dismiss for a swap that was never signed** (David: "that's

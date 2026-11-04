@@ -64,6 +64,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Beef, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import { send1Color, type Send1ColorResult } from "@1sat/actions";
 import type { PoolState, Plan } from "@amm-poc/matching-engine";
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
 import { deployQuery, outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
@@ -1280,6 +1281,24 @@ export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; 
   const r = await moveBack({ wallet, base, tokenId, meta: { sym: symOf(meta, tokenId) } });
   emit();
   return { txid: r.txid, amount: r.amount, errors: r.errors };
+}
+
+/**
+ * "Send" (0.30.0): gives `amount` (raw units) of a token to a BRC-169 handle (`name@domain` or
+ * `@name@domain`) with @1sat/actions `send1Color`: the handle resolved, one wallet createAction
+ * through the BRC-207 color module (a BRC-177 noSend handoff), delivered (BRC-232) to the handle's
+ * messagebox; the recipient's wallet takes it in. The action's result as is: `{txid, delivered,
+ * messageId}`, or `{error}` (nothing built), or `{error, txid}` (built, not delivered).
+ */
+export async function sendTokens(tokenId: TokenId, handle: string, amount: bigint, memo?: string): Promise<Send1ColorResult> {
+  const { wallet } = needWallet();
+  const { network } = await wallet.getNetwork({});
+  const r = await send1Color.execute(
+    { wallet, chain: network === "mainnet" ? "main" : "test", isBaseWallet: false },
+    { assetId: tokenId, amount, destination: { handle }, ...(memo ? { memo } : {}) },
+  );
+  emit();
+  return r;
 }
 
 // ---------------------------------------------------------------------------

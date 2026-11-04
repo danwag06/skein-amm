@@ -59,7 +59,13 @@ describe("manifest.json", () => {
       [[2, "server hmac"], "self"],
       // No counterparty: the instance's identity is not known here; the manager groups it per peer at first use.
       [[2, "auth message signature"], undefined],
+      // 0.30.0, a send to a handle (@1sat/actions send1Color): the envelope is signed to "anyone" (the grant's key); the BRC-78
+      // encryption's counterparty is the recipient, unknown here (the group check skips a level-2 entry without one: it asks per send).
+      [[2, "metanet handles envelope"], "anyone"],
+      [[2, "message encryption"], undefined],
       ...["amm-swap", "amm-pool-deploy", "amm-close", "amm-payout"].map((l) => [[1, `action label ${l}`], undefined]),
+      // The `p nosend expiry seconds <n>` label goes to the toolbox's built-in BRC-177 module, which asks this one fixed label.
+      [[1, "action label BRC-177 noSend expiry"], undefined],
     ]);
   });
 

@@ -9,7 +9,7 @@
   "theme_color": "#0E1526",
   "metanet": {
     "groupPermissions": {
-      "description": "Open Exchange builds swaps and pools with your wallet, holds the tokens and sats on their way into a swap, and receives the sats pools pay you; the list of your tokens and their amounts is read once through your wallet's 1Color module (granted here); sending tokens, and the exact balance of one token, the module asks you about itself.",
+      "description": "Open Exchange builds swaps and pools with your wallet, holds the tokens and sats on their way into a swap, receives the sats pools pay you, and delivers a send to a handle; the list of your tokens and their amounts is read once through your wallet's 1Color module (granted here); sending tokens, and the exact balance of one token, the module asks you about itself.",
       "protocolPermissions": [
         {
           "protocolID": [2, "3241645161d8"],
@@ -35,6 +35,15 @@
           "description": "Sign authenticated requests to the overlay instance (asked once per instance, on first use)."
         },
         {
+          "protocolID": [2, "metanet handles envelope"],
+          "counterparty": "anyone",
+          "description": "Sign the delivery envelope of a token you send to a BRC-169 handle."
+        },
+        {
+          "protocolID": [2, "message encryption"],
+          "description": "Encrypt the delivery of a token you send to a BRC-169 handle so only the recipient can read it."
+        },
+        {
           "protocolID": [1, "action label amm-swap"],
           "description": "Label the swaps you build, their funding and their payouts so they are listed together in your wallet."
         },
@@ -49,6 +58,10 @@
         {
           "protocolID": [1, "action label amm-payout"],
           "description": "Label the pool payouts your wallet takes in so they are listed together."
+        },
+        {
+          "protocolID": [1, "action label BRC-177 noSend expiry"],
+          "description": "Mark a token send as held for the recipient until it expires."
         }
       ],
       "basketAccess": [

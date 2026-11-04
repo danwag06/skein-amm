@@ -102,12 +102,28 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
   plan): the sats rows explicit inputs, NO outputs (the wallet's change
   takes them and pays the fee); nothing submitted. Your tokens lists a token
   with only sats staged and shows "<N> sats staged" on its swap-basket line.
+- **Send** (0.30.0): a token row with a balance has "Send" beside its
+  status; it opens a form under the row (one at a time): Handle
+  (`name@domain` or `@name@domain`), Amount (checked against the balance
+  before any wallet call), Memo (optional). `sendTokens` calls
+  @1sat/actions 0.1.2 `send1Color` (the handle resolved, one createAction
+  through the wallet's 1Color module as a BRC-177 noSend handoff, delivered
+  BRC-232 to the handle's messagebox, box `transaction-delivery`); the
+  recipient's wallet takes it in. Delivered: the row says "Sent <amount>
+  <sym> to <handle>" with the txid. An error before the handoff stays in
+  the form. Built but not delivered: the row says so; no retry, no abort.
 - **Unfinished** (0.29.6): an entry not final (a swap never signed) has
   "Dismiss" beside Finish, which drops the entry only; final and pre-0.29.3
   entries have none.
 - **Manifest**: baskets `amm-swap`, `amm-pools`, `p color assets` (0.29.0: no `1sat-deposit`); protocols
   BRC-29 to self, `[2, "amm swap"]` to self, identity, AuthFetch's two, the
-  action labels; no `bsv21`, `1sat` or `[0, "onesat"]`, no spending
+  action labels; 0.30.0, the send to a handle: `[2, "metanet handles
+  envelope"]` to `anyone` (the envelope's signature), `[2, "message
+  encryption"]` (its counterparty is the recipient, unknown here: the
+  manager's group check skips a level-2 entry without one, so it asks per
+  send), `[1, "action label BRC-177 noSend expiry"]` (the label the
+  toolbox's built-in `nosend` module asks for every `p nosend expiry …`
+  label); no `bsv21`, `1sat` or `[0, "onesat"]`, no spending
   authorization, no `p color` entry (the module prompts for those itself,
   and the manager routes every `p `-scheme basket and protocol to it, so a
   manifest grant would never be consulted).

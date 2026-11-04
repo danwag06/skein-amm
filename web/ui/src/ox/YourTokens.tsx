@@ -5,11 +5,14 @@
  * only while the browser lists unfinished steps (a swap payout the wallet has not taken in), one
  * "Finish" per step; no automatic retry. 0.29.6: a swap never signed gets "Dismiss" too (drops the
  * entry only); the swap-basket line shows the sats staged for the token, Move back offered for
- * tokens or sats.
+ * tokens or sats. 0.30.0: "Send" on a token with a balance — an inline form (handle, amount, memo)
+ * under the row, one open at a time; @1sat/actions `send1Color` builds the send through the wallet's
+ * 1Color module and delivers it to the handle's messagebox (BRC-232); the row then says what happened.
  */
 import { useState } from "react";
-import { COLOR_DEPLOY_HREF, dismissUnfinished, finishUnfinished, moveBackTokens, useMyTokens, useUnfinished, type Session, type Unfinished, type WalletToken } from "../data/exchange";
-import { ago, fmtAmount, fmtSats } from "./format";
+import type { Send1ColorResult } from "@1sat/actions";
+import { COLOR_DEPLOY_HREF, dismissUnfinished, finishUnfinished, moveBackTokens, sendTokens, useMyTokens, useUnfinished, type Session, type Unfinished, type WalletToken } from "../data/exchange";
+import { ago, fmtAmount, fmtSats, parseInput } from "./format";
 import { NeedWallet, Notice, TokenName } from "./bits";
 
 function Status({ t }: { t: WalletToken }) {
@@ -17,7 +20,7 @@ function Status({ t }: { t: WalletToken }) {
   return <span className="muted small">Not on this exchange</span>;
 }
 
-function SwapBasket({ t }: { t: WalletToken }) {
+function SwapBasket({ t, onStart }: { t: WalletToken; onStart?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (t.inSwaps === 0n && t.swapSats === 0) return null;
@@ -31,6 +34,7 @@ function SwapBasket({ t }: { t: WalletToken }) {
           className="btn btn-outline"
           disabled={busy}
           onClick={() => {
+            onStart?.();
             setBusy(true);
             setError(null);
             moveBackTokens(t.tokenId).then(
@@ -51,6 +55,178 @@ function SwapBasket({ t }: { t: WalletToken }) {
       </span>
       {error && <span className="bad small">{error}</span>}
     </span>
+  );
+}
+
+/** What a send left on its row: sent, or built but not delivered. */
+export type SendNote = { kind: "sent"; amount: bigint; handle: string; txid: string } | { kind: "undelivered"; txid: string; text: string };
+
+/** The send's outcome: a note on the row (the form closes), or the SDK's text in the form (it stays open). */
+export type SendOutcome = { note: SendNote } | { formError: string };
+
+/** The amount typed, checked before any wallet call: the raw units, or one line why not. */
+export function checkSendAmount(text: string, dec: number, balance: bigint): { amount: bigint } | { error: string } {
+  const amount = parseInput(text, dec);
+  if (amount === null) return { error: `Not an amount (up to ${dec} decimal${dec === 1 ? "" : "s"}).` };
+  if (amount <= 0n) return { error: "The amount must be more than 0." };
+  if (amount > balance) return { error: `More than your balance (${fmtAmount(balance, dec)}).` };
+  return { amount };
+}
+
+/** The action's result as the row shows it. */
+export function sendOutcome(r: Send1ColorResult, amount: bigint, handle: string): SendOutcome {
+  if (r.error !== undefined) {
+    if (r.txid) return { note: { kind: "undelivered", txid: r.txid, text: r.error.replace(/^delivery-failed: /, "") } };
+    return { formError: r.error };
+  }
+  if (r.delivered && r.txid) return { note: { kind: "sent", amount, handle, txid: r.txid } };
+  return { formError: "The send returned no transaction." };
+}
+
+/** Checks what was typed, then sends (`send`: sendTokens; a test: a spy). Never calls `send` on a bad amount. */
+export async function runSend(
+  t: Pick<WalletToken, "tokenId" | "dec" | "balance">,
+  input: { handle: string; amount: string; memo: string },
+  send: typeof sendTokens = sendTokens,
+): Promise<SendOutcome> {
+  const checked = checkSendAmount(input.amount, t.dec, t.balance);
+  if ("error" in checked) return { formError: checked.error };
+  const handle = input.handle.trim();
+  const memo = input.memo.trim();
+  try {
+    return sendOutcome(await send(t.tokenId, handle, checked.amount, memo || undefined), checked.amount, handle);
+  } catch (e: unknown) {
+    return { formError: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export function SendNoteLine({ note, t }: { note: SendNote; t: Pick<WalletToken, "sym" | "dec"> }) {
+  const tx = (
+    <span className="mono" title={note.txid}>
+      {note.txid.slice(0, 8)}
+    </span>
+  );
+  if (note.kind === "sent")
+    return (
+      <p className="send-note ok small" role="status">
+        Sent {fmtAmount(note.amount, t.dec)} {t.sym} to {note.handle} · {tx}
+      </p>
+    );
+  return (
+    <p className="send-note bad small" role="status">
+      The send was built ({tx}) but could not be delivered: {note.text}. The tokens are in the pending send until it expires.
+    </p>
+  );
+}
+
+export interface SendFormState {
+  handle: string;
+  amount: string;
+  memo: string;
+  busy: boolean;
+  error: string | null;
+}
+
+/** The send form as drawn (state from SendForm). */
+export function SendFormView({ t, s, set, onSubmit, onCancel }: { t: WalletToken; s: SendFormState; set: (p: Partial<SendFormState>) => void; onSubmit: () => void; onCancel: () => void }) {
+  const id = (f: string) => `send-${f}-${t.tokenId}`;
+  return (
+    <form
+      className="send-form stack-sm"
+      aria-label={`Send ${t.sym}`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!s.busy) onSubmit();
+      }}
+    >
+      <div className="row row-wrap">
+        <div className="field">
+          <label htmlFor={id("handle")}>Handle</label>
+          <input id={id("handle")} placeholder="name@domain" value={s.handle} disabled={s.busy} onChange={(e) => set({ handle: e.target.value })} autoComplete="off" />
+        </div>
+        <div className="field">
+          <label htmlFor={id("amount")}>Amount</label>
+          <input id={id("amount")} inputMode="decimal" value={s.amount} disabled={s.busy} onChange={(e) => set({ amount: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor={id("memo")}>Memo</label>
+          <input id={id("memo")} placeholder="Optional" value={s.memo} disabled={s.busy} onChange={(e) => set({ memo: e.target.value })} />
+        </div>
+      </div>
+      <div className="row row-wrap">
+        <button type="submit" className="btn btn-primary" disabled={s.busy || s.handle.trim() === ""}>
+          {s.busy ? "Sending…" : "Send"}
+        </button>
+        <button type="button" className="btn btn-outline" disabled={s.busy} onClick={onCancel}>
+          Cancel
+        </button>
+        {s.error && <span className="bad small">{s.error}</span>}
+      </div>
+    </form>
+  );
+}
+
+function SendForm({ t, onDone, onCancel }: { t: WalletToken; onDone: (n: SendNote) => void; onCancel: () => void }) {
+  const [s, setS] = useState<SendFormState>({ handle: "", amount: "", memo: "", busy: false, error: null });
+  const set = (p: Partial<SendFormState>) => setS((x) => ({ ...x, ...p }));
+  return (
+    <SendFormView
+      t={t}
+      s={s}
+      set={set}
+      onCancel={onCancel}
+      onSubmit={() => {
+        set({ busy: true, error: null });
+        void runSend(t, s).then((o) => {
+          if ("note" in o) onDone(o.note);
+          else set({ busy: false, error: o.formError });
+        });
+      }}
+    />
+  );
+}
+
+function TokenRow({ t, sending, setSending }: { t: WalletToken; sending: boolean; setSending: (open: boolean) => void }) {
+  const [note, setNote] = useState<SendNote | null>(null);
+  return (
+    <li className="ttable-row">
+      <TokenName tokenId={t.tokenId} sym={t.sym} {...(t.icon ? { icon: t.icon } : {})} />
+      <span className="num r">
+        <span className="lbl">Balance </span>
+        {fmtAmount(t.balance, t.dec)}
+        <SwapBasket t={t} onStart={() => setNote(null)} />
+      </span>
+      <span className="r">
+        <Status t={t} />
+        {t.balance > 0n && (
+          <>
+            {" "}
+            <button
+              type="button"
+              className="btn btn-outline"
+              onClick={() => {
+                setNote(null);
+                setSending(true);
+              }}
+              aria-label={`Send ${t.sym} to a BRC-169 handle`}
+            >
+              Send
+            </button>
+          </>
+        )}
+      </span>
+      {sending && (
+        <SendForm
+          t={t}
+          onCancel={() => setSending(false)}
+          onDone={(n) => {
+            setNote(n);
+            setSending(false);
+          }}
+        />
+      )}
+      {note && <SendNoteLine note={note} t={t} />}
+    </li>
   );
 }
 
@@ -134,6 +310,7 @@ function UnfinishedCard() {
 export function YourTokens({ session }: { session: Session }) {
   const connected = session.status === "connected";
   const mine = useMyTokens(connected);
+  const [sending, setSending] = useState<string | null>(null);
   return (
     <>
       <div className="title-row">
@@ -144,7 +321,7 @@ export function YourTokens({ session }: { session: Session }) {
       </div>
       <p className="lead lead-tight">
         1Color tokens in your wallet. The swap basket holds tokens on their way into a swap; Move back
-        returns them to your wallet.
+        returns them to your wallet. Send gives a token to a BRC-169 handle; the recipient's wallet takes it in.
       </p>
       {!connected ? (
         <NeedWallet session={session} what="your tokens" />
@@ -165,17 +342,7 @@ export function YourTokens({ session }: { session: Session }) {
             ) : (
               <ul className="ttable-rows">
                 {mine.data.map((t) => (
-                  <li key={t.tokenId} className="ttable-row">
-                    <TokenName tokenId={t.tokenId} sym={t.sym} {...(t.icon ? { icon: t.icon } : {})} />
-                    <span className="num r">
-                      <span className="lbl">Balance </span>
-                      {fmtAmount(t.balance, t.dec)}
-                      <SwapBasket t={t} />
-                    </span>
-                    <span className="r">
-                      <Status t={t} />
-                    </span>
-                  </li>
+                  <TokenRow key={t.tokenId} t={t} sending={sending === t.tokenId} setSending={(open) => setSending(open ? t.tokenId : null)} />
                 ))}
               </ul>
             )}

@@ -242,6 +242,7 @@ button.id-text code { border-bottom: 1px dotted var(--line); }
 .ttable-head { font-size: 12px; color: var(--mut); letter-spacing: 0.04em; text-transform: uppercase; }
 .ttable-row { padding: 14px 18px; border-top: 1px solid var(--line); }
 .status-cell { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.ttable-row > .send-form, .ttable-row > .send-note { grid-column: 1 / -1; margin: 0; }
 
 /* ---- settings */
 .regs { display: flex; flex-direction: column; }
