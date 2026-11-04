@@ -9,6 +9,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PrivateKey, type WalletInterface } from "@bsv/sdk";
+import { sdk as toolboxSdk } from "@bsv/wallet-toolbox-client";
+const { specOpWalletBalance } = toolboxSdk;
 import { BRC29_PROTOCOL, brc29PublicKey } from "../src/wallet/brc29";
 
 const root = join(__dirname, "..");
@@ -30,7 +32,10 @@ describe("manifest.json", () => {
     expect(g.certificateAccess).toEqual([]);
     // 0.12.0: the exchange's own baskets; no `bsv21`, no `1sat`. 0.27.0: plus `p color assets` (the token list, one grant on
     // first visit, the store the wallet's 1Color module reads); no other `p color` entry (per-token reads and sends the module asks itself).
-    expect(g.basketAccess.map((b: { basket: string }) => b.basket)).toEqual(["amm-swap", "amm-pools", "p color assets"]); // 0.29.0: no 1sat-deposit (no funding transaction)
+    // 0.31.4: plus the toolbox's balance special operation (`specOpWalletBalance`), the Swap page's "Wallet: N sats" line; the
+    // `default` basket is admin-only to a page.
+    expect(g.basketAccess.map((b: { basket: string }) => b.basket)).toEqual(["amm-swap", "amm-pools", "p color assets", specOpWalletBalance]); // 0.29.0: no 1sat-deposit (no funding transaction)
+    expect(specOpWalletBalance).toBe("893b7646de0e1c9f741bd6e9169b76a8847ae34adef7bef1e6a285371206d2e8");
     expect(JSON.stringify(manifest.metanet).match(/p color [a-z0-9]+/g)).toEqual(["p color assets"]);
     expect(JSON.stringify(manifest)).not.toMatch(/spendingAuthorization/);
     for (const e of [...g.protocolPermissions, ...g.basketAccess]) {

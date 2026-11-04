@@ -4,6 +4,18 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.31.4 (2026-11-04)
+
+- **The Swap page's wallet sats come from the toolbox's balance special
+  operation** (agent-env plans/wallet-sats-balance-2026-11-04.md):
+  `walletSats()` = one `listOutputs({basket: specOpWalletBalance})`, its
+  `totalOutputs`; before, it listed the `default` basket, which
+  wallet-toolbox's permissions manager keeps admin-only, so a page's read
+  was refused and the "Wallet: N sats" line and the overspend check were
+  off. The manifest's group permissions grant that basket ("Read your
+  wallet's sats balance"). Programs unchanged; manifest version and
+  amm-setup's version check 0.31.4.
+
 ## 0.31.3 (2026-11-04)
 
 - On skein-overlay v0.20.2 (`bin/overlay.wasm`) and skein-1color v0.13.3

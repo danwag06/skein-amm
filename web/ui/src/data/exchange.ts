@@ -1065,11 +1065,18 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
   return { status: filled === legs.length && legs.length > 0 ? "filled" : filled === 0 ? "failed" : "partial", legs };
 }
 
-/** The connected wallet's spendable sats (its default basket). */
+/**
+ * wallet-toolbox's `specOpWalletBalance` (`sdk.specOpWalletBalance`, @bsv/wallet-toolbox-client): the listOutputs "basket" of its
+ * balance special operation. Written out, not imported: the client package exports it only inside its `sdk` namespace, which
+ * pulls ~560 kB into the bundle; test/exchange.test.ts checks it equals the toolbox's.
+ */
+export const SPEC_OP_WALLET_BALANCE = "893b7646de0e1c9f741bd6e9169b76a8847ae34adef7bef1e6a285371206d2e8";
+
+/** The connected wallet's spendable sats: the toolbox's balance special operation (`Wallet.balance()`'s call), its `totalOutputs`; a page may not read the admin-only `default` basket. */
 export async function walletSats(): Promise<bigint> {
   const { wallet } = needWallet();
-  const r = await wallet.listOutputs({ basket: "default", limit: 10_000 });
-  return r.outputs.filter((o) => o.spendable !== false).reduce((a, o) => a + BigInt(o.satoshis), 0n);
+  const r = await wallet.listOutputs({ basket: SPEC_OP_WALLET_BALANCE });
+  return BigInt(r.totalOutputs);
 }
 
 // ---------------------------------------------------------------------------

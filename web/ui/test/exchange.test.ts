@@ -9,6 +9,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { ColorPlan } from "@bsv/color-permission-module";
+import { sdk as toolboxSdk } from "@bsv/wallet-toolbox-client";
+const { specOpWalletBalance } = toolboxSdk;
 import { decodeOneColor } from "../src/pool";
 import { tokenP2pkhScript } from "../src/lp/poolDeploy";
 import { decode, encode } from "cbor2";
@@ -52,6 +54,7 @@ import {
   topicOf,
   validatorTerms,
   walletSats,
+  SPEC_OP_WALLET_BALANCE,
 } from "../src/data/exchange";
 import { REFRESH_MS } from "../src/lib/config";
 import { PendingPayoutStore } from "../src/wallet/pendingPayouts";
@@ -199,7 +202,7 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
 /**
  * A fake wallet: its position rows (`amm-pools`), the BRC-207 module's views
  * (`p color assets`: `held`; `p color balance <tag>`: `balances`), the
- * active swap basket (`amm-swap`), a default basket, its identity.
+ * active swap basket (`amm-swap`), the toolbox's balance special operation, its identity.
  */
 interface WalletRows {
   deploy?: { basket: string; outpoint: string; beef: number[] };
@@ -216,7 +219,8 @@ function fakeWallet(rows: WalletRows = {}, sats: number[] = [1_000, 2_500]): Wal
   return {
     async listOutputs(args: { basket: string; tags?: string[] }) {
       walletReads.push(args.basket);
-      if (args.basket === "default") return { totalOutputs: sats.length, outputs: sats.map((s, i) => ({ outpoint: `${"aa".repeat(32)}.${i}`, satoshis: s, spendable: true })) };
+      // 0.31.4: the toolbox's balance special operation (the default basket is admin-only): the spendable sats as totalOutputs, no rows.
+      if (args.basket === specOpWalletBalance) return { totalOutputs: sats.reduce((a, s) => a + s, 0), outputs: [] };
       if (args.basket === "amm-pools") return { totalOutputs: rows.pools?.length ?? 0, outputs: rows.pools ?? [] };
       if (args.basket === "amm-swap") return { totalOutputs: rows.swaps?.length ?? 0, outputs: rows.swaps ?? [] };
       if (args.basket === "p color assets") return { totalOutputs: rows.held?.length ?? 0, outputs: rows.held ?? [] };
@@ -408,7 +412,16 @@ describe("exchange.ts, wired", () => {
     expect(o.satoshis).toBeLessThan(20_001 + 2_000);
   });
 
-  it("walletSats: the default basket's spendable sats", async () => {
+  it("walletSats (0.31.4): one listOutputs on the toolbox's balance special operation (no limit, no other basket), its totalOutputs as a bigint", async () => {
+    const asked: unknown[] = [];
+    setExchangeContext({
+      wallet: { async listOutputs(args: unknown) { asked.push(args); return { totalOutputs: 3_500, outputs: [] }; } } as unknown as WalletInterface,
+      signedFor: () => af as never,
+      identityKey: ME,
+    });
+    expect(await walletSats()).toBe(3_500n);
+    expect(asked).toEqual([{ basket: "893b7646de0e1c9f741bd6e9169b76a8847ae34adef7bef1e6a285371206d2e8" }]);
+    expect(SPEC_OP_WALLET_BALANCE).toBe(specOpWalletBalance);
     connect();
     expect(await walletSats()).toBe(3_500n);
   });
