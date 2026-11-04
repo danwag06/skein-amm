@@ -4,6 +4,28 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.31.1 (2026-11-04)
+
+- **Swap: a leg refused `pool_spent` is repriced and sent once more**
+  (David: fix the identified issues; agent-env
+  plans/swap-retry-pool-spent-2026-11-04.md). When two swaps race on one
+  pool, the validator refuses the second `pool_spent` and returns the
+  pool's newest state. `executeSwap` now re-quotes that leg alone against
+  it (the engine's `computeSwap`, same side, same amount in) and, ONCE per
+  leg, if the order's bound holds (the filled legs' amount out + the new
+  one + the legs still out at their quote ≥ the plan's
+  `resolvedMinAmountOut`; the plan has no per-leg minimum), rebuilds it on
+  the new pool output (`lookupPoolOutput`, `planSwapLeg`, `prepareSwap`)
+  with the same staged `amm-swap` rows, writes a new pending entry (the old
+  one is already removed by the refusal) and relays it to the same
+  validator (another key named: its live peer, else "the pool's validator
+  changed"). Below the bound: "repriced below your minimum: <amount out>
+  for this leg", nothing sent. A second refusal fails the leg as before; a
+  refusal without a state, a timeout, a failure or no answer are
+  unchanged. `LegResult.repriced`; the Swap result adds "One leg was
+  repriced after another swap moved the pool." Pages only. vitest 234
+  (+5).
+
 ## 0.31.0 (2026-11-04)
 
 - **The relay's dialled frame names the token's topic** (agent-env
