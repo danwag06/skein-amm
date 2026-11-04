@@ -65,7 +65,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Beef, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
 import { send1Color, type Send1ColorResult } from "@1sat/actions";
-import type { PoolState, Plan } from "@amm-poc/matching-engine";
+import { computeSwap, type PoolState, type Plan } from "@amm-poc/matching-engine";
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
 import { deployQuery, outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
 import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB, REFRESH_MS, appName, tokenBase } from "../lib/config";
@@ -75,7 +75,7 @@ import { liveSenders, pricesFromBeats, depthOf, type TokenPrice } from "../marke
 import { buildPlanRequest, goneFromLookup, quote as planQuote } from "../market/plan";
 import { validatorStatus } from "../market/view";
 import { RelayError, SWAP_TERMS_FN, callApp, callUrl, readBytes, swapTerms, type AuthFetchLike } from "../market/relay";
-import { pendingSwapPayouts, planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlannedLeg, type SatsInput, type TokenInput } from "../market/swapAction";
+import { pendingSwapPayouts, planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlanLegInput, type PlannedLeg, type SatsInput, type TokenInput } from "../market/swapAction";
 import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapTotals } from "../market/activeSwap";
 import { relaySwap, type SwapOutcome } from "../market/swapFlow";
 import { PendingPayoutStore, internalizeNow, isLegacyPayout, onPendingPayoutsChange, type PendingPayout } from "../wallet/pendingPayouts";
@@ -192,6 +192,8 @@ export interface LegResult {
   status: "filled" | "failed";
   txid?: string;
   error?: string;
+  /** 0.31.1: the leg was refused `pool_spent`, repriced against the pool's newest state and sent again. */
+  repriced?: true;
 }
 
 export interface SwapResult {
@@ -964,6 +966,61 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
     });
   }
   const holdingBeef = staged.length > 0 ? await swapHoldingBeef(wallet, sent) : undefined;
+  // The legs sent to the relay: their expected amountOut, and whether their outcome is known.
+  const tracks: { result: LegResult; amountOut: bigint; done: boolean }[] = [];
+  /** Saves the leg's pending payouts, relays it, and keeps or drops the payouts by the outcome (as before 0.31.1). */
+  const relayLeg = async (prepared: Awaited<ReturnType<typeof prepareSwap>>, peerId: string): Promise<SwapOutcome> => {
+    const pending = pendingSwapPayouts(prepared, tokenId, base);
+    for (const x of pending) context.payouts.save(x);
+    const o = await relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", reason: errText(e) }));
+    for (const x of pending) {
+      if (o.status === "accepted") {
+        if (o.completed.internalized) context.payouts.remove(x.id);
+        else context.payouts.finalize(x.id, o.txid);
+      } else if (o.status !== "unknown") context.payouts.remove(x.id);
+    }
+    return o;
+  };
+  /**
+   * 0.31.1: one retry of a leg refused `pool_spent` — re-quoted alone against the validator's
+   * newest pool state (the engine's single-pool math, same side and amountIn), sent only while
+   * the order's bound holds (filled legs + this one + the legs still out ≥ the plan's
+   * resolvedMinAmountOut), rebuilt on the new pool output with the same staged rows. Null: the
+   * leg failed here (its error set); else the second relay's outcome.
+   */
+  const retryLeg = async (x: { leg: Plan["legs"][number]; track: (typeof tracks)[number]; was: PoolState; pool: PoolState; peerId: string; tokens: TokenInput[] | null; sats: SatsInput }): Promise<SwapOutcome | null> => {
+    const { track, pool } = x;
+    const result = track.result;
+    const priced = computeSwap(pool, direction, x.leg.amountIn);
+    const amountOut = priced?.amountOut ?? 0n;
+    const others = tracks.filter((t) => t !== track).reduce((a, t) => a + (t.result.status === "filled" || !t.done ? t.amountOut : 0n), 0n);
+    if (!priced || others + amountOut < p.plan.resolvedMinAmountOut) {
+      result.error = `repriced below your minimum: ${formatAmount(amountOut, direction === "bsvToToken" ? p.dec : 0)} for this leg`;
+      return null;
+    }
+    let peerId = x.peerId;
+    if (pool.validatorIdentityKey !== x.was.validatorIdentityKey) {
+      const v = validatorStatus(pool.validatorIdentityKey, p.live);
+      if (!v.live || !v.peerId) {
+        result.error = "the pool's validator changed";
+        return null;
+      }
+      peerId = v.peerId;
+    }
+    const leg: Plan["legs"][number] = { outpoint: pool.outpoint, amountIn: x.leg.amountIn, ...priced };
+    try {
+      const poolOutput = await lookupPoolOutput(af, base, tokenId, pool.outpoint);
+      const common: PlanLegInput & { tokenInputs?: TokenInput[] } = { wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, ...(x.tokens ? { tokenInputs: x.tokens } : {}), satsPerKb: FEE_RATE_SATS_PER_KB };
+      const planned = await planSwapLeg(common);
+      const prepared = await prepareSwap({ ...common, satsInput: x.sats, ...(holdingBeef ? { holdingBeef } : {}), planned });
+      track.amountOut = amountOut;
+      result.repriced = true;
+      return await relayLeg(prepared, peerId);
+    } catch (e) {
+      result.error = errText(e);
+      return null;
+    }
+  };
   for (const { r, poolOutput, planned, tokens, sats } of staged) {
     const { leg, result, pool, peerId } = r;
     if (tokensIn && !tokens) {
@@ -976,23 +1033,27 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
     }
     try {
       const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, ...(tokens ? { tokenInputs: tokens } : {}), satsInput: sats, ...(holdingBeef ? { holdingBeef } : {}), planned, satsPerKb: FEE_RATE_SATS_PER_KB });
-      const pending = pendingSwapPayouts(prepared, tokenId, base);
-      for (const x of pending) context.payouts.save(x);
+      const track = { result, amountOut: leg.amountOut, done: false };
+      tracks.push(track);
       running.push(
-        relaySwap({ wallet, authFetch: af, base }, prepared, peerId)
-          .catch((e): SwapOutcome => ({ status: "unknown", reason: errText(e) }))
-          .then((o) => {
-            for (const x of pending) {
-              if (o.status === "accepted") {
-                if (o.completed.internalized) context.payouts.remove(x.id);
-                else context.payouts.finalize(x.id, o.txid);
-              } else if (o.status !== "unknown") context.payouts.remove(x.id);
+        (async () => {
+          let o = await relayLeg(prepared, peerId);
+          // 0.31.1: refused `pool_spent` with the pool's newest state attached → repriced against
+          // that state and sent once more (the staged `amm-swap` rows are still there).
+          if (o.status === "refused" && o.reason.startsWith("pool_spent") && o.pool) {
+            const again = await retryLeg({ leg, track, was: pool, pool: o.pool, peerId, tokens, sats });
+            if (!again) {
+              track.done = true;
+              return;
             }
-            if (o.status === "accepted") {
-              result.status = "filled";
-              result.txid = o.txid;
-            } else result.error = o.status === "refused" ? `refused: ${o.reason}` : o.status === "unknown" ? `no answer yet: ${o.reason}` : o.status;
-          }),
+            o = again;
+          }
+          track.done = true;
+          if (o.status === "accepted") {
+            result.status = "filled";
+            result.txid = o.txid;
+          } else result.error = o.status === "refused" ? `refused: ${o.reason}` : o.status === "unknown" ? `no answer yet: ${o.reason}` : o.status;
+        })(),
       );
     } catch (e) {
       result.error = errText(e);

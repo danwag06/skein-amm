@@ -286,6 +286,7 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
               <p>
                 {result.status === "filled" ? "Swapped. Every leg filled." : result.status === "partial" ? "Partly swapped: some legs failed." : "No leg filled."}
               </p>
+              {result.legs.some((l) => l.repriced) && <p>One leg was repriced after another swap moved the pool.</p>}
               <ul className="txids">
                 {result.legs.map((l) => (
                   <li key={l.poolOutpoint}>

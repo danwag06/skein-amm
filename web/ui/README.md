@@ -80,6 +80,15 @@ own except the active swap basket. `src/wallet/color.ts` holds the names.
   funding transaction. The legs are built, signed (`createSignature` under
   each row's key), relayed and settled as before; taking an accepted swap in
   marks its `amm-swap` inputs spent (no relinquishOutput).
+- **A leg refused `pool_spent`** (0.31.1): when the validator's refusal
+  carries the pool's newest state, the leg is re-quoted alone against it
+  (the engine's `computeSwap`, same side and amount in) and, if the order's
+  bound still holds (filled legs + this leg + the legs still out ≥ the
+  plan's `resolvedMinAmountOut`), rebuilt on the new pool output with the
+  same staged `amm-swap` rows and relayed ONCE more (its old pending entry
+  removed, a new one written); else it fails "repriced below your minimum:
+  <amount out> for this leg". A second refusal fails the leg as before. The
+  Swap result says "One leg was repriced after another swap moved the pool."
 - **Token payouts**: a swap's token payout (and the taker's own token
   commission) is locked to a module receiving key, `getPublicKey({protocolID:
   [2, "p color <assetTag> <prefixHex> <suffixHex>"], keyID: "color",
