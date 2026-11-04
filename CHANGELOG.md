@@ -4,6 +4,21 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.31.2 (2026-11-04)
+
+- **`rebeat` re-declares the liveness window too** (agent-env
+  plans/rebeat-redeclares-liveness-2026-11-04.md): on skein-overlay
+  v0.20.1 (`bin/overlay.wasm`) and skein-1color v0.13.2
+  (`bin/color-*.wasm`). A topic's liveness window was declared once, at
+  registration; the rack's token instances registered before
+  skein-overlay 0.20.0 kept a 40 s window under 120 s beats, so a
+  validator looked offline two thirds of the time. amm-validator's
+  `rebeat` (sent on root's `terms`) now re-declares every topic's
+  liveness with the market's window beside its beacon, and each
+  registered lookup service's liveness. Programs unchanged.
+- The manifest version (`etc/app.json`) and amm-setup's version check,
+  left at 0.31.0 by 0.31.1, are 0.31.2.
+
 ## 0.31.1 (2026-11-04)
 
 - **Swap: a leg refused `pool_spent` is repriced and sent once more**
