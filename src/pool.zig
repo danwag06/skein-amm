@@ -472,3 +472,123 @@ pub fn check(j: bsv21.Judgement) ?Violation {
     }
     return null;
 }
+
+// ---------------------------------------------------------------- a Swap's call and its fee outputs (0.32.0)
+
+/// A swap's call to the pool, as Rúnar lays it out (amm-validator unlock.zig):
+/// `_codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
+/// commissionPkh, _changePKH, _changeAmount, txPreimage, methodIndex`:
+/// pushes only. (Moved from amm-p2p's relay.zig in 0.32.0: the relay's pair check and
+/// amm-lookup's LP fee totals read a swap with this one parser.)
+pub const SwapCall = struct {
+    amount_in: u64,
+    bsv_in: bool,
+    user_pkh: []const u8,
+    commission_pkh: []const u8,
+    change: u64,
+};
+
+pub const swap_pushes = 1 + 6 + 4;
+
+/// A script number push (minimal or not), non-negative, as a u64.
+fn numOf(p: brc162.Push) ?u64 {
+    return switch (p.op) {
+        brc162.OP_0 => 0,
+        brc162.OP_1...brc162.OP_16 => p.op - (brc162.OP_1 - 1),
+        0x01...0x09 => blk: {
+            // Rúnar writes minimal numbers; read any non-negative encoding.
+            const b = p.data;
+            if (b[b.len - 1] & 0x80 != 0) break :blk null;
+            if (b.len > 8 and b[8] != 0) break :blk null;
+            var v: u64 = 0;
+            for (b[0..@min(b.len, 8)], 0..) |x, i| v |= @as(u64, x) << @intCast(8 * i);
+            break :blk v;
+        },
+        else => null,
+    };
+}
+
+fn boolOf(p: brc162.Push) ?bool {
+    const n = numOf(p) orelse return null;
+    return n != 0;
+}
+
+/// The Swap call an unlocking script carries; null when it is not one laid out as Rúnar calls it.
+pub fn parseSwapCall(a: std.mem.Allocator, script: []const u8) !?SwapCall {
+    var pushes: std.ArrayList(brc162.Push) = .empty;
+    var pos: usize = 0;
+    while (pos < script.len) {
+        const p = brc162.readPush(script, pos) orelse return null;
+        try pushes.append(a, p);
+        pos = p.next;
+    }
+    if (pushes.items.len != swap_pushes) return null;
+    const arg = pushes.items[1..];
+    return .{
+        .amount_in = numOf(arg[2]) orelse return null,
+        .bsv_in = boolOf(arg[3]) orelse return null,
+        .user_pkh = arg[4].data,
+        .commission_pkh = arg[5].data,
+        .change = numOf(arg[7]) orelse return null,
+    };
+}
+
+/// Where a Swap writes its fees (pool/Pool.runar.go Swap): output 0 the continuation, output 1
+/// the payout, then the LP's fee output when `lp_fee > 0`, then the validator's when
+/// `validator_fee > 0`, then the commission when `commission > 0`; each `feeOf(amountIn, bps)`
+/// of the continuation's rate, in the input asset. `end` is the index after the fee outputs
+/// (the change, if any, is there).
+pub const FeeLayout = struct {
+    lp_fee: u64,
+    validator_fee: u64,
+    commission: u64,
+    lp_at: ?usize,
+    validator_at: ?usize,
+    commission_at: ?usize,
+    end: usize,
+};
+
+/// The layout of `call`'s fees against the continuation `cont`; the error names the rate the
+/// contract's arithmetic is not defined for.
+pub fn feeLayout(call: SwapCall, cont: Pool) error{ LpFeeBps, ValidatorFeeBps, CommissionBps }!FeeLayout {
+    const lp_fee = feeOf(call.amount_in, cont.lp_fee_bps) orelse return error.LpFeeBps;
+    const val_fee = feeOf(call.amount_in, cont.validator_fee_bps) orelse return error.ValidatorFeeBps;
+    const com = feeOf(call.amount_in, cont.commission_bps) orelse return error.CommissionBps;
+    var at: usize = 2;
+    var l: FeeLayout = .{ .lp_fee = lp_fee, .validator_fee = val_fee, .commission = com, .lp_at = null, .validator_at = null, .commission_at = null, .end = 0 };
+    if (lp_fee > 0) {
+        l.lp_at = at;
+        at += 1;
+    }
+    if (val_fee > 0) {
+        l.validator_at = at;
+        at += 1;
+    }
+    if (com > 0) {
+        l.commission_at = at;
+        at += 1;
+    }
+    l.end = at;
+    return l;
+}
+
+/// A Swap's fee to the LP: `amount` in the input asset (sats when `bsv_in`, else token units).
+pub const LpFee = struct { amount: u64, bsv_in: bool };
+
+/// The LP's fee a Swap transaction paid: the call on input `pool_input` (`parseSwapCall`), the
+/// continuation at output 0, the fee output where `feeLayout` puts it, checked to be the
+/// contract's (`payoutScript` of the fee to Hash160 of the continuation's LpPubKey, its
+/// `payoutSats`). A zero fee (a pool charging none) is `amount = 0`. Null when the transaction
+/// is not such a Swap (no call, no continuation, or the fee output not the contract's).
+pub fn lpFeeOf(a: std.mem.Allocator, tx: c.bsvz.transaction.Transaction, pool_input: usize) !?LpFee {
+    if (pool_input >= tx.inputs.len or tx.outputs.len < 2) return null;
+    const call = (try parseSwapCall(a, tx.inputs[pool_input].unlocking_script.bytes)) orelse return null;
+    const cont = poolOfScript(tx.outputs[0].locking_script.bytes) orelse return null;
+    const l = feeLayout(call, cont) catch return null;
+    const at = l.lp_at orelse return .{ .amount = 0, .bsv_in = call.bsv_in };
+    if (at >= tx.outputs.len) return null;
+    const o = tx.outputs[at];
+    const want = try payoutScript(a, cont.asset_id, l.lp_fee, bsvz.crypto.hash.hash160(&cont.lp).bytes, call.bsv_in);
+    if (o.satoshis < 0 or @as(u64, @intCast(o.satoshis)) != payoutSats(l.lp_fee, call.bsv_in) or !std.mem.eql(u8, o.locking_script.bytes, want)) return null;
+    return .{ .amount = l.lp_fee, .bsv_in = call.bsv_in };
+}

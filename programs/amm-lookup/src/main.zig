@@ -39,9 +39,14 @@ pub fn documentation(_: std.mem.Allocator, _: []const u8) anyerror![]const u8 {
     \\  `{outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps,
     \\  commissionBps, validatorIdentityKey, lastSeen?}` (freeform);
     \\- `{tokenId, outpoint}`: that pool, or its newest continuation,
-    \\  `{current, hops}` (freeform); with `beef: true`, the pool output and its
-    \\  transaction's BEEF (output-list);
-    \\- `{tokenId, validatorIdentityKey}`: that validator's listed pools of the token.
+    \\  `{current, hops, fees: {sats, tokens, swaps}}` (freeform; `fees` its lineage's LP fees,
+    \\  as below); with `beef: true`, the pool output and its transaction's BEEF (output-list);
+    \\- `{tokenId, validatorIdentityKey}`: that validator's listed pools of the token;
+    \\- `{tokenId, lpPubKey}`: the LP fees that LpPubKey's pool lineage (its deploy and the
+    \\  Swap continuations) earned, `{lpPubKey, root, sats, tokens, swaps, current}` (freeform):
+    \\  `sats` from sats-in Swaps, `tokens` from token-in Swaps, `root` the deploy's pool
+    \\  outpoint, `current` the live pool or null once closed; a key with no pool here answers
+    \\  zeros with `root` and `current` null.
     \\
     \\Its beat on `ls_amm_<assetId>-live` (dag-cbor): `{tokens: {<assetId>: {<validator identity>: {sats, tokens,
     \\pools}}}}`, this overlay's listed pools summed per token and validator: the prices.

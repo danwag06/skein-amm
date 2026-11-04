@@ -476,16 +476,111 @@ fn answerOutpoint(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, start
     }
     if (want_beef) return .{ .output_list = try a.dupe(lookup.Output, &.{.{ .txid = txid, .vout = vout }}) };
     const current = try poolStateValue(a, rec.?, try outpointStr(a, txid, vout));
+    const f = (try lpFees(a, svc, ch, tp, rec.?.getBytes("lpPubKey") orelse return error.BadIndex)) orelse Fees{ .root = .{ .txid = txid, .vout = vout } };
     return .{ .freeform = .{ .map = try a.dupe(Entry, &.{
         .{ .key = "current", .value = current },
         .{ .key = "hops", .value = .{ .uint = hops } },
+        .{ .key = "fees", .value = .{ .map = try a.dupe(Entry, &.{
+            .{ .key = "sats", .value = .{ .uint = f.sats } },
+            .{ .key = "tokens", .value = .{ .uint = f.tokens } },
+            .{ .key = "swaps", .value = .{ .uint = f.swaps } },
+        }) } },
+    }) } };
+}
+
+// ---------------------------------------------------------------- the LP fees (0.32.0)
+
+/// An outpoint, as the maps name it.
+const Op = struct { txid: [32]u8, vout: u32 };
+
+/// A pool lineage's LP fees (one deploy and its Swap continuations; the LpPubKey is constant
+/// along it and unique per deploy): `sats` from sats-in Swaps, `tokens` from token-in Swaps,
+/// `swaps` counted; `root` the deploy's pool outpoint; `current` the live pool's record and
+/// outpoint, null once the lineage ended (the LP's Close, the validator's Rescind).
+const Fees = struct {
+    sats: u64 = 0,
+    tokens: u64 = 0,
+    swaps: u64 = 0,
+    root: Op,
+    current: ?struct { rec: Value, op: Op } = null,
+};
+
+/// The fees the lineage of LpPubKey `lp` earned, read at query time (nothing kept): its deploy
+/// is the listed pool of that key (`pools` or `spentPools`) whose output attests itself
+/// (pool.zig `affirmed`, the listing's rule (a)); from there the walk follows the spends as
+/// `{outpoint}` does (`spentPools` → the chain state's `spentBy`), and each spender whose output
+/// 0 is listed is a Swap: its LP fee is pool.zig `lpFeeOf`'s, the output the relay's pair check
+/// lays out (`feeLayout`). A spender that lists nothing (a Close, a Rescind) ends it. Null when
+/// no listed pool here has that key.
+fn lpFees(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, lp: []const u8) !?Fees {
+    var root: ?Op = null;
+    var any = false;
+    scan: for ([_][]const u8{ "pools", "spentPools" }) |m| for (try svc.map(m).prefixed(tp)) |kv| {
+        if (kv.value != .cid) continue;
+        const rec = try svc.store.getValue(a, kv.value.cid);
+        if (!std.mem.eql(u8, rec.getBytes("lpPubKey") orelse continue, lp)) continue;
+        any = true;
+        const op = try w.store.outpointOf(kv.key[tp.len..]);
+        const raw = (try ch.txRaw(op.txid)) orelse return error.UnknownTransaction;
+        const tx = w.bsvz.transaction.Transaction.parse(a, raw) catch return error.BadTransaction;
+        if (op.vout >= tx.outputs.len) return error.BadIndex;
+        const o = tx.outputs[op.vout];
+        if (pool.affirmed(a, o.locking_script.bytes, @intCast(o.satoshis))) {
+            root = .{ .txid = op.txid, .vout = op.vout };
+            break :scan;
+        }
+    };
+    if (!any) return null;
+    var f: Fees = .{ .root = root orelse return error.UnknownOutpoint };
+    var at = f.root;
+    while (true) {
+        if (try svc.map("pools").link(try poolKey(a, tp, at.txid, at.vout))) |cid| {
+            f.current = .{ .rec = try svc.store.getValue(a, cid), .op = at };
+            return f;
+        }
+        if (!try svc.map("spentPools").has(try poolKey(a, tp, at.txid, at.vout))) return error.UnknownOutpoint;
+        const sp = (try ch.spentBy(at.txid, at.vout)) orelse return error.UnknownOutpoint;
+        const listed = try svc.map("pools").has(try poolKey(a, tp, sp, 0)) or try svc.map("spentPools").has(try poolKey(a, tp, sp, 0));
+        if (!listed) return f; // a Close or a Rescind: the lineage ended
+        const raw = (try ch.txRaw(sp)) orelse return error.UnknownTransaction;
+        const tx = w.bsvz.transaction.Transaction.parse(a, raw) catch return error.BadTransaction;
+        const input = for (tx.inputs, 0..) |in, i| {
+            if (in.previous_outpoint.index == at.vout and std.mem.eql(u8, &in.previous_outpoint.txid.bytes, &at.txid)) break i;
+        } else return error.BadIndex;
+        // A Swap whose fee output is not the contract's (pool.zig `lpFeeOf` null) adds no fee; it still counts.
+        if (try pool.lpFeeOf(a, tx, input)) |fee| {
+            if (fee.bsv_in) f.sats += fee.amount else f.tokens += fee.amount;
+        }
+        f.swaps += 1;
+        at = .{ .txid = sp, .vout = 0 };
+    }
+}
+
+/// `{lpPubKey}` (0.32.0): `{lpPubKey, root, sats, tokens, swaps, current}`, the LP fees that
+/// key's pool lineage earned (`lpFees`); `current` its live pool, null once closed. A key with no
+/// pool here answers zeros, `root` and `current` null.
+fn answerLp(a: Allocator, svc: *Service, ch: *Chain, tp: []const u8, hex: []const u8) !lookup.Answer {
+    if (hex.len != 66) return error.BadQuery;
+    var lp: [33]u8 = undefined;
+    _ = std.fmt.hexToBytes(&lp, hex) catch return error.BadQuery;
+    const got = try lpFees(a, svc, ch, tp, &lp);
+    const f = got orelse Fees{ .root = undefined };
+    const current: Value = if (f.current) |c| try poolStateValue(a, c.rec, try outpointStr(a, c.op.txid, c.op.vout)) else .null;
+    return .{ .freeform = .{ .map = try a.dupe(Entry, &.{
+        .{ .key = "lpPubKey", .value = .{ .text = try hexOf(a, &lp) } },
+        .{ .key = "root", .value = if (got != null) .{ .text = try outpointStr(a, f.root.txid, f.root.vout) } else .null },
+        .{ .key = "sats", .value = .{ .uint = f.sats } },
+        .{ .key = "tokens", .value = .{ .uint = f.tokens } },
+        .{ .key = "swaps", .value = .{ .uint = f.swaps } },
+        .{ .key = "current", .value = current },
     }) } };
 }
 
 /// `/lookup` (BRC-24, service `ls_amm_<assetId>`), every query naming its token
 /// (`tokenId`, `<txid>_<vout>`): `{tokenId}` every live pool of the token;
 /// `{tokenId, outpoint, beef?}` that pool (README, "Queries");
-/// `{tokenId, validatorIdentityKey}` that validator's pools of the token.
+/// `{tokenId, validatorIdentityKey}` that validator's pools of the token;
+/// `{tokenId, lpPubKey}` the LP fees that key's pool lineage earned (0.32.0).
 pub fn answer(a: Allocator, svc: *Service, ch: *Chain, query: Value) anyerror!lookup.Answer {
     if (query != .map) return error.BadQuery;
     const topic = try topicOf(a, query.getText("tokenId") orelse return error.BadQuery);
@@ -494,6 +589,7 @@ pub fn answer(a: Allocator, svc: *Service, ch: *Chain, query: Value) anyerror!lo
         return answerOutpoint(a, svc, ch, tp, try parseOutpoint(text), query.getBool("beef") orelse false);
     }
     if (query.getText("validatorIdentityKey")) |hex| return answerValidator(a, svc, tp, hex);
+    if (query.getText("lpPubKey")) |hex| return answerLp(a, svc, ch, tp, hex);
     return answerAll(a, svc, tp);
 }
 

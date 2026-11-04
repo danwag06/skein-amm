@@ -4,6 +4,32 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.32.0 (2026-11-04)
+
+- **LP fees per position** (agent-env plans/lp-fees-by-key-2026-11-04.md, as
+  revised by David: no running totals, read at query time). `ls_amm_<assetId>`
+  answers `{tokenId, lpPubKey}` → `{lpPubKey, root, sats, tokens, swaps,
+  current}`: the LP fees the pool lineage of that LpPubKey (one deploy and its
+  Swap continuations) earned, sats from sats-in Swaps and tokens from token-in
+  Swaps; `current` the live pool, null once closed; a key with no pool here
+  answers zeros with `root` and `current` null. `{tokenId, outpoint}` gains
+  `fees: {sats, tokens, swaps}` for its lineage. The lookup finds the deploy
+  among the listed pools of that key (`pools`, `spentPools`) by its
+  self-attestation, then walks the spends as `{outpoint}` does; a rejected
+  Swap is not in the lineage. Nothing new is kept (no new map).
+- **One reading of a Swap's fees**: `SwapCall` / `parseSwapCall` moved from
+  amm-p2p's relay into src/pool.zig, with `feeLayout` (where the LP, validator
+  and commission outputs sit) and `lpFeeOf` (the LP fee output, checked to be
+  the contract's); the relay's pair check uses `feeLayout` (behaviour
+  unchanged), the lookup `lpFeeOf`.
+- Pages: each position carries `feesEarnedSats` and `feesEarnedTokens`
+  (`lpFeesOf` by the pool's LpPubKey); the Liquidity card's "Fees earned" line
+  shows `<sats> sats · <tokens> <SYM>`; above the cards one line per token,
+  "<SYM>: <n> positions · fees earned <sats> sats · <tokens> <SYM>", which
+  counts closed positions too (`myPositions` now returns them marked
+  `closed`, one per LpPubKey, its key from the filed output's script; no card).
+- Manifest version and amm-setup's version check 0.32.0.
+
 ## 0.31.4 (2026-11-04)
 
 - **The Swap page's wallet sats come from the toolbox's balance special

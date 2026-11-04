@@ -284,6 +284,37 @@ export async function lookupPoolOutput(af: SignedFetch | null, base: string, tok
   return outs[0]!;
 }
 
+/** The LP fees a pool lineage earned (skein-amm 0.32.0): `ls_amm_<assetId>`'s `{tokenId, lpPubKey}` answer. */
+export interface LpFees {
+  lpPubKey: string;
+  /** The deploy's pool outpoint (`<txid>_<vout>`); null for a key with no pool on this instance. */
+  root: string | null;
+  /** The fees of sats-in swaps. */
+  sats: bigint;
+  /** The fees of token-in swaps, token base units. */
+  tokens: bigint;
+  swaps: number;
+  /** The live pool; null once closed (or no pool). */
+  current: PoolState | null;
+}
+
+const wireBig = (x: unknown): bigint => (typeof x === "number" || typeof x === "string" || typeof x === "bigint" ? BigInt(x) : 0n);
+
+/** `{tokenId, lpPubKey}` at `ls_amm_<assetId>` (0.32.0): the LP fees the pool of that LpPubKey earned, read by the lookup along the pool's lineage. */
+export async function lpFeesOf(af: SignedFetch | null, base: string, tokenId: string, lpPubKey: string): Promise<LpFees> {
+  const a = (await lookup(af, base, ammLookupService(tokenId), { tokenId, lpPubKey })) as { type?: string; result?: Record<string, unknown> };
+  const r = a && a.type === "freeform" && a.result && typeof a.result === "object" && !Array.isArray(a.result) ? a.result : null;
+  if (!r) throw new Error(`lookup ${ammLookupService(tokenId)} ${tokenId}: no LP fees answer for ${lpPubKey}`);
+  return {
+    lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey : lpPubKey,
+    root: typeof r.root === "string" ? r.root : null,
+    sats: wireBig(r.sats),
+    tokens: wireBig(r.tokens),
+    swaps: Number(r.swaps ?? 0),
+    current: r.current && typeof r.current === "object" ? toPoolState(r.current as WirePoolState) : null,
+  };
+}
+
 /**
  * The validators live on a token topic (`tm_color_<txid>_0`): `GET <base>/.live/tm_color_<txid>_0-live`; a 404
  * (the instance keeps no liveness for it) is `kept: false` with none.

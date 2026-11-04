@@ -116,6 +116,8 @@ interface Instance {
   terms: Record<string, unknown> | null;
   /** amm.swap.terms's minCommissionBps (0.16.0: the market record; unset 0). */
   minCommissionBps: number;
+  /** 0.32.0: `ls_amm_<tokenId>` `{tokenId, lpPubKey}` answers, by LpPubKey (unknown: zeros, root null, as the lookup answers). */
+  lpFees: Record<string, unknown>;
 }
 
 const enabledRow = (tokenId: string, sym: string, dec: number, since: number) => ({ tokenId, topic: `tm_color_${tokenId}`, sym, dec, status: "enabled", since });
@@ -147,6 +149,7 @@ function instance(): Instance {
     sent: [],
     calls: [],
     minCommissionBps: 0,
+    lpFees: {},
     terms: { validator: { "/": { bytes: Utils.toBase64(Utils.toArray(SKEIN, "hex")).replace(/=+$/, "") } }, peerId: PEER, lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 0 },
   };
 }
@@ -181,6 +184,10 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     if (atHostRoot) return q.service === "ls_color" && q.query.topic === "tm_color" && q.query.type === "color-admission" ? json(inst.deploys[op] ?? empty) : json({ status: "error", message: "Lookup service not supported" }, 400);
     // 0.21.0: the AMM lookup is `ls_amm_<tokenId>`; a plain `ls_amm` is no service here.
     const ammService = q.service === `ls_amm_${String(q.query.tokenId)}`;
+    if (ammService && typeof q.query.lpPubKey === "string") {
+      const k = q.query.lpPubKey;
+      return json({ type: "freeform", result: inst.lpFees[k] ?? { lpPubKey: k, root: null, sats: 0, tokens: 0, swaps: 0, current: null } });
+    }
     if (ammService && q.query.beef) return json({ type: "output-list", outputs: [{ beef: atomic(poolDeploy, [fund, tokenDeploy]), outputIndex: 0 }] });
     if (ammService) return json({ type: "freeform", result: inst.pools[String(q.query.tokenId)] ?? [] });
     if (q.service === `ls_color_${TOKEN}` && q.query.topic === TOPIC && q.query.assetId === TOKEN && q.query.version === 1) return json(inst.color[op] ?? empty);
@@ -438,6 +445,8 @@ describe("exchange.ts, wired", () => {
     connect({ pools: [row] });
     inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, spentBy: swap1.id("hex"), current: `${swap1.id("hex")}.0`, hops: 1, closed: false };
     inst.color[`${swap1.id("hex")}.0`] = { type: "output-list", outputs: [{ beef: atomic(swap1, [fund, tokenDeploy, poolDeploy]), outputIndex: 0 }] };
+    // 0.32.0: the LP fees by the pool's LpPubKey (the fixture swap: 20,000 sats in, 60 sats to the LP).
+    inst.lpFees[v.lp] = { lpPubKey: v.lp, root: `${pd}_0`, sats: 60, tokens: 0, swaps: 1, current: wirePool(swap1.id("hex"), v.pool1) };
     const ps = await myPositions();
     expect(ps).toEqual([
       {
@@ -448,14 +457,20 @@ describe("exchange.ts, wired", () => {
         sats: BigInt(v.pool1.bsv),
         tokens: BigInt(v.pool1.tokens),
         validator: { identityKey: SKEIN, live: true },
+        feesEarnedSats: 60n,
+        feesEarnedTokens: 0n,
       },
     ]);
+    expect(inst.lookups.filter((l) => l.service.startsWith("ls_amm")).map((l) => l.query)).toEqual([{ tokenId: TOKEN, lpPubKey: v.lp }]);
     expect(inst.lookups.filter((l) => l.service.startsWith("ls_color"))).toEqual([
       { url: `${ORIGIN}/@${TOKEN}/amm/lookup`, service: `ls_color_${TOKEN}`, query: { type: "color-spendability", version: 1, assetId: TOKEN, topic: TOPIC, outpoints: [`${swap1.id("hex")}.0`] } },
     ]);
-    // Closed: gone from the list; and a close of a position not held is refused.
+    // Closed (0.32.0): kept, marked closed, for its fees (its LpPubKey from the filed output's script); and a close of a position not held is refused.
     inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
-    expect(await myPositions()).toEqual([]);
+    inst.lpFees[v.lp] = { lpPubKey: v.lp, root: `${pd}_0`, sats: 60, tokens: 150, swaps: 2, current: null };
+    expect(await myPositions()).toEqual([
+      { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: 0n, tokens: 0n, validator: { identityKey: SKEIN, live: false }, closed: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
+    ]);
     await expect(closePosition({ outpoint: `${swap1.id("hex")}.0` })).rejects.toThrow(/No such position/);
   });
 
@@ -479,16 +494,16 @@ describe("exchange.ts, wired", () => {
     connect({ pools: [], actions: [deployAction] });
     inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, spentBy: swap1.id("hex"), current: `${swap1.id("hex")}.0`, hops: 1, closed: false };
     inst.color[`${swap1.id("hex")}.0`] = { type: "output-list", outputs: [{ beef: atomic(swap1, [fund, tokenDeploy, poolDeploy]), outputIndex: 0 }] };
-    const want = [{ outpoint: `${swap1.id("hex")}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true } }];
+    const want = [{ outpoint: `${swap1.id("hex")}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 0n, feesEarnedTokens: 0n }];
     expect(await myPositions()).toEqual(want);
     // A filed row (a Recover of the current output) beside the history's: one position.
     connect({ pools: [{ outpoint: `${swap1.id("hex")}.0`, satoshis: v.pool1.bsv, tags: ["amm-pool"], customInstructions: ci }], actions: [deployAction] });
     inst.spends[`${swap1.id("hex")}.0`] = { outpoint: `${swap1.id("hex")}.0`, current: `${swap1.id("hex")}.0`, hops: 0, closed: false };
     expect(await myPositions()).toEqual(want);
-    // Closed: gone, as for a filed row.
+    // Closed: no card (0.32.0: kept, marked closed, for its fees; this action's output names no LP keyID, so no LpPubKey: left out).
     connect({ pools: [], actions: [deployAction] });
     inst.spends[`${pd}.0`] = { outpoint: `${pd}.0`, hops: 2, closed: true };
-    expect(await myPositions()).toEqual([]);
+    expect((await myPositions()).filter((p) => !p.closed)).toEqual([]);
   });
 
   it("market terms (0.16.0): amm.swap.terms's minCommissionBps; swapPools lists the pools at or above it and counts the rest; quoteSwap plans over the listed ones only; no wallet, no minimum known, nothing hidden", async () => {

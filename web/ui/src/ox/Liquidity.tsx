@@ -21,6 +21,7 @@ import {
 } from "../data/exchange";
 import { fmtAmount, fmtPrice, fmtSats, parseInput } from "./format";
 import { followAmount, type DeploySource } from "./deployFill";
+import { feesByToken } from "../lp/positions";
 import { LiveDot, NeedWallet, Notice, TokenMark } from "./bits";
 import { routeHref } from "./route";
 
@@ -79,7 +80,9 @@ function PositionCard({ p, onClosed }: { p: Position; onClosed: (msg: string, tx
         {p.feesEarnedSats !== undefined && (
           <>
             <dt>Fees earned</dt>
-            <dd className="num">{fmtSats(p.feesEarnedSats)} sats</dd>
+            <dd className="num">
+              {fmtSats(p.feesEarnedSats)} sats · {fmtAmount(p.feesEarnedTokens ?? 0n, p.dec)} {p.sym}
+            </dd>
           </>
         )}
         <dt>Validator</dt>
@@ -314,6 +317,9 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
   const connected = session.status === "connected";
   const positions = useMyPositions(connected);
   const [closed, setClosed] = useState<{ msg: string; txid: string } | null>(null);
+  // 0.32.0: the cards are the live positions; the per-token fees line counts the closed ones too.
+  const live = positions.data?.filter((p) => !p.closed) ?? null;
+  const byToken = positions.data ? feesByToken(positions.data) : [];
   if (!connected) {
     return (
       <>
@@ -335,13 +341,22 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
           </Notice>
         )}
         {positions.error && <Notice kind="bad">Could not read your positions: {positions.error}</Notice>}
-        {positions.data === null ? (
+        {byToken.length > 0 && (
+          <div aria-label="Fees earned per token">
+            {byToken.map((t) => (
+              <p key={t.tokenId} className="fg2 small num">
+                {t.sym}: {t.positions} positions · fees earned {fmtSats(t.sats)} sats · {fmtAmount(t.tokens, t.dec)} {t.sym}
+              </p>
+            ))}
+          </div>
+        )}
+        {live === null ? (
           <p className="muted">Loading your positions…</p>
-        ) : positions.data.length === 0 ? (
+        ) : live.length === 0 ? (
           <p className="muted">You have no positions on this exchange.</p>
         ) : (
           <div className="cards">
-            {positions.data.map((p) => (
+            {live.map((p) => (
               <PositionCard key={p.outpoint} p={p} onClosed={(msg, txid) => setClosed({ msg, txid })} />
             ))}
           </div>

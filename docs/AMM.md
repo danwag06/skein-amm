@@ -383,6 +383,26 @@ its current output (each spender's output 0 while it is a pool — a
 Rescind's included; `closed` once a Close spent it). The current output's BEEF comes from BRC-207's
 `color-spendability` at `ls_color_<tokenId>` (0.20.1; `ls_color {txid, outputIndex}` before).
 
+
+## LP fees (0.32.0)
+
+Each Swap pays the LP fee as its own output to Hash160 of the pool's LpPubKey, in the input
+asset (sats on a sats-in Swap, a 1Color value output on a token-in Swap); nobody sweeps them
+yet and a Close leaves them on chain. `ls_amm_<assetId>` reports what a pool lineage earned:
+
+- `{tokenId, lpPubKey}` → `{lpPubKey, root, sats, tokens, swaps, current}` (freeform):
+  `root` the deploy's pool outpoint, `sats` and `tokens` the LP fees of sats-in and token-in
+  Swaps, `swaps` the Swaps counted, `current` the live pool or null once closed; a key with no
+  pool here: zeros, `root` and `current` null.
+- `{tokenId, outpoint}` → `{current, hops, fees: {sats, tokens, swaps}}`, the same totals
+  for that pool's lineage.
+
+Read at query time, nothing kept (programs/amm-lookup README, "Queries"): the lineage's deploy
+is the listed pool of that key that attests itself; the walk follows the spends as
+`{outpoint}` does; each Swap's LP fee output is found by src/pool.zig `lpFeeOf`, over the one
+`parseSwapCall` and `feeLayout` amm-p2p's relay checks a pair with. A rejected Swap is not in
+the lineage. The pages (Liquidity) ask per position's LpPubKey.
+
 ## Prices (0.9.0)
 
 David Case, 2026-10-09: "Pricing lives in the AMM LOOKUP's own beacon";
@@ -412,7 +432,7 @@ topic manager's beat carries no prices.
 | route | what |
 |---|---|
 | `POST /submit` | BRC-22 (`X-Topics` a registered topic): the request waits on the submission and answers the STEAK; 400 for a BEEF that does not verify or a rejected transaction; 503 + Retry-After while undecided (skein-overlay 0.9.1; 0.7.3–0.9.0 answered `{id}`) |
-| `POST /lookup` | BRC-24: `ls_amm_<assetId>` (0.21.0) `{tokenId}`, `{tokenId, outpoint, beef?}`, `{tokenId, validatorIdentityKey}` (listed pools only); a token instance's `ls_color_<assetId>`; the discovery instance's `ls_color` (skein-1color README; 0.20.0) |
+| `POST /lookup` | BRC-24: `ls_amm_<assetId>` (0.21.0) `{tokenId}`, `{tokenId, outpoint, beef?}` (0.32.0: plus `fees: {sats, tokens, swaps}`), `{tokenId, validatorIdentityKey}` (listed pools only), `{tokenId, lpPubKey}` (0.32.0: the LP fees, "LP fees" below); a token instance's `ls_color_<assetId>`; the discovery instance's `ls_color` (skein-1color README; 0.20.0) |
 | `GET /requests` | amm-p2p `requests` (0.9.0): the holders' listing requests not yet registered, newest first, `[{tokenId, from, at}]`; a read. The config app's in 0.17.0; removed in 0.19.0 |
 | `GET /spends?outpoint=<txid>.<vout>` | amm-p2p `spends` (0.9.0): the chain state of an outpoint, a pool followed to its current output, `{outpoint, spentBy?, current?, hops, closed}`; a read |
 | `GET /listTopicManagers`, `/listLookupServiceProviders`, `/getDocumentationFor…` | the listings (each program's `metadata` / `documentation`); reads since 0.5.0 |

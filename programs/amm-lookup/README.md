@@ -110,7 +110,8 @@ refused.
 - `{tokenId}`: every live pool of the token, a freeform list in the
   engine's `PoolState` shape plus `outpoint: "<txid>_<vout>"`.
 - `{tokenId, outpoint}`: that pool, or its newest continuation, `{current,
-  hops}`. From an outpoint that is not live, the walk follows the spends
+  hops, fees}` (`fees` 0.32.0: `{sats, tokens, swaps}` of the pool's
+  lineage, as `{tokenId, lpPubKey}` below). From an outpoint that is not live, the walk follows the spends
   forward: a hop is a checked pool this topic indexed and a spend consumed
   (`spentPools`), its spender is the chain state's (`spentBy`, the chain
   app's `chain/state`, read only), and the continuation is output 0 of the
@@ -122,6 +123,22 @@ refused.
   outpoint, whose BEEF the engine builds from the chain state.
 - `{tokenId, validatorIdentityKey}`: that validator's live pools of the
   token, via `byValidator`.
+- `{tokenId, lpPubKey}` (0.32.0): the LP fees the pool lineage of that
+  LpPubKey earned (one deploy and its Swap continuations; the key is constant
+  along it and unique per deploy), `{lpPubKey, root, sats, tokens, swaps,
+  current}`: `root` the deploy's pool outpoint, `sats` the fees of sats-in
+  Swaps, `tokens` those of token-in Swaps (in the token's units), `swaps` the
+  Swaps counted, `current` the live pool (`PoolState` shape) or null once the
+  LP's Close or the validator's Rescind ended it. Read at query time, nothing
+  kept: the deploy is the listed pool of that key (`pools` or `spentPools`)
+  whose output attests itself (`affirmed`, its transaction from the chain
+  state); the walk follows the spends as `{outpoint}` does, and each spender
+  whose output 0 is listed is a Swap whose LP fee output is read with
+  src/pool.zig `lpFeeOf` (the call `parseSwapCall`, the positions
+  `feeLayout`: the layout amm-p2p's relay checks a pair by). A rejected Swap
+  is not in the lineage (`rejected` drops it from the maps). A key with no
+  pool here answers zeros, `root` and `current` null. The fees stay on chain
+  at the LP's key; nobody sweeps them yet.
 
 ### The engine's `PoolState` shape
 

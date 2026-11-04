@@ -25,7 +25,7 @@
  */
 import { Transaction, Utils, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
 import { PoolTemplate, type Pool } from "../pool";
-import { lookup, parseOutputList, type LookupOutput, type SignedFetch } from "../lib/overlay";
+import { lookup, lpFeesOf, parseOutputList, type LpFees, type LookupOutput, type SignedFetch } from "../lib/overlay";
 import { readSpend, type Spend } from "../lib/skein";
 import { colorQuery, parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
@@ -49,6 +49,8 @@ export interface PositionRow {
   dec?: number;
   lpKey: LpKeyRef;
   validatorIdentity?: string;
+  /** 0.32.0: the pool's LpPubKey, from the filed output's script (the pool's state); what the LP fees are asked by. */
+  lpPubKey?: string;
 }
 
 /** The label a pool deploy (and a Recover) gives its action (src/lp/poolDeploy.ts). */
@@ -130,6 +132,7 @@ export function positionRowsOf(rows: BasketRow[]): PositionRow[] {
       };
       if (!Array.isArray(ci.protocolID) || typeof ci.keyID !== "string" || typeof ci.id !== "string") continue;
       const tid = parseOutpoint(ci.id.replace("_", "."));
+      const filed = r.lockingScript ? PoolTemplate.decode(r.lockingScript) : null;
       out.push({
         deployOutpoint: `${op.txid}.${op.vout}`,
         tokenId: tid ? tokenIdText(tid) : ci.id,
@@ -137,6 +140,7 @@ export function positionRowsOf(rows: BasketRow[]): PositionRow[] {
         ...(ci.dec !== undefined ? { dec: Number(ci.dec) } : {}),
         lpKey: { protocolID: ci.protocolID, keyID: ci.keyID, counterparty: typeof ci.counterparty === "string" ? ci.counterparty : "self" },
         ...(typeof ci.amm?.validatorIdentity === "string" ? { validatorIdentity: ci.amm.validatorIdentity } : {}),
+        ...(filed ? { lpPubKey: filed.state.lpPubKey } : {}),
       });
     } catch {
       /* skip */
@@ -185,4 +189,50 @@ export async function loadPosition(
   const pool = o ? PoolTemplate.decode(o.lockingScript) : null;
   if (!pool || !o) return out;
   return { ...out, output, pool, sats: BigInt(o.satoshis ?? 0) };
+}
+
+/**
+ * A position's LP fees (0.32.0): `ls_amm_<assetId>`'s `{tokenId, lpPubKey}` at the token's instance,
+ * the pool lineage of that LpPubKey (constant along it, one per deploy) totalled by the lookup.
+ * Null when the instance does not answer (an older lookup): the page then shows no fees line.
+ */
+export async function positionFees(
+  af: SignedFetch | null,
+  base: string,
+  tokenId: string,
+  lpPubKey: string,
+  feesOf: (lpPubKey: string) => Promise<LpFees> = (k) => lpFeesOf(af, base, tokenId, k),
+): Promise<{ sats: bigint; tokens: bigint } | null> {
+  try {
+    const f = await feesOf(lpPubKey);
+    return { sats: f.sats, tokens: f.tokens };
+  } catch {
+    return null;
+  }
+}
+
+/** One token's positions summed (0.32.0): the Liquidity page's line above the cards. */
+export interface TokenFees {
+  tokenId: string;
+  sym: string;
+  dec: number;
+  positions: number;
+  sats: bigint;
+  tokens: bigint;
+}
+
+/** Positions (live and closed) summed per token, in the order each token first appears; fees not told count as 0. */
+export function feesByToken(ps: { tokenId: string; sym: string; dec: number; feesEarnedSats?: bigint; feesEarnedTokens?: bigint }[]): TokenFees[] {
+  const by = new Map<string, TokenFees>();
+  for (const p of ps) {
+    let t = by.get(p.tokenId);
+    if (!t) {
+      t = { tokenId: p.tokenId, sym: p.sym, dec: p.dec, positions: 0, sats: 0n, tokens: 0n };
+      by.set(p.tokenId, t);
+    }
+    t.positions += 1;
+    t.sats += p.feesEarnedSats ?? 0n;
+    t.tokens += p.feesEarnedTokens ?? 0n;
+  }
+  return [...by.values()];
 }

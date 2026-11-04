@@ -305,6 +305,58 @@ test "pool: quoteSwap and payoutScript reproduce the fixtures' swaps (the contra
     try testing.expect(pool.feeOf(1, -1) == null);
 }
 
+test "pool (0.32.0): parseSwapCall, feeLayout and lpFeeOf read the fixtures' swaps — the LP fee output where the relay looks, in the input asset, to Hash160 of the LpPubKey" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try Fixtures.init(a);
+    const sw1 = f.txs.get(w.beef.txidOf(f.raws.get("swap_bsv_in").?)).?;
+    const sw2 = f.txs.get(w.beef.txidOf(f.raws.get("swap_tokens_in").?)).?;
+
+    // Sats in, 20,000 at 30/5/10 bps: LP 60 at output 2, validator 10 at 3, commission 20 at 4.
+    const call1 = (try pool.parseSwapCall(a, sw1.inputs[0].unlocking_script.bytes)).?;
+    try testing.expectEqual(@as(u64, 20_000), call1.amount_in);
+    try testing.expect(call1.bsv_in);
+    const cont1 = pool.poolOfScript(sw1.outputs[0].locking_script.bytes).?;
+    const l1 = try pool.feeLayout(call1, cont1);
+    try testing.expectEqual(@as(u64, 60), l1.lp_fee);
+    try testing.expectEqual(@as(?usize, 2), l1.lp_at);
+    try testing.expectEqual(@as(?usize, 3), l1.validator_at);
+    try testing.expectEqual(@as(?usize, 4), l1.commission_at);
+    try testing.expectEqual(@as(usize, 5), l1.end);
+    const fee1 = (try pool.lpFeeOf(a, sw1, 0)).?;
+    try testing.expectEqual(@as(u64, 60), fee1.amount);
+    try testing.expect(fee1.bsv_in);
+    try testing.expectEqualSlices(u8, &pool.p2pkh(bsvz.crypto.hash.hash160(&key33(vec.lp)).bytes), sw1.outputs[2].locking_script.bytes);
+
+    // Tokens in, 50,000: LP 150 tokens, a 1-sat token output.
+    const fee2 = (try pool.lpFeeOf(a, sw2, 0)).?;
+    try testing.expectEqual(@as(u64, 150), fee2.amount);
+    try testing.expect(!fee2.bsv_in);
+
+    // Not a Swap: a deploy has no call; a pool input that is not the call's; an LP output not the contract's.
+    const pd = f.txs.get(w.beef.txidOf(f.raws.get("pool_deploy").?)).?;
+    try testing.expect((try pool.lpFeeOf(a, pd, 0)) == null);
+    try testing.expect((try pool.lpFeeOf(a, sw1, 1)) == null);
+    try testing.expect((try pool.lpFeeOf(a, sw1, 9)) == null);
+    const outs = try a.dupe(bsvz.transaction.Output, sw1.outputs);
+    outs[2].satoshis += 1;
+    var bad = sw1;
+    bad.outputs = outs;
+    try testing.expect((try pool.lpFeeOf(a, bad, 0)) == null);
+
+    // A rate the contract's arithmetic is not defined for names itself.
+    var neg = cont1;
+    neg.validator_fee_bps = -1;
+    try testing.expectError(error.ValidatorFeeBps, pool.feeLayout(call1, neg));
+    // No LP fee: no LP output; the next fee moves up.
+    var free = cont1;
+    free.lp_fee_bps = 0;
+    const l0 = try pool.feeLayout(call1, free);
+    try testing.expectEqual(@as(?usize, null), l0.lp_at);
+    try testing.expectEqual(@as(?usize, 2), l0.validator_at);
+}
+
 test "pool: CommissionBps is read under the canonical-number rule" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

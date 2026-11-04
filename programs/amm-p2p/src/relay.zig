@@ -216,61 +216,11 @@ pub fn poolTerms(a: Allocator, identity: ?[]const u8, peer: ?[]const u8, t: ?ter
 
 pub const Refusal = struct { reason: []const u8, detail: ?[]const u8 = null };
 
-/// A swap's call to the pool, as Rúnar lays it out (amm-validator unlock.zig):
-/// `_codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-/// commissionPkh, _changePKH, _changeAmount, txPreimage, methodIndex`:
-/// pushes only.
-pub const SwapCall = struct {
-    amount_in: u64,
-    bsv_in: bool,
-    user_pkh: []const u8,
-    commission_pkh: []const u8,
-    change: u64,
-};
-
-pub const swap_pushes = 1 + 6 + 4;
-
-/// A script number push (minimal or not), non-negative, as a u64.
-fn numOf(p: brc162.Push) ?u64 {
-    return switch (p.op) {
-        brc162.OP_0 => 0,
-        brc162.OP_1...brc162.OP_16 => p.op - (brc162.OP_1 - 1),
-        0x01...0x09 => blk: {
-            // Rúnar writes minimal numbers; read any non-negative encoding.
-            const b = p.data;
-            if (b[b.len - 1] & 0x80 != 0) break :blk null;
-            if (b.len > 8 and b[8] != 0) break :blk null;
-            var v: u64 = 0;
-            for (b[0..@min(b.len, 8)], 0..) |x, i| v |= @as(u64, x) << @intCast(8 * i);
-            break :blk v;
-        },
-        else => null,
-    };
-}
-
-fn boolOf(p: brc162.Push) ?bool {
-    const n = numOf(p) orelse return null;
-    return n != 0;
-}
-
-pub fn parseSwapCall(a: Allocator, script: []const u8) !?SwapCall {
-    var pushes: std.ArrayList(brc162.Push) = .empty;
-    var pos: usize = 0;
-    while (pos < script.len) {
-        const p = brc162.readPush(script, pos) orelse return null;
-        try pushes.append(a, p);
-        pos = p.next;
-    }
-    if (pushes.items.len != swap_pushes) return null;
-    const arg = pushes.items[1..];
-    return .{
-        .amount_in = numOf(arg[2]) orelse return null,
-        .bsv_in = boolOf(arg[3]) orelse return null,
-        .user_pkh = arg[4].data,
-        .commission_pkh = arg[5].data,
-        .change = numOf(arg[7]) orelse return null,
-    };
-}
+/// A swap's call to the pool and its parser: src/pool.zig's (0.32.0: moved there so amm-lookup's
+/// LP fee totals read a swap as this check does).
+pub const SwapCall = pool.SwapCall;
+pub const swap_pushes = pool.swap_pushes;
+pub const parseSwapCall = pool.parseSwapCall;
 
 /// The validator's signature slot (the call's first argument) is `OP_0`.
 pub fn slotEmpty(script: []const u8) bool {
@@ -376,20 +326,22 @@ pub fn checkPair(a: Allocator, funding_bytes: []const u8, swap_bytes: []const u8
     if (tok.role != .value) return refused("bad_outputs", "output 0 is not a pool");
     const cont = (pool.parse(tok.lock) catch return refused("bad_outputs", "output 0: a malformed pool")) orelse return refused("bad_outputs", "output 0 is not a pool");
     if (!eql(u8, &cont.identity, validator)) return refused("wrong_validator", "the pool's ValidatorIdentity is another");
-    const lp_fee = pool.feeOf(call.amount_in, cont.lp_fee_bps) orelse return refused("bad_outputs", "lpFeeBps");
-    const val_fee = pool.feeOf(call.amount_in, cont.validator_fee_bps) orelse return refused("bad_outputs", "validatorFeeBps");
-    const com = pool.feeOf(call.amount_in, cont.commission_bps) orelse return refused("bad_outputs", "commissionBps");
-    var at: usize = 2 + @as(usize, @intFromBool(lp_fee > 0)) + @intFromBool(val_fee > 0);
-    if (at > swap.outputs.len) return refused("bad_outputs", "the fee outputs");
-    if (com > 0) {
+    // Where the fees go (src/pool.zig `feeLayout`, the one layout amm-lookup reads the LP's fee by).
+    const fl = pool.feeLayout(call, cont) catch |e| return refused("bad_outputs", switch (e) {
+        error.LpFeeBps => "lpFeeBps",
+        error.ValidatorFeeBps => "validatorFeeBps",
+        error.CommissionBps => "commissionBps",
+    });
+    const com = fl.commission;
+    if (fl.commission_at) |at| {
         // The commission: in the input asset, to the call's commissionPkh.
+        if (at > swap.outputs.len) return refused("bad_outputs", "the fee outputs");
         if (at >= swap.outputs.len) return refused("bad_outputs", "the commission: no output");
         const o = swap.outputs[at];
         const want = try pool.payoutScript(a, cont.asset_id, com, call.commission_pkh[0..20].*, call.bsv_in);
         if (o.satoshis != pool.payoutSats(com, call.bsv_in) or !eql(u8, o.locking_script.bytes, want)) return refused("bad_outputs", "the commission: not the contract's");
-        at += 1;
-    }
-    if (swap.outputs.len > at + @intFromBool(call.change > 0)) return refused("bad_outputs", "outputs past the contract's");
+    } else if (fl.end > swap.outputs.len) return refused("bad_outputs", "the fee outputs");
+    if (swap.outputs.len > fl.end + @intFromBool(call.change > 0)) return refused("bad_outputs", "outputs past the contract's");
 
     // Our commission: the swap pays it to us (none when the pool charges none).
     if (commission.pkh) |ours| if (com > 0 and !eql(u8, call.commission_pkh, &ours))
