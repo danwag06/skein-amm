@@ -1,6 +1,6 @@
 /**
- * The AMM Pool script template (pool/Pool.runar.go) over runar-sdk, from the
- * local Rúnar checkout (README.md, "runar-sdk from the local checkout").
+ * The AMM Pool script template (pool/Pool.runar.go) over runar-sdk, vendored in
+ * src/vendor/runar (README.md, "runar-sdk, vendored").
  * Independent of React.
  */
 export {

@@ -1,5 +1,16 @@
 # @amm-poc/market-ui
 
+**skein-amm 0.36.0: the client as packages** (agent-env plans/history-api-2026-11-05.md D8–D14;
+"The packages" below). `src/` minus the pages (`src/ox/`, `App.tsx`, `main.tsx`,
+`src/data/exchange.ts`, `components/`, `wallet/AppWalletProvider.tsx`, fonts, styles) is the
+package `@dcasegr/amm-client` (`../client`), the engine `@dcasegr/amm-engine` (`../engine`).
+`createClient({origin, feeRateSatsPerKb, wallet, fetch})` (`src/client.ts`) binds every read and
+flow; the pages hold one (`src/data/exchange.ts`) with the values `src/ox/env.ts` takes from
+their URL and env, nothing in the package reads `import.meta.env` or `location`. New: swap
+progress by `onProgress`, `ClientError` kinds (`src/errors.ts`), `rebalancePosition` (one wallet
+createAction: `src/lp/rebalance.ts`), `x-topics` always the BRC-22 JSON array. runar-sdk is
+vendored (`src/vendor/runar`, "runar-sdk, vendored"). The pages' behaviour is unchanged.
+
 **skein-amm 0.34.0: the public read API** (agent-env plans/exchange-api-2026-11-04.md D1–D25;
 docs/AMM.md "The public read API"; `src/lib/overlay.ts` carries the route table). Every read is a
 plain GET; the pages send `/lookup` nowhere and read no `.live/` beats (`test/overlay.test.ts`
@@ -349,7 +360,8 @@ pages' sections below.
 ## Configuration (env)
 
 Vite reads these at build / dev-server start (a local `.env.local`,
-untracked, or the environment):
+untracked, or the environment); `src/ox/env.ts` reads them for the pages and passes the base
+and the fee rate to `createClient` (0.36.0: the client package reads no env):
 
 | variable | default | what |
 |---|---|---|
@@ -469,7 +481,8 @@ npm run typecheck
 
 ## The instance (config)
 
-`src/lib/config.ts`: every request the page makes goes to one skein instance,
+`src/lib/config.ts` (0.36.0: pure; the pages' values from `src/ox/env.ts`): every request the
+page makes goes to one skein instance,
 the AMM app's base URL (the page's own directory, else `VITE_AMM_OVERLAY`),
 or to the connected BRC-100 wallet. Under that
 base: `GET listTopicManagers`, `GET listLookupServiceProviders`, `POST lookup`
@@ -697,7 +710,7 @@ public/
   manifest.json        W3C manifest + metanet.groupPermissions ("Permissions")
 src/
   lib/
-    config.ts          VITE_AMM_OVERLAY / VITE_AMM_PEER_OVERLAY / VITE_FEE_RATE
+    config.ts          appBaseOf / exchangeBase / tokenBase / the default fee rate (pure; 0.36.0)
     overlay.ts         the public read API's client (0.34.0): pools routes and their stream, /pools/beef, /positions, /terms, /spends, /tx, /swaps, discovery's /tokens and /<token>/deploy; topic names
     keys.ts             validator signing-key derivation (BRC-43, "amm pool", anyone counterparty)
   pool/
@@ -1210,38 +1223,39 @@ aff025c3 worktree of 0.8.0–0.11.0) is gone. `@1sat/actions` lazily imports
 `xdelta3-wasm`, whose `package.json` names a missing `module` file;
 `vite.config.ts` aliases it to the file that exists.
 
-## runar-sdk from the local checkout
+## runar-sdk, vendored
 
-`runar-sdk` is bundled straight from the Rúnar checkout's TypeScript sources,
-`../../../../bsv/runar` from here (`~/Work/bsv/runar`; the committed `www/`
-was built with d207ee8e, the commit go.mod pins for the Go side); set
-`RUNAR_DIR` to point elsewhere. Nothing is copied and
-nothing needs building: no `pnpm`, no `dist/`. The wiring:
+0.36.0: `runar-sdk` is a vendored copy in `src/vendor/runar` (MIT, `LICENSE` and `NOTICE`
+there): the modules runar-sdk's `contract.ts`, `state.ts` and `script-utils.ts` import, and the
+eight `runar-ir-schema` modules its barrel re-exports, from the Rúnar commit go.mod pins for the
+Go side (d207ee8e). Copied unchanged except two import lines (`NOTICE`): their `runar-ir-schema`
+import names `src/pool/runar-ir-schema.ts` (that package's barrel without its Ajv validators,
+which read JSON schemas from disk at import time and cannot run in a browser; runar-sdk never
+calls them), and `anf-interpreter.ts` takes `ECDSA.verify` from `@bsv/sdk`'s root (@bsv/sdk 4's
+package exports do not name `@bsv/sdk/primitives/ECDSA`). `src/vendor/runar/runar-sdk.ts`
+re-exports the names `src/pool` uses. No alias, no checkout, no `RUNAR_DIR`.
 
-- `vite.config.ts` aliases `runar-sdk` to
-  `$RUNAR_DIR/packages/runar-sdk/src/index.ts`, and `@runar-src/*` to
-  `$RUNAR_DIR/packages/*`; `resolve.dedupe: ["@bsv/sdk"]` resolves the SDK's
-  own `@bsv/sdk` imports from this package (the checkout has no
-  `node_modules`). vitest uses the same config.
-- `runar-ir-schema` is aliased to `src/pool/runar-ir-schema.ts`, which
-  re-exports that package's sources except `validators.ts`: its barrel
-  imports `ajv` and reads JSON schemas from disk at import time
-  (`node:fs`, `fileURLToPath(import.meta.url)`), which cannot run in a
-  browser. runar-sdk never calls the validators.
-- `tsconfig.json` `paths` mirror the aliases for `tsc` (with the fixed
-  relative path), and map `@bsv/sdk` to this package's copy. The checkout's
-  sources use `Buffer`, so `@types/node` is a dev dependency.
+Why vendored: the runar-sdk these pages were built with (1.0.0-rc.1) is not published (npm has
+0.4.6, on @bsv/sdk 2), and its `package.json` names `runar-ir-schema` with pnpm's
+`workspace:*`, which npm cannot install. Until 0.35.x the pages bundled it from a local Rúnar
+checkout (`RUNAR_DIR`, default `~/Work/bsv/runar`), which a published package cannot.
 
-Why not a `file:` dependency: runar-sdk's `package.json` depends on
-`runar-ir-schema` with pnpm's `workspace:*`, which npm cannot install, and
-the built `dist/` would still pull in the same node-only validators.
-Packaging as an SDK is a later cleanup.
+## The packages
 
-Checked: `npm run build`, `npm test`, `npm run typecheck`, and a library-mode
-`vite build` of `src/pool/index.ts` alone (a self-contained ES bundle with no
-`node:` imports, whose `PoolTemplate.decode`/`lockDeploy` run against the
-fixtures). The app does not import `PoolTemplate` yet, so today's `dist/`
-tree-shakes it out.
+0.36.0 (D8–D14): two npm packages, ESM + `.d.ts` built by `tsc` (no bundler), versioned with the
+skein-amm release; David publishes them.
+
+| package | directory | what |
+|---|---|---|
+| `@dcasegr/amm-engine` | `../engine` | the matching engine (`plan`, `replan`, `computeSwap`, …); no dependencies |
+| `@dcasegr/amm-client` | `../client` (its build compiles `src/index.ts` here into `../client/dist`) | `createClient`, the shared names, the error kinds; depends on the engine, `@1sat/actions`, `cbor2`; peers `@bsv/sdk`, `@1sat/templates`, `@bsv/color-permission-module` |
+
+The repo keeps one copy of every file: the pages import `src/` directly and the engine as
+`@dcasegr/amm-engine` from `../engine/src` (vite alias and tsconfig `paths`), the same source
+the packages are built from. Relative imports under `src/` name `.js` (the built package runs
+under node). `../client`'s build uses this directory's `node_modules` (TypeScript, the
+dependencies' types): `npm ci` here and in `../engine` first, then `npm pack` in `../engine` and
+`../client` (each runs its build). See `../client/README.md`.
 
 ## `src/pool`: the Pool script template
 
