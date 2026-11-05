@@ -11,10 +11,13 @@
  *
  * - **The token list** (`GET <swap>/tokens`): read ONCE per client (D4; `enabledList`), again
  *   only after its own enable or disable changed it.
- * - **Prices** (D6, D22): the host-wide pools route `GET <origin>/amm/pools` (`hostedTokens`,
- *   `watchHostedPools`); a token's price is Σsats / Σtokens over its listed pools.
+ * - **Prices** (0.39.0, D3, D7): ONE read of the host-wide stats `GET <origin>/amm/stats`
+ *   (`hostedTokens`): each token's price, liquidity (TVL) and pool count; no host-wide stream.
+ * - **History** (0.39.0, D1–D6): `trades`, `trade`, `candles`, `stats`, `statsAll`, `holders`,
+ *   `positionsAll` — plain GETs of the history routes (H1–H6, src/lib/overlay.ts).
  * - **Swap** (D11–D16): the token's pools route `GET /@<token>/amm/pools` held as an event stream
- *   (`watchTokenPools`): the pools whose validator is beating and whose commission meets the
+ *   (`watchTokenPools`; 0.39.0, D7: the whole answer once, then one `change` per pool change,
+ *   applied to the held answer): the pools whose validator is beating and whose commission meets the
  *   market's minimum (the host's filter), the market's commission key hash; a quote is the
  *   matching engine's plan over that list (no request); a swap reads ONE `GET
  *   /@<token>/amm/pools/beef?lp=` for its legs (freshness, the pools' BEEF), then each leg's relay
@@ -44,8 +47,8 @@ import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } fr
 import { DEFAULT_FEE_RATE_SATS_PER_KB, appName, exchangeBase, tokenBase } from "./lib/config.js";
 import {
   ammLookupService,
+  applyPoolChange,
   liveOfPools,
-  parseAllPools,
   parsePools,
   parseTokenTopic,
   poolOutputOf,
@@ -53,13 +56,27 @@ import {
   readDiscoveryDeploy,
   readDiscoveryIds,
   readDiscoveryList,
+  readAllPositions,
+  readAllStats,
+  readCandles,
+  readHolders,
   readPoolsBeef,
   readPools,
   readPositions,
+  readStats,
   readTerms,
+  readTrade,
+  readTrades,
   readTx,
   watchPools,
+  type Candle,
+  type CandleTf,
   type DiscoveryRow,
+  type Holders,
+  type TokenPosition,
+  type TokenStats,
+  type Trade,
+  type TradesPage,
   type InstanceTerms,
   type LiveAnswer,
   type LpPool,
@@ -328,7 +345,9 @@ export interface RegisteredToken {
   status: EnabledToken["status"];
 }
 
-export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer };
+export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer, Candle, CandleTf, Holders, TokenPosition, TokenStats, Trade, TradesPage };
+export type { PoolChange, Price } from "./lib/overlay.js";
+export { applyPoolChange, parseChange } from "./lib/overlay.js";
 
 /** A token's symbol, decimals and icon, read off its deploy output. */
 export interface DeployMeta {
@@ -370,27 +389,29 @@ export interface ClaimStatus {
 }
 
 /**
- * The hosted tokens (the enabled 1Color tokens at output 0), each priced from its rows of the
- * host-wide pools route (D6, D22: P1, the pools whose validator is beating): Σsats / Σtokens.
- * `rows` null: not read yet (no prices). Pure.
+ * The hosted tokens (the enabled 1Color tokens at output 0), each with its record of the host-wide
+ * stats (0.39.0, D3, D7: H4): the price (`price`, sats per whole token), the liquidity (`tvlSats`,
+ * `tvlTokens`) and the pool count. `stats` null: not read yet (no prices); a token the stats lack:
+ * no price, no pools. Pure.
  */
-export function hostedFrom(list: EnabledToken[], rows: PoolRow[] | null): HostedToken[] {
+export function hostedFrom(list: EnabledToken[], stats: TokenStats[] | null): HostedToken[] {
   const out: HostedToken[] = [];
   for (const t of list) {
     if (t.status !== "enabled") continue;
     const topic = parseTokenTopic(t.topic);
     if (!topic || topic.kind !== "native") continue;
-    const mine = (rows ?? []).filter((r) => r.tokenId !== undefined && canonicalId(r.tokenId) === t.tokenId);
-    const sats = mine.reduce((a, p) => a + p.bsvReserve, 0n);
-    const tokens = mine.reduce((a, p) => a + p.tokenReserve, 0n);
+    const st = (stats ?? []).find((r) => canonicalId(r.tokenId) === t.tokenId);
+    const sats = st?.tvlSats ?? 0n;
+    const tokens = st?.tvlTokens ?? 0n;
+    const price = st?.price ?? null;
     out.push({
       tokenId: t.tokenId,
       sym: t.sym || t.tokenId.slice(0, 8),
       dec: t.dec,
       ...(t.icon ? { icon: t.icon } : {}),
-      marginalPrice: tokens > 0n ? Number(sats) / (Number(tokens) / 10 ** t.dec) : null,
+      marginalPrice: price && price.tokens > 0n ? Number(price.sats) / (Number(price.tokens) / 10 ** t.dec) : null,
       depth: depthOf(sats),
-      pools: mine.length,
+      pools: st?.pools ?? 0,
       reserves: { sats, tokens },
     });
   }
@@ -839,26 +860,56 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return root;
   }
 
-  /** The tokens this exchange hosts, priced: the token list (once) and ONE read of the host-wide pools route. No wallet needed. */
+  /** The tokens this exchange hosts, priced: the token list (once) and ONE read of the host-wide stats (0.39.0, H4). No wallet needed. */
   async function hostedTokens(): Promise<HostedToken[]> {
-    const [list, rows] = await Promise.all([enabledList(), readAllPools().catch(() => null)]);
-    return hostedFrom(list, rows);
+    const [list, stats] = await Promise.all([enabledList(), statsAll().catch(() => null)]);
+    return hostedFrom(list, stats);
   }
 
-  async function readAllPools(): Promise<PoolRow[]> {
-    const res = await f(poolsUrl(swapBase), { headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(`GET ${poolsUrl(swapBase)}: ${res.status}`);
-    return parseAllPools(await res.json());
-  }
-
-  /** The host-wide pools route held as an event stream (D22: one connection): each answer's rows to `onRows`; `onLive` the connection's state. → the unsubscribe. */
-  function watchHostedPools(onRows: (rows: PoolRow[]) => void, onLive?: (live: boolean) => void): () => void {
-    return watchPools(poolsUrl(swapBase), parseAllPools, onRows, { onError: () => onLive?.(false), onOpen: () => onLive?.(true), fetch: f });
-  }
-
-  /** A token's pools route held as an event stream (D16): each answer to `onAnswer`. → the unsubscribe. */
+  /**
+   * A token's pools route held as an event stream (D16; 0.39.0, D7): the whole answer (`pools`)
+   * held, each `change` applied to it (`applyPoolChange`), one it cannot apply → the route read once
+   * again; each new answer to `onAnswer`. → the unsubscribe.
+   */
   function watchTokenPools(tokenId: TokenId, onAnswer: (a: PoolsAnswer) => void, onError?: (e: unknown) => void): () => void {
-    return watchPools(poolsUrl(tokenBase(tokenId, swapBase)), parsePools, onAnswer, { ...(onError ? { onError } : {}), fetch: f });
+    return watchPools(poolsUrl(tokenBase(tokenId, swapBase)), parsePools, onAnswer, { ...(onError ? { onError } : {}), fetch: f, change: applyPoolChange });
+  }
+
+  // ---------------------------------------------------------------- history (0.39.0, H1–H6)
+
+  /** H1: a token's trades, newest first (`from ≤ at < to` ms, `limit` 1–500, `before` the cursor `next`, `lp` one LP key's). */
+  async function trades(tokenId: TokenId, o: { from?: number; to?: number; limit?: number; before?: string; lp?: string } = {}): Promise<TradesPage> {
+    return readTrades(tokenBase(tokenId, swapBase), o, ff);
+  }
+
+  /** H1 with `txid`: one Swap's trade row, null when it has none. */
+  async function trade(tokenId: TokenId, txid: string): Promise<Trade | null> {
+    return readTrade(tokenBase(tokenId, swapBase), txid, ff);
+  }
+
+  /** H2: a token's candles, one per non-empty bucket of `tf` over `from ≤ at < to` (ms). */
+  async function candles(tokenId: TokenId, o: { tf: CandleTf; from: number; to: number }): Promise<Candle[]> {
+    return readCandles(tokenBase(tokenId, swapBase), o, ff);
+  }
+
+  /** H3: a token's stats. */
+  async function stats(tokenId: TokenId): Promise<TokenStats> {
+    return readStats(tokenBase(tokenId, swapBase), ff);
+  }
+
+  /** H4: every enabled token's stats (`ids`: those only, in that order). */
+  async function statsAll(o: { ids?: TokenId[] } = {}): Promise<TokenStats[]> {
+    return readAllStats(swapBase, o.ids, ff);
+  }
+
+  /** H6: a token's holders, largest first (`limit` 1–100, `skip`). */
+  async function holders(tokenId: TokenId, o: { limit?: number; skip?: number } = {}): Promise<Holders> {
+    return readHolders(tokenBase(tokenId, swapBase), tokenId, o, ff);
+  }
+
+  /** H5: the LP keys' positions on every enabled token. */
+  async function positionsAll(lpKeys: string[]): Promise<TokenPosition[]> {
+    return readAllPositions(swapBase, lpKeys, ff);
   }
 
 
@@ -1659,8 +1710,15 @@ function makeClient(opts: ClientOptions, s: Shared) {
     isRoot,
     claimExchange: guard(claimExchange),
     hostedTokens: guard(hostedTokens),
-    watchHostedPools,
     watchTokenPools,
+    // history (0.39.0)
+    trades: guard(trades),
+    trade: guard(trade),
+    candles: guard(candles),
+    stats: guard(stats),
+    statsAll: guard(statsAll),
+    holders: guard(holders),
+    positionsAll: guard(positionsAll),
     registeredTokens: guard(registeredTokens),
     // swap
     quoteSwap,

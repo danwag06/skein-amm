@@ -25,6 +25,16 @@
  * | P15 | `GET /@discovery/1color/<token>/icon` | the icon's bytes |
  * | P16 | `GET /@discovery/1color/<token>/deploy` | the deploy's BEEF (bytes) |
  * | P17 | `GET <origin>/.well-known/skein`, `/skeins?key=`, `/amm/admin`, `/amm/defaults`, `/amm/discovery` | as before |
+ * | H1 | `GET /@<token>/amm/trades?from=&to=&limit=&before=&lp=` (or `?txid=`) | `{trades: [Trade], next}` newest first (one txid: the row) |
+ * | H2 | `GET /@<token>/amm/candles?tf=&from=&to=` | `[{t, o, h, l, c, volumeSats, volumeTokens, n}]`, one per non-empty bucket |
+ * | H3 | `GET /@<token>/amm/stats` | `{tokenId, price, change1h, change24h, volume24hSats, volume24hTokens, buys24h, sells24h, lastTradeAt, tvlSats, tvlTokens, pools}` |
+ * | H4 | `GET <origin>/amm/stats?ids=` | `[H3]`, every enabled token's (the host's) |
+ * | H5 | `GET <origin>/amm/positions?lp=` | `[{tokenId, …P4 row}]`, every enabled token's (the host's) |
+ * | H6 | `GET /@<token>/amm/color/<token>/holders?limit=&skip=` | `{count, rows: [{address, balance}]}` largest first |
+ *
+ * 0.39.0 (agent-env plans/history-api-2026-11-05.md D7): P2's stream sends the whole answer once
+ * (`pools`), then ONE `change` per pool change (`{kind, outpoint, pool?, trade?}`); the host-wide
+ * stream is gone (P1, H4 and H5 are plain reads).
  *
  * Writes stay what they were: `POST <origin>/submit` (BRC-22, plain), `/call` and `/sendMessage`
  * (signed, the wallet's BRC-104 client).
@@ -251,16 +261,21 @@ function eventSourceCtor(): EventSourceCtor | null {
 }
 
 /**
- * Holds a pools route (P1 or P2) as an event stream (D16, D22): `GET <url>` with `Accept:
- * text/event-stream` (the browser's EventSource sends it), the event `pools` carrying the answer,
- * first the current one, then again each time it changes; `onAnswer` gets each. Without an
- * EventSource (an old browser, a test): ONE plain GET, no poll. → the unsubscribe.
+ * Holds a pools route as an event stream (D16; 0.39.0, D7): `GET <url>` with `Accept:
+ * text/event-stream` (the browser's EventSource sends it). The event `pools` carries the whole
+ * answer (first the current one; again when the host cannot say what changed): it replaces the held
+ * answer. With `change` (P2), the event `change` carries one pool change: `change(held, x)` applies
+ * it to the held answer (null: it cannot); one it cannot apply (no answer held yet, an unknown
+ * kind, a row it names not held) → the route is read again ONCE (a plain GET) and that answer is
+ * held (changes arriving while it is read are dropped: the answer read is the newer state). Each
+ * new held answer goes to `onAnswer`. Without an EventSource (an old browser, a test): ONE plain
+ * GET, no poll. → the unsubscribe.
  */
 export function watchPools<T>(
   url: string,
   parse: (x: unknown) => T,
   onAnswer: (a: T) => void,
-  o: { onError?: (e: unknown) => void; onOpen?: () => void; EventSource?: EventSourceCtor | null; fetch?: FetchFn } = {},
+  o: { onError?: (e: unknown) => void; onOpen?: () => void; EventSource?: EventSourceCtor | null; fetch?: FetchFn; change?: (held: T, x: unknown) => T | null } = {},
 ): () => void {
   const ES = o.EventSource === undefined ? eventSourceCtor() : o.EventSource;
   let stopped = false;
@@ -277,15 +292,48 @@ export function watchPools<T>(
       stopped = true;
     };
   }
+  let held: T | null = null;
+  let rereading = false;
+  const hold = (a: T) => {
+    held = a;
+    onAnswer(a);
+  };
+  const reread = () => {
+    rereading = true;
+    getJson(url, o.fetch).then(
+      (x) => {
+        rereading = false;
+        if (!stopped) hold(parse(x));
+      },
+      (e: unknown) => {
+        rereading = false;
+        if (!stopped) o.onError?.(e);
+      },
+    );
+  };
   const es = new ES(url);
   es.addEventListener("pools", (e) => {
     if (stopped) return;
     try {
-      onAnswer(parse(JSON.parse(String(e.data))));
+      hold(parse(JSON.parse(String(e.data))));
     } catch (err) {
       o.onError?.(err);
     }
   });
+  const apply = o.change;
+  if (apply) {
+    es.addEventListener("change", (e) => {
+      if (stopped || rereading) return;
+      let next: T | null = null;
+      try {
+        next = held === null ? null : apply(held, JSON.parse(String(e.data)));
+      } catch {
+        next = null;
+      }
+      if (next === null) reread();
+      else hold(next);
+    });
+  }
   es.onopen = () => o.onOpen?.();
   es.onerror = (e) => o.onError?.(e);
   return () => {
@@ -475,4 +523,262 @@ export async function readDiscoveryList(discovery: string, fetchFn?: FetchFn): P
 /** P16: `GET <discovery>/<token>/deploy`: the deploy's BEEF; null when discovery does not hold it. */
 export async function readDiscoveryDeploy(discovery: string, tokenId: string, fetchFn?: FetchFn): Promise<number[] | null> {
   return getBytes(`${trim(discovery)}/${encodeURIComponent(tokenId)}/deploy`, fetchFn);
+}
+
+// ---------------------------------------------------------------------------
+// History, stats, holders (0.39.0; agent-env plans/history-api-2026-11-05.md D1–D7)
+// ---------------------------------------------------------------------------
+
+/** A price, exact (H1–H4): `sats` satoshis per `tokens` token base units (divide in the caller). */
+export interface Price {
+  sats: bigint;
+  tokens: bigint;
+}
+
+/** A Swap's trade row (H1; the `swap` change's `trade`): amounts in base units, fees in the input asset, the pool's reserves after it. */
+export interface Trade {
+  txid: string;
+  lpPubKey: string;
+  /** `buy`: sats in, tokens out; `sell`: tokens in. */
+  side: "buy" | "sell";
+  amountIn: bigint;
+  amountOut: bigint;
+  feeLp: bigint;
+  feeValidator: bigint;
+  feeCommission: bigint;
+  bsvReserve: bigint;
+  tokenReserve: bigint;
+  /** The admitting step's time, ms. */
+  at: number;
+  /** The block height where the overlay has the transaction placed, else null. */
+  height: number | null;
+}
+
+/** H1's page: the trades newest first, `next` the cursor of the page after (null: the last page). */
+export interface TradesPage {
+  trades: Trade[];
+  next: string | null;
+}
+
+/** One non-empty bucket (H2): its start (ms), the first, highest, lowest and last trade's prices, each side's amounts summed, the trade count. */
+export interface Candle {
+  t: number;
+  o: Price;
+  h: Price;
+  l: Price;
+  c: Price;
+  volumeSats: bigint;
+  volumeTokens: bigint;
+  n: number;
+}
+
+/** A candle's resolution (H2). */
+export type CandleTf = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
+
+/** A token at the read's time (H3, H4): the changes in bps (null without a trade at or before the window's start). */
+export interface TokenStats {
+  tokenId: string;
+  /** The last trade's, else the deepest live pool's, else null. */
+  price: Price | null;
+  change1h: number | null;
+  change24h: number | null;
+  volume24hSats: bigint;
+  volume24hTokens: bigint;
+  buys24h: number;
+  sells24h: number;
+  lastTradeAt: number | null;
+  tvlSats: bigint;
+  tvlTokens: bigint;
+  pools: number;
+}
+
+/** A token's holders (H6): `count` the addresses with a balance, `rows` largest balance first. */
+export interface Holders {
+  count: number;
+  rows: { address: string; balance: bigint }[];
+}
+
+/** One LP key's position on one token (H5): P4's record with its token. */
+export interface TokenPosition extends LpPool {
+  tokenId: string;
+}
+
+/** One pool change on P2's stream (event `change`, D7). */
+export interface PoolChange {
+  kind: "deploy" | "swap" | "close" | "rescind";
+  /** The new pool output (deploy, swap) or the one gone (close, rescind). */
+  outpoint: string;
+  /** deploy, swap: the pool's row. */
+  pool?: PoolRow;
+  /** swap: its trade row. */
+  trade?: Trade;
+}
+
+const intOrNull = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
+const int = (x: unknown): number => intOrNull(x) ?? 0;
+
+function toPrice(x: unknown): Price | null {
+  const p = x as Record<string, unknown> | null;
+  if (!p || typeof p !== "object" || p.sats === undefined || p.tokens === undefined) return null;
+  return { sats: wireBig(p.sats), tokens: wireBig(p.tokens) };
+}
+
+/** A trade row, or null when it is not one. */
+export function toTrade(x: unknown): Trade | null {
+  const r = x as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.txid !== "string" || typeof r.lpPubKey !== "string" || (r.side !== "buy" && r.side !== "sell")) return null;
+  return {
+    txid: r.txid.toLowerCase(),
+    lpPubKey: r.lpPubKey.toLowerCase(),
+    side: r.side,
+    amountIn: wireBig(r.amountIn),
+    amountOut: wireBig(r.amountOut),
+    feeLp: wireBig(r.feeLp),
+    feeValidator: wireBig(r.feeValidator),
+    feeCommission: wireBig(r.feeCommission),
+    bsvReserve: wireBig(r.bsvReserve),
+    tokenReserve: wireBig(r.tokenReserve),
+    at: int(r.at),
+    height: intOrNull(r.height),
+  };
+}
+
+function toCandle(x: unknown): Candle | null {
+  const r = x as Record<string, unknown> | null;
+  if (!r || typeof r !== "object") return null;
+  const [o, h, l, c] = [toPrice(r.o), toPrice(r.h), toPrice(r.l), toPrice(r.c)];
+  if (!o || !h || !l || !c || typeof r.t !== "number") return null;
+  return { t: r.t, o, h, l, c, volumeSats: wireBig(r.volumeSats), volumeTokens: wireBig(r.volumeTokens), n: int(r.n) };
+}
+
+/** A stats record (H3), or null when it is not one. */
+export function toStats(x: unknown): TokenStats | null {
+  const r = x as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.tokenId !== "string") return null;
+  return {
+    tokenId: r.tokenId,
+    price: toPrice(r.price),
+    change1h: intOrNull(r.change1h),
+    change24h: intOrNull(r.change24h),
+    volume24hSats: wireBig(r.volume24hSats),
+    volume24hTokens: wireBig(r.volume24hTokens),
+    buys24h: int(r.buys24h),
+    sells24h: int(r.sells24h),
+    lastTradeAt: intOrNull(r.lastTradeAt),
+    tvlSats: wireBig(r.tvlSats),
+    tvlTokens: wireBig(r.tvlTokens),
+    pools: int(r.pools),
+  };
+}
+
+/** A `change` event's data, or null when it is not one this client knows. */
+export function parseChange(x: unknown): PoolChange | null {
+  const r = x as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.outpoint !== "string") return null;
+  if (r.kind !== "deploy" && r.kind !== "swap" && r.kind !== "close" && r.kind !== "rescind") return null;
+  const pool = r.pool === undefined ? null : toPoolRow(r.pool);
+  const trade = r.trade === undefined ? null : toTrade(r.trade);
+  return { kind: r.kind, outpoint: r.outpoint, ...(pool ? { pool } : {}), ...(trade ? { trade } : {}) };
+}
+
+const sameOutpoint = (a: string, b: string) => a.toLowerCase().replace(".", "_") === b.toLowerCase().replace(".", "_");
+
+/**
+ * One `change` applied to a held P2 answer (D7) → the new answer, or null when it cannot be applied
+ * (the caller reads the route again): `swap` — the row of `trade.lpPubKey` replaced by `pool` (its
+ * outpoint moved); `deploy` — `pool` added; `close` / `rescind` — the row at `outpoint` removed.
+ * The market and the validators are kept (a change of either comes as a whole `pools` answer).
+ */
+export function applyPoolChange(held: PoolsAnswer, x: unknown): PoolsAnswer | null {
+  const ch = parseChange(x);
+  if (!ch) return null;
+  switch (ch.kind) {
+    case "swap": {
+      if (!ch.pool || !ch.trade) return null;
+      const i = held.pools.findIndex((p) => p.lpPubKey === ch.trade!.lpPubKey);
+      if (i < 0) return null;
+      const pools = held.pools.slice();
+      pools[i] = ch.pool;
+      return { ...held, pools };
+    }
+    case "deploy":
+      if (!ch.pool) return null;
+      return { ...held, pools: [...held.pools, ch.pool] };
+    case "close":
+    case "rescind": {
+      const pools = held.pools.filter((p) => !sameOutpoint(p.outpoint, ch.outpoint));
+      if (pools.length === held.pools.length) return null;
+      return { ...held, pools };
+    }
+  }
+}
+
+const query = (q: Record<string, string | number | undefined>) => {
+  const kv = Object.entries(q).filter(([, x]) => x !== undefined).map(([k, x]) => `${k}=${encodeURIComponent(String(x))}`);
+  return kv.length ? `?${kv.join("&")}` : "";
+};
+
+/** H1: `GET <base>/trades?from=&to=&limit=&before=&lp=` → the page, newest first. */
+export async function readTrades(base: string, o: { from?: number; to?: number; limit?: number; before?: string; lp?: string } = {}, fetchFn?: FetchFn): Promise<TradesPage> {
+  const a = (await getJson(`${trim(base)}/trades${query({ from: o.from, to: o.to, limit: o.limit, before: o.before, lp: o.lp })}`, fetchFn)) as { trades?: unknown; next?: unknown } | null;
+  return {
+    trades: (Array.isArray(a?.trades) ? a!.trades : []).map(toTrade).filter((t): t is Trade => t !== null),
+    next: typeof a?.next === "string" ? a.next : null,
+  };
+}
+
+/** H1 with `txid`: one Swap's trade row; null when the transaction has none (404). */
+export async function readTrade(base: string, txid: string, fetchFn?: FetchFn): Promise<Trade | null> {
+  const url = `${trim(base)}/trades?txid=${encodeURIComponent(txid)}`;
+  const res = await (fetchFn ?? plain)(url, { headers: { accept: "application/json" } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GET ${url}: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  return toTrade(await res.json());
+}
+
+/** H2: `GET <base>/candles?tf=&from=&to=` → one candle per non-empty bucket, oldest first. */
+export async function readCandles(base: string, o: { tf: CandleTf; from: number; to: number }, fetchFn?: FetchFn): Promise<Candle[]> {
+  const a = await getJson(`${trim(base)}/candles${query({ tf: o.tf, from: o.from, to: o.to })}`, fetchFn);
+  return (Array.isArray(a) ? a : []).map(toCandle).filter((c): c is Candle => c !== null);
+}
+
+/** H3: `GET <base>/stats`. */
+export async function readStats(base: string, fetchFn?: FetchFn): Promise<TokenStats> {
+  const url = `${trim(base)}/stats`;
+  const s = toStats(await getJson(url, fetchFn));
+  if (!s) throw new Error(`GET ${url}: not a stats record`);
+  return s;
+}
+
+/** H4: `GET <swap base>/stats` (`ids`: those enabled tokens only, in that order) → every enabled token's stats. */
+export async function readAllStats(swapBase: string, ids?: string[], fetchFn?: FetchFn): Promise<TokenStats[]> {
+  const a = await getJson(`${trim(swapBase)}/stats${ids ? `?ids=${list(ids)}` : ""}`, fetchFn);
+  return (Array.isArray(a) ? a : []).map(toStats).filter((s): s is TokenStats => s !== null);
+}
+
+/** H6: `GET <token base>/color/<token>/holders?limit=&skip=` → the count and the rows, largest first. */
+export async function readHolders(base: string, tokenId: string, o: { limit?: number; skip?: number } = {}, fetchFn?: FetchFn): Promise<Holders> {
+  const a = (await getJson(`${trim(base)}/color/${encodeURIComponent(tokenId)}/holders${query({ limit: o.limit, skip: o.skip })}`, fetchFn)) as { count?: unknown; rows?: unknown } | null;
+  return {
+    count: int(a?.count),
+    rows: (Array.isArray(a?.rows) ? (a!.rows as Record<string, unknown>[]) : []).filter((r) => r && typeof r.address === "string").map((r) => ({ address: String(r.address), balance: wireBig(r.balance) })),
+  };
+}
+
+/** H5: `GET <swap base>/positions?lp=k1,k2` → every enabled token's rows for the keys, each with its token. */
+export async function readAllPositions(swapBase: string, lpPubKeys: string[], fetchFn?: FetchFn): Promise<TokenPosition[]> {
+  if (lpPubKeys.length === 0) return [];
+  const a = await getJson(`${trim(swapBase)}/positions?lp=${list(lpPubKeys)}`, fetchFn);
+  return (Array.isArray(a) ? (a as Record<string, unknown>[]) : [])
+    .filter((r) => r && typeof r.tokenId === "string" && typeof r.lpPubKey === "string")
+    .map((r) => ({
+      tokenId: String(r.tokenId),
+      lpPubKey: String(r.lpPubKey),
+      status: r.status === "live" || r.status === "rescinded" ? r.status : "closed",
+      outpoint: typeof r.outpoint === "string" ? r.outpoint : null,
+      current: isWirePool(r.current) ? toPoolState(r.current) : null,
+      sats: wireBig(r.sats),
+      tokens: wireBig(r.tokens),
+      swaps: Number(r.swaps ?? 0),
+    }));
 }

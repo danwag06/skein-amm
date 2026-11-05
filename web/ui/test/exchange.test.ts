@@ -54,13 +54,13 @@ import {
   topicOf,
   validatorTerms,
   walletSats,
-  watchHostedPools,
+  watchStats,
   watchTokenPools,
   claimStatus,
   SPEC_OP_WALLET_BALANCE,
   type PoolsAnswer,
 } from "../src/data/exchange";
-import { parsePools, readPools } from "../src/lib/overlay";
+import { parsePools, readPools, toStats } from "../src/lib/overlay";
 import { compactSats, fmtAmount, fmtChange, fmtPrice, parseInput } from "../src/ox/format";
 import { parseRoute, routeHref } from "../src/ox/route";
 import { PEER } from "./liveRead";
@@ -98,6 +98,8 @@ interface Instance {
   discovery: Record<string, unknown>;
   /** The host's pools routes (P1, P2): each token's listed pools (the host filtered them). */
   pools: Record<string, unknown[]>;
+  /** H3 / H4 (0.39.0): each token's stats record. */
+  stats: Record<string, Record<string, unknown>>;
   market: { commissionPkh: string | null; minCommissionBps: number };
   /** P2's `validators` (0.34.1): beating on the token's topic now. */
   validators: { identity: string; peerId: string }[];
@@ -121,6 +123,9 @@ interface Instance {
   requests: string[];
 }
 
+/** A token's stats record (H3) with `price` and its pools' reserves summed (TVL). */
+const statsRow = (tokenId: string, tvl: { sats: number; tokens: number }, pools: number, price: { sats: number; tokens: number } | null = tvl) => ({ tokenId, price, change1h: null, change24h: null, volume24hSats: 0, volume24hTokens: 0, buys24h: 0, sells24h: 0, lastTradeAt: null, tvlSats: tvl.sats, tvlTokens: tvl.tokens, pools });
+
 const enabledRow = (tokenId: string, sym: string, dec: number, since: number) => ({ tokenId, topic: `tm_color_${tokenId}`, sym, dec, status: "enabled", since });
 
 function instance(): Instance {
@@ -129,6 +134,7 @@ function instance(): Instance {
     defaults: {},
     discovery: { on: false },
     pools: { [TOKEN]: [wirePool(poolDeploy.id("hex"), v.pool0)] },
+    stats: { [TOKEN]: statsRow(TOKEN, { sats: v.pool0.bsv, tokens: v.pool0.tokens }, 1) },
     market: { commissionPkh: null, minCommissionBps: 0 },
     validators: [{ identity: SKEIN, peerId: PEER }],
     poolTxs: [fund, tokenDeploy, poolDeploy],
@@ -178,6 +184,7 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     if (path === "/discovery") return json(inst.discovery);
     if (path === "/admin") return json({});
     if (path === "/pools") return json(inst.enabled.filter((t) => t.status === "enabled").flatMap((t) => (inst.pools[String(t.tokenId)] ?? []).map((p) => ({ tokenId: t.tokenId, ...(p as object) }))));
+    if (path === "/stats") return json(inst.enabled.filter((t) => t.status === "enabled" && inst.stats[String(t.tokenId)]).map((t) => inst.stats[String(t.tokenId)]));
     return json({ error: `no route ${url}` }, 404);
   }
   const [, token, path] = tok;
@@ -292,7 +299,7 @@ const META = { sym: "TST", dec: 0 };
 const noLookup = () => expect(inst.requests.filter((r) => r.includes("/lookup") || r.includes("/.live/"))).toEqual([]);
 
 describe("exchange.ts, wired", () => {
-  it("hostedTokens (D6, D22): the enabled 1Color tokens, priced from the host-wide pools route's rows (the host listed only live validators' pools); a token with no rows, no price", async () => {
+  it("hostedTokens (0.39.0, D3, D7): the enabled 1Color tokens, priced from ONE read of the host-wide stats (price, TVL, pools); a token the stats lack, no price", async () => {
     inst.enabled.push(enabledRow(OTHER, "OTH", 2, 1));
     const ts = await hostedTokens();
     expect(ts.map((t) => [t.tokenId, t.sym, t.dec])).toEqual([
@@ -305,22 +312,45 @@ describe("exchange.ts, wired", () => {
     expect(t.marginalPrice).toBeCloseTo(v.pool0.bsv / v.pool0.tokens, 9);
     expect(t.depth!.sats).toBeGreaterThan(0n);
     expect(ts[1]).toMatchObject({ marginalPrice: null, pools: 0, reserves: { sats: 0n, tokens: 0n } });
-    expect(since(0)).toEqual(["GET /amm/tokens", "GET /amm/pools"]);
+    expect(since(0)).toEqual(["GET /amm/tokens", "GET /amm/stats"]);
     // Not read yet: no prices.
     expect(hostedFrom(inst.enabled as never, null)[0]).toMatchObject({ marginalPrice: null, pools: 0 });
+    // The price is the stats' `price` (a pair, per base unit), not the reserves: 3 sats per 200 units at 2 decimals = 1.5 sats per whole token.
+    const st = { ...inst.stats[TOKEN]!, tokenId: OTHER, price: { sats: 3, tokens: 200 } };
+    expect(hostedFrom(inst.enabled as never, [toStats(st)!])[1]).toMatchObject({ marginalPrice: 1.5, pools: 1 });
   });
 
-  it("the pools streams (D16, D22): the host-wide route and a token's route held as EventSources; each answer handed on", async () => {
-    const rows: unknown[] = [];
+  it("the pools stream (D16; 0.39.0, D7): only a token's route is held as an EventSource (no host-wide stream); each answer handed on", async () => {
     const answers: PoolsAnswer[] = [];
-    const off1 = watchHostedPools((r) => rows.push(r));
-    const off2 = watchTokenPools(TOKEN, (a) => answers.push(a));
+    const off = watchTokenPools(TOKEN, (a) => answers.push(a));
     await new Promise((r) => setTimeout(r, 10));
-    expect(streams).toEqual([`${BASE}/pools`, `${ORIGIN}/@${TOKEN}/amm/pools`]);
-    expect(rows).toHaveLength(1);
+    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
     expect(answers[0]!.pools.map((p) => p.outpoint)).toEqual([`${poolDeploy.id("hex")}_0`]);
-    off1();
-    off2();
+    off();
+  });
+
+  it("the landing's stats (0.39.0, D7): ONE /amm/stats now, again every 30 s while the tab is visible, nothing while it is hidden; stopped, no more", async () => {
+    vi.useFakeTimers();
+    let visible = true;
+    const got: unknown[][] = [];
+    const off = watchStats((s) => got.push(s), undefined, { visible: () => visible });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(since(0)).toEqual(["GET /amm/stats"]);
+    expect(got).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(since(0)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(since(0)).toEqual(["GET /amm/stats", "GET /amm/stats"]);
+    visible = false;
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(since(0)).toHaveLength(2);
+    visible = true;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(since(0)).toHaveLength(3);
+    expect(got).toHaveLength(3);
+    off();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(since(0)).toHaveLength(3);
   });
 
   it("poolViews: the token's pools route's rows, outpoints dotted, every validator live (the host lists no other)", async () => {
@@ -866,20 +896,20 @@ describe("requests per page (0.34.0)", () => {
   /** A connected wallet holding the token (on the exchange) and nothing staged. */
   const heldWallet = () => connect({ held: [{ outpoint: `${DEPLOY}.0`, satoshis: 1, spendable: true, lockingScript: tokenDeploy.outputs[0]!.lockingScript.toHex() }] });
 
-  it("Swap: load = the token list + the host-wide pools stream + the token's pools stream; a quote = 0; a swap = ONE /pools/beef + the relay's /call per leg; after the swap = 0 (the stream carries the new pool)", async () => {
+  it("Swap: load = the token list + ONE host-wide stats read + the token's pools stream; a quote = 0; a swap = ONE /pools/beef + the relay's /call per leg; after the swap = 0 (the stream carries the change)", async () => {
     heldWallet();
     const offs: (() => void)[] = [];
     let h: PoolsAnswer | null = null;
-    // Load: App's useHostedTokens (the list, P1 stream), Swap's useTokenPools (P2 stream), useMyTokens, useWalletSats.
+    // Load: App's useHostedTokens (the list, H4 once), Swap's useTokenPools (P2 stream), useMyTokens, useWalletSats.
     await registeredTokens();
-    offs.push(watchHostedPools(() => {}));
+    offs.push(watchStats(() => {}));
     offs.push(watchTokenPools(TOKEN, (a) => (h = a)));
     await myTokens();
     await walletSats();
     await new Promise((r) => setTimeout(r, 10));
     const load = since(0);
-    expect(load).toEqual(["GET /amm/tokens", `GET /amm/pools`, `GET /@${TOKEN}/amm/pools`]);
-    expect(streams).toEqual([`${BASE}/pools`, `${ORIGIN}/@${TOKEN}/amm/pools`]);
+    expect(load).toEqual(["GET /amm/tokens", `GET /amm/stats`, `GET /@${TOKEN}/amm/pools`]);
+    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
     const n = inst.requests.length;
     const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, h ?? parsePools({}), META);
     expect(since(n)).toEqual([]);

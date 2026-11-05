@@ -13,7 +13,7 @@ import type { WalletInterface } from "@bsv/sdk";
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
 import { authFetchPerInstance } from "../lib/skein";
 import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB } from "../ox/env";
-import { createClient, hostedFrom, type AmmClient, type EnabledToken, type HostedToken, type PoolRow, type PoolsAnswer, type Signed, type TokenId } from "../client";
+import { createClient, hostedFrom, type AmmClient, type HostedToken, type PoolsAnswer, type Signed, type TokenId, type TokenStats } from "../client";
 
 export * from "../client";
 
@@ -115,7 +115,7 @@ export const claimStatus: AmmClient["claimStatus"] = (...a: Parameters<AmmClient
 export const isRoot: AmmClient["isRoot"] = (...a: Parameters<AmmClient["isRoot"]>) => (client.isRoot as (...x: unknown[]) => ReturnType<AmmClient["isRoot"]>)(...a);
 export const claimExchange: AmmClient["claimExchange"] = (...a: Parameters<AmmClient["claimExchange"]>) => (client.claimExchange as (...x: unknown[]) => ReturnType<AmmClient["claimExchange"]>)(...a);
 export const hostedTokens: AmmClient["hostedTokens"] = (...a: Parameters<AmmClient["hostedTokens"]>) => (client.hostedTokens as (...x: unknown[]) => ReturnType<AmmClient["hostedTokens"]>)(...a);
-export const watchHostedPools: AmmClient["watchHostedPools"] = (...a: Parameters<AmmClient["watchHostedPools"]>) => (client.watchHostedPools as (...x: unknown[]) => ReturnType<AmmClient["watchHostedPools"]>)(...a);
+export const statsAll: AmmClient["statsAll"] = (...a: Parameters<AmmClient["statsAll"]>) => (client.statsAll as (...x: unknown[]) => ReturnType<AmmClient["statsAll"]>)(...a);
 export const watchTokenPools: AmmClient["watchTokenPools"] = (...a: Parameters<AmmClient["watchTokenPools"]>) => (client.watchTokenPools as (...x: unknown[]) => ReturnType<AmmClient["watchTokenPools"]>)(...a);
 export const quoteSwap: AmmClient["quoteSwap"] = (...a: Parameters<AmmClient["quoteSwap"]>) => (client.quoteSwap as (...x: unknown[]) => ReturnType<AmmClient["quoteSwap"]>)(...a);
 export const executeSwap: AmmClient["executeSwap"] = (...a: Parameters<AmmClient["executeSwap"]>) => (client.executeSwap as (...x: unknown[]) => ReturnType<AmmClient["executeSwap"]>)(...a);
@@ -186,30 +186,67 @@ export function useSession(): Session {
 // Live reads
 // ---------------------------------------------------------------------------
 
+/** How often the host-wide stats are read again while the tab is visible (0.39.0, D7), ms. */
+export const STATS_EVERY_MS = 30_000;
+
+const tabVisible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
+
 /**
- * The hosted tokens with live prices (D16, D22): the token list once, and the host-wide pools route
- * held as an event stream (one connection), each answer repricing the tokens. `rows`: the pools
- * the host lists now (every validator live). `live`: the stream is connected.
+ * The host-wide stats on a cadence (0.39.0, D7: no host-wide stream; a list page is a cached read
+ * re-read on an interval): ONE `GET <origin>/amm/stats` now, then again every `STATS_EVERY_MS`
+ * while the tab is visible (a tick while it is hidden reads nothing). Each answer to `onStats`,
+ * a failed read to `onError`. → the stop.
  */
-export function useHostedTokens(): { tokens: HostedToken[] | null; error: string | null; live: boolean; reload: () => void; rows: PoolRow[] | null } {
+export function watchStats(onStats: (s: TokenStats[]) => void, onError?: (e: unknown) => void, o: { everyMs?: number; visible?: () => boolean } = {}): () => void {
+  let stopped = false;
+  const visible = o.visible ?? tabVisible;
+  const read = () =>
+    statsAll().then(
+      (x) => {
+        if (!stopped) onStats(x);
+      },
+      (e: unknown) => {
+        if (!stopped) onError?.(e);
+      },
+    );
+  void read();
+  const timer = setInterval(() => {
+    if (visible()) void read();
+  }, o.everyMs ?? STATS_EVERY_MS);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+/**
+ * The hosted tokens with their prices (0.39.0, D3, D7): the token list once, and the host-wide
+ * stats (`watchStats`: one read per load, again every 30 s while the tab is visible) giving each
+ * token's price, liquidity and pool count. `live`: the last stats read succeeded.
+ */
+export function useHostedTokens(): { tokens: HostedToken[] | null; error: string | null; live: boolean; reload: () => void } {
   const r = useData(enabledList, []);
-  const [rows, setRows] = useState<PoolRow[] | null>(null);
+  const [stats, setStats] = useState<TokenStats[] | null>(null);
   const [live, setLive] = useState(false);
   useEffect(
     () =>
-      watchHostedPools((x) => {
-        setRows(x);
-        setLive(true);
-      }, setLive),
+      watchStats(
+        (x) => {
+          setStats(x);
+          setLive(true);
+        },
+        () => setLive(false),
+      ),
     [],
   );
-  return { tokens: r.data ? hostedFrom(r.data, rows) : null, error: r.error, live, reload: r.reload, rows };
+  return { tokens: r.data ? hostedFrom(r.data, stats) : null, error: r.error, live, reload: r.reload };
 }
 
 /**
  * The Swap page's pools (D11, D16): the token's pools route `GET /@<token>/amm/pools` held as an
  * event stream (an EventSource; without one, ONE GET and no poll): the market and the pools a swap
- * may use, renewed whenever the host's answer changes. Null until the first answer.
+ * may use, renewed whenever the host's answer changes (0.39.0, D7: each `change` applied to the held
+ * answer, `watchTokenPools`). Null until the first answer.
  */
 export function useTokenPools(tokenId: TokenId | undefined): { data: PoolsAnswer | null; error: string | null } {
   const [data, setData] = useState<PoolsAnswer | null>(null);
