@@ -52,7 +52,7 @@ import {
   findLastOpReturn,
   matchesArtifact,
   serializeState,
-} from "runar-sdk";
+} from "../vendor/runar/runar-sdk.js";
 import {
   Hash,
   LockingScript,

@@ -1,4 +1,4 @@
-import type { RunarArtifact } from "runar-sdk";
+import type { RunarArtifact } from "../vendor/runar/runar-sdk.js";
 import poolArtifactJson from "./pool.artifact.json";
 
 /**

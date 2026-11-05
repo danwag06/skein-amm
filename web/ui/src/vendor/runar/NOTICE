@@ -1,0 +1,15 @@
+Vendored from Rúnar (https://github.com/icellan/runar), commit
+d207ee8ec4c2b16e5d3b181da1e177fe1fd26c50 (the commit go.mod pins for the Go side),
+MIT licence (LICENSE beside this file).
+
+runar-sdk/src: the modules runar-sdk's contract.ts, state.ts and script-utils.ts import
+(their import closure), copied unchanged except:
+  - every `from 'runar-ir-schema'` reads `from '../../../../pool/runar-ir-schema.js'`
+    (that package's barrel without its node-only Ajv validators);
+  - anf-interpreter.ts takes ECDSA's `verify` from `@bsv/sdk`'s root export
+    (`ECDSA.verify`) instead of the subpath `@bsv/sdk/primitives/ECDSA`, which
+    @bsv/sdk 4's package exports do not name.
+runar-ir-schema/src: the eight modules that barrel re-exports, copied unchanged.
+
+Why vendored: runar-sdk 1.0.0-rc.1 is not published (npm has 0.4.6, on @bsv/sdk 2),
+and its package.json names runar-ir-schema as pnpm `workspace:*`.

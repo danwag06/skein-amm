@@ -26,15 +26,6 @@
     ],
     "baseUrl": ".",
     "paths": {
-      "runar-sdk": [
-        "../../../../bsv/runar/packages/runar-sdk/src/index.ts"
-      ],
-      "runar-ir-schema": [
-        "./src/pool/runar-ir-schema.ts"
-      ],
-      "@runar-src/*": [
-        "../../../../bsv/runar/packages/*"
-      ],
       "cbor2": [
         "./node_modules/cbor2/lib/index.d.ts"
       ],

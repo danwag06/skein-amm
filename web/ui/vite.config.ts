@@ -5,13 +5,9 @@ import react from "@vitejs/plugin-react";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 
-// runar-sdk is bundled straight from the local Rúnar checkout's TypeScript
-// sources (README.md, "runar-sdk from the local checkout"): no build step, no
-// copy. RUNAR_DIR overrides where that checkout is; the default is a sibling
-// of this checkout's parent (~/Work/bsv/runar next to ~/Work/agent-env/skein-amm).
-// tsconfig.json's `paths` mirror these aliases for the type checker.
-const runarDir = resolve(here, process.env.RUNAR_DIR ?? "../../../../bsv/runar");
-
+// runar-sdk is vendored (src/vendor/runar, README.md "runar-sdk, vendored"): no alias, no
+// checkout. The engine and the client package's sources are this directory's own and
+// ../engine/src (the workspace; README.md "The packages").
 // Build output (`npm run build` -> dist/, not committed; 0.23.0): the pages are
 // served by shruggr/open-exchange's swap app, whose scripts/www.sh builds them
 // from this library at a tag into its apps/swap/www/ (--outDir) and copies the
@@ -22,19 +18,13 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: [
-      { find: /^runar-sdk$/, replacement: resolve(runarDir, "packages/runar-sdk/src/index.ts") },
-      // runar-ir-schema's barrel without its node-only Ajv validators (see the file).
-      { find: /^runar-ir-schema$/, replacement: resolve(here, "src/pool/runar-ir-schema.ts") },
-      { find: /^@runar-src\//, replacement: resolve(runarDir, "packages") + "/" },
       // @1sat/actions lazily imports xdelta3-wasm (OrdFS patches, unused
       // here), whose package.json names a "module" file that is not in the
       // package (dist/xdelta3.esm.js; the file is dist/xdelta3-wasm.esm.js).
       // Point at the file that exists so the bundler can resolve it.
       { find: /^xdelta3-wasm$/, replacement: resolve(here, "node_modules/xdelta3-wasm/dist/xdelta3-wasm.esm.js") },
     ],
-    // runar-sdk's sources import @bsv/sdk from outside this package: resolve
-    // it from here, one copy (@bsv/sdk 4, package.json overrides), so the
-    // checkout needs no node_modules.
+    // One copy of each (@bsv/sdk 4, package.json overrides).
     dedupe: ["@bsv/sdk", "cbor2", "@ipld/dag-cbor", "cborg"],
   },
   build: {
