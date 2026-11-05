@@ -4,6 +4,10 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.35.1 (2026-11-05)
+
+Settings, the enabled token row: Edit and Disable share the row's action cell, the terms editor opens full width under the token line, and Save / Market only / Cancel sit in one row (0.35.0 dropped the editor into the row's grid as a third cell, squeezing the text and pushing Disable onto its own line). Pages only.
+
 ## 0.35.0 (2026-11-05)
 
 - Pages only (agent-env plans/per-token-terms-2026-11-05.md; open-exchange 0.12.0): per-token

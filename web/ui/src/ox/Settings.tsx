@@ -204,7 +204,7 @@ export function useTermsFields(): { lp: string; val: string; com: string; setLp:
  * The three fee fields and their buttons (0.35.0: shared by the defaults card and a token row's
  * Edit). The caller's `<form>` submits (`setLabel`); `clearLabel` + `onClear` add the second button.
  */
-export function TermsFields({ f, idPrefix, busy, setLabel, clearLabel, onClear }: { f: ReturnType<typeof useTermsFields>; idPrefix: string; busy: boolean; setLabel: string; clearLabel?: string; onClear?: () => void }) {
+export function TermsFields({ f, idPrefix, busy, setLabel, clearLabel, onClear, onCancel }: { f: ReturnType<typeof useTermsFields>; idPrefix: string; busy: boolean; setLabel: string; clearLabel?: string; onClear?: () => void; onCancel?: () => void }) {
   return (
     <>
       <div className="row row-wrap">
@@ -228,6 +228,11 @@ export function TermsFields({ f, idPrefix, busy, setLabel, clearLabel, onClear }
         {onClear && (
           <button type="button" className="btn btn-outline" disabled={busy} onClick={onClear}>
             {clearLabel}
+          </button>
+        )}
+        {onCancel && (
+          <button type="button" className="btn btn-outline" disabled={busy} onClick={onCancel}>
+            Cancel
           </button>
         )}
       </div>
@@ -465,7 +470,7 @@ function TokenTermsEdit({ t, onSent, onCancel }: { t: RegisteredToken; onSent: (
   const id = `tt-${t.tokenId.slice(0, 16)}`;
   return (
     <form
-      className="stack-sm"
+      className="stack-sm reg-edit"
       aria-label={`${t.sym} terms`}
       onSubmit={(e) => {
         e.preventDefault();
@@ -489,12 +494,8 @@ function TokenTermsEdit({ t, onSent, onCancel }: { t: RegisteredToken; onSent: (
             await onSent(null);
           })
         }
+        onCancel={onCancel}
       />
-      <div>
-        <button type="button" className="btn btn-outline" disabled={busy} onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
       {error && <Notice kind="bad">Could not send: {error}</Notice>}
     </form>
   );
@@ -529,19 +530,42 @@ function EnabledRow({ t }: { t: RegisteredToken }) {
           {enabled && <TokenTermsLine terms={terms} error={termsError} note={note} />}
         </span>
       </span>
-      {enabled && !editing && (
-        <button
-          type="button"
-          className="btn btn-outline"
-          onClick={() => {
-            setNote(null);
-            setEditing(true);
-          }}
-          aria-label={`Edit ${t.sym} terms`}
-        >
-          Edit
-        </button>
-      )}
+      <span className="row row-wrap end">
+        {enabled && !editing && (
+          <button
+            type="button"
+            className="btn btn-outline"
+            onClick={() => {
+              setNote(null);
+              setEditing(true);
+            }}
+            aria-label={`Edit ${t.sym} terms`}
+          >
+            Edit
+          </button>
+        )}
+        {t.status === "enabled" ? (
+          confirm ? (
+            <span className="row row-wrap end">
+              <span className="small fg2">Stop {t.sym}&apos;s instance?</span>
+              <button type="button" className="btn btn-primary" disabled={busy} onClick={() => run(() => disableToken(t.tokenId))}>
+                {busy ? "Disabling…" : "Disable"}
+              </button>
+              <button type="button" className="btn btn-outline" disabled={busy} onClick={() => setConfirm(false)}>
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button type="button" className="btn btn-outline" onClick={() => setConfirm(true)} aria-label={`Disable ${t.sym}`}>
+              Disable
+            </button>
+          )
+        ) : t.status === "disabled" ? (
+          <button type="button" className="btn btn-outline" disabled={busy} onClick={() => run(async () => void (await enableToken(t.tokenId)))} aria-label={`Enable ${t.sym} again`}>
+            {busy ? "Enabling…" : "Enable again"}
+          </button>
+        ) : null}
+      </span>
       {enabled && editing && (
         <TokenTermsEdit
           t={t}
@@ -557,27 +581,6 @@ function EnabledRow({ t }: { t: RegisteredToken }) {
           }}
         />
       )}
-      {t.status === "enabled" ? (
-        confirm ? (
-          <span className="row row-wrap end">
-            <span className="small fg2">Stop {t.sym}&apos;s instance?</span>
-            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => run(() => disableToken(t.tokenId))}>
-              {busy ? "Disabling…" : "Disable"}
-            </button>
-            <button type="button" className="btn btn-outline" disabled={busy} onClick={() => setConfirm(false)}>
-              Cancel
-            </button>
-          </span>
-        ) : (
-          <button type="button" className="btn btn-outline" onClick={() => setConfirm(true)} aria-label={`Disable ${t.sym}`}>
-            Disable
-          </button>
-        )
-      ) : t.status === "disabled" ? (
-        <button type="button" className="btn btn-outline" disabled={busy} onClick={() => run(async () => void (await enableToken(t.tokenId)))} aria-label={`Enable ${t.sym} again`}>
-          {busy ? "Enabling…" : "Enable again"}
-        </button>
-      ) : null}
       {error && <Notice kind="bad">{error}</Notice>}
     </li>
   );

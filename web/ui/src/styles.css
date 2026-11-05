@@ -247,7 +247,8 @@ button.id-text code { border-bottom: 1px dotted var(--line); }
 /* ---- settings */
 .regs { display: flex; flex-direction: column; }
 .reg-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
-.reg-row > .notice { grid-column: 1 / -1; }
+.reg-row > .notice, .reg-row > .reg-edit { grid-column: 1 / -1; }
+.reg-edit .field { flex: 1 1 140px; }
 .req-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 
 /* ---- phone */
