@@ -978,3 +978,268 @@ test "validator (0.33.0): {validatorIdentityKeys} sums the fee rows of all its p
     const one = try idx.answer(a, &svc, &ch, try e.q(a, &.{.{ .key = "validatorIdentityKey", .value = .{ .text = vec.identity } }}));
     try testing.expectEqual(@as(usize, 0), one.freeform.array.len);
 }
+
+// ---------------------------------------------------------------- trade rows and the history reads (0.36.0)
+
+/// The contract's Swap arithmetic (pool/Pool.runar.go Swap): the amount out of `amount_in` against
+/// the reserves, the fees taken from the input first (each rounded up).
+fn contractOut(amount_in: u64, lp_bps: u64, val_bps: u64, com_bps: u64, reserve_in: u64, reserve_out: u64) u64 {
+    const fee = struct {
+        fn f(x: u64, bps: u64) u64 {
+            return (x * bps + 9999) / 10000;
+        }
+    }.f;
+    const net = amount_in - fee(amount_in, lp_bps) - fee(amount_in, val_bps) - fee(amount_in, com_bps);
+    return @intCast(@as(u128, net) * reserve_out / (reserve_in + net));
+}
+
+fn poolOf(t: bsvz.transaction.Transaction) idx.PoolFields {
+    return idx.poolAt(.{0} ** 32, 0, t.outputs[0].locking_script.bytes, @intCast(t.outputs[0].satoshis)).?;
+}
+
+fn tradeRec(a: Allocator, svc: *lookup.Service, tp: []const u8, txid: [32]u8) !Value {
+    return svc.store.getValue(a, (try svc.map("fees").link(try cat(a, &.{ tp, &key33(vec.lp), &txid }))).?);
+}
+
+fn atKey(a: Allocator, tp: []const u8, at: u64, txid: [32]u8) ![]u8 {
+    var b: [8]u8 = undefined;
+    std.mem.writeInt(u64, &b, at, .big);
+    return cat(a, &.{ tp, &b, &txid });
+}
+
+/// twoSwaps with the step's clock at `t1` for the sats-in Swap and `t2` for the token-in one.
+fn twoSwapsAt(a: Allocator, e: *Env, svc: *lookup.Service, t1: u64, t2: u64) !void {
+    const f = e.f;
+    idx.now_ms = t1 - 1;
+    try e.admit(a, svc, "pool_deploy", null, &.{ 0, 1, 2 }, &.{0});
+    idx.now_ms = t1;
+    try e.admit(a, svc, "swap_bsv_in", null, &.{ 0, 1 }, &.{0});
+    try idx.spent(a, svc, e.topic, .{ .txid = f.txid("pool_deploy"), .vout = 0 }, try ltx(a, f.txid("swap_bsv_in"), f.tx("swap_bsv_in")));
+    idx.now_ms = t2;
+    try e.admit(a, svc, "swap_tokens_in", null, &.{ 0, 2, 3, 4 }, &.{ 0, 1 });
+    try idx.spent(a, svc, e.topic, .{ .txid = f.txid("swap_bsv_in"), .vout = 0 }, try ltx(a, f.txid("swap_tokens_in"), f.tx("swap_tokens_in")));
+}
+
+test "trade rows (0.36.0): a sats-in Swap writes a buy, a token-in Swap a sell — txid, LP key, amounts in and out (the contract's), the three fees, the reserves after, the step's time; under `trades` by time and `fees` by LP key, one record" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    try twoSwapsAt(a, e, &svc, 1_000, 2_000);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    try testing.expectEqual(@as(usize, 2), try svc.map("trades").count());
+
+    const p0 = poolOf(e.f.tx("pool_deploy"));
+    const p1 = poolOf(e.f.tx("swap_bsv_in"));
+    const p2 = poolOf(e.f.tx("swap_tokens_in"));
+    const fees = .{ @as(u64, @intCast(p0.liquidity_fee_bps)), @as(u64, @intCast(p0.validation_fee_bps)), @as(u64, @intCast(p0.commission_bps)) };
+
+    const buy = try tradeRec(a, &svc, tp, e.f.txid("swap_bsv_in"));
+    try testing.expectEqualStrings("amm-trade", buy.getText("kind").?);
+    try testing.expectEqualStrings("buy", buy.getText("side").?);
+    try testing.expectEqualSlices(u8, &e.f.txid("swap_bsv_in"), buy.getBytes("txid").?);
+    try testing.expectEqualSlices(u8, &key33(vec.lp), buy.getBytes("lpPubKey").?);
+    try testing.expectEqual(@as(u64, 20_000), buy.getUint("amountIn").?);
+    try testing.expectEqual(contractOut(20_000, fees[0], fees[1], fees[2], p0.bsv_reserve, p0.token_reserve), buy.getUint("amountOut").?);
+    try testing.expectEqual(p0.token_reserve - p1.token_reserve, buy.getUint("amountOut").?);
+    try testing.expectEqual(@as(u64, 60), buy.getUint("lp").?);
+    try testing.expectEqual(@as(u64, 10), buy.getUint("validator").?);
+    try testing.expectEqual(@as(u64, 20), buy.getUint("commission").?);
+    try testing.expectEqual(p1.bsv_reserve, buy.getUint("bsvReserve").?);
+    try testing.expectEqual(p1.token_reserve, buy.getUint("tokenReserve").?);
+    try testing.expectEqual(@as(u64, 1_000), buy.getUint("at").?);
+    try testing.expectEqualSlices(u8, (try svc.map("fees").link(try cat(a, &.{ tp, &key33(vec.lp), &e.f.txid("swap_bsv_in") }))).?, (try svc.map("trades").link(try atKey(a, tp, 1_000, e.f.txid("swap_bsv_in")))).?);
+
+    const sell = try tradeRec(a, &svc, tp, e.f.txid("swap_tokens_in"));
+    try testing.expectEqualStrings("sell", sell.getText("side").?);
+    try testing.expectEqual(@as(u64, 50_000), sell.getUint("amountIn").?);
+    try testing.expectEqual(contractOut(50_000, fees[0], fees[1], fees[2], p1.token_reserve, p1.bsv_reserve), sell.getUint("amountOut").?);
+    try testing.expectEqual(p1.bsv_reserve - p2.bsv_reserve, sell.getUint("amountOut").?);
+    try testing.expectEqual(@as(u64, 150), sell.getUint("lp").?);
+    try testing.expectEqual(p2.token_reserve, sell.getUint("tokenReserve").?);
+    try testing.expectEqual(@as(u64, 2_000), sell.getUint("at").?);
+    try testing.expect((try svc.map("trades").link(try atKey(a, tp, 2_000, e.f.txid("swap_tokens_in")))) != null);
+
+    // A re-admission (a dupe hook call, before the spend) at a later time: one row, under the later time.
+    var svc2 = try e.svc(a);
+    idx.now_ms = 1;
+    try e.admit(a, &svc2, "pool_deploy", null, &.{ 0, 1, 2 }, &.{0});
+    idx.now_ms = 1_000;
+    try e.admit(a, &svc2, "swap_bsv_in", null, &.{ 0, 1 }, &.{0});
+    idx.now_ms = 5_000;
+    try e.admit(a, &svc2, "swap_bsv_in", null, &.{ 0, 1 }, &.{0});
+    try testing.expectEqual(@as(usize, 1), try svc2.map("trades").count());
+    try testing.expect((try svc2.map("trades").link(try atKey(a, tp, 5_000, e.f.txid("swap_bsv_in")))) != null);
+}
+
+test "trade rows (0.36.0): a rejected Swap's trade row leaves `trades` with its fee row; the other stays" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    try twoSwapsAt(a, e, &svc, 1_000, 2_000);
+    try idx.rejected(a, &svc, e.topic, try ltx(a, e.f.txid("swap_tokens_in"), e.f.tx("swap_tokens_in")));
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    try testing.expectEqual(@as(usize, 1), try svc.map("trades").count());
+    try testing.expect((try svc.map("trades").link(try atKey(a, tp, 1_000, e.f.txid("swap_bsv_in")))) != null);
+    try testing.expectEqual(@as(usize, 1), try svc.map("fees").count());
+}
+
+test "history (0.36.0): trades newest first — the window, the limit and the cursor, one LP key's rows, one Swap by txid" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    try twoSwapsAt(a, e, &svc, 1_000, 2_000);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    const s1 = e.f.txid("swap_bsv_in");
+    const s2 = e.f.txid("swap_tokens_in");
+
+    const all = try idx.trades(a, &svc, tp, .{});
+    try testing.expectEqual(@as(usize, 2), all.len);
+    try testing.expectEqualSlices(u8, &s2, &all[0].txid);
+    try testing.expectEqualSlices(u8, &s1, &all[1].txid);
+    // Window: from ≤ at < to.
+    try testing.expectEqual(@as(usize, 1), (try idx.trades(a, &svc, tp, .{ .from = 1_500 })).len);
+    try testing.expectEqual(@as(usize, 1), (try idx.trades(a, &svc, tp, .{ .to = 2_000 })).len);
+    try testing.expectEqual(@as(usize, 2), (try idx.trades(a, &svc, tp, .{ .from = 1_000, .to = 2_001 })).len);
+    try testing.expectEqual(@as(usize, 0), (try idx.trades(a, &svc, tp, .{ .from = 2_001 })).len);
+    // Paging: one row, then the next from its cursor, then none.
+    const p1 = try idx.trades(a, &svc, tp, .{ .limit = 1 });
+    try testing.expectEqualSlices(u8, &s2, &p1[0].txid);
+    const p2 = try idx.trades(a, &svc, tp, .{ .limit = 1, .before = .{ .at = p1[0].at, .txid = p1[0].txid } });
+    try testing.expectEqualSlices(u8, &s1, &p2[0].txid);
+    try testing.expectEqual(@as(usize, 0), (try idx.trades(a, &svc, tp, .{ .limit = 1, .before = .{ .at = p2[0].at, .txid = p2[0].txid } })).len);
+    // One LP key's rows (same order and paging); an unknown key none.
+    const mine = try idx.trades(a, &svc, tp, .{ .lp = key33(vec.lp) });
+    try testing.expectEqual(@as(usize, 2), mine.len);
+    try testing.expectEqualSlices(u8, &s2, &mine[0].txid);
+    try testing.expectEqual(@as(usize, 1), (try idx.trades(a, &svc, tp, .{ .lp = key33(vec.lp), .limit = 1, .before = .{ .at = 2_000, .txid = s2 } })).len);
+    try testing.expectEqual(@as(usize, 0), (try idx.trades(a, &svc, tp, .{ .lp = key33(unknown33) })).len);
+    // One Swap by txid; a deploy has none.
+    try testing.expectEqual(@as(u64, 1_000), (try idx.tradeOf(a, &svc, tp, key33(vec.lp), s1)).?.at);
+    try testing.expect((try idx.tradeOf(a, &svc, tp, key33(vec.lp), e.f.txid("pool_deploy"))) == null);
+}
+
+/// A trade row written straight into `trades` (the candle and stats reads read only it).
+fn putRow(a: Allocator, svc: *lookup.Service, tp: []const u8, at: u64, n: u8, side: []const u8, in: u64, out: u64) !void {
+    var txid: [32]u8 = .{0} ** 32;
+    txid[0] = n;
+    const rec = try svc.store.putValue(a, .{ .map = try a.dupe(Entry, &.{
+        .{ .key = "side", .value = .{ .text = side } },
+        .{ .key = "amountIn", .value = .{ .uint = in } },
+        .{ .key = "amountOut", .value = .{ .uint = out } },
+        .{ .key = "at", .value = .{ .uint = at } },
+    }) });
+    try svc.map("trades").putLink(try atKey(a, tp, at, txid), rec);
+}
+
+fn expectPrice(want_sats: u64, want_tokens: u64, p: idx.Price) !void {
+    try testing.expectEqual(want_sats, p.sats);
+    try testing.expectEqual(want_tokens, p.tokens);
+}
+
+test "history (0.36.0): candles from the trade rows — one per non-empty bucket, aligned, open/high/low/close by price, volumes per side, counts; the window's edges; more than 5000 buckets refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    const m: u64 = 60_000;
+    // Bucket [0, 1m): a buy at 2 sats/token, a sell at 3, a buy at 1. Bucket [2m, 3m): one sell at 4.
+    // At exactly 1m·5 (the window's `to` below): excluded.
+    try putRow(a, &svc, tp, 1_000, 1, "buy", 200, 100);
+    try putRow(a, &svc, tp, 2_000, 2, "sell", 10, 30);
+    try putRow(a, &svc, tp, m - 1, 3, "buy", 50, 50);
+    try putRow(a, &svc, tp, 2 * m, 4, "sell", 5, 20);
+    try putRow(a, &svc, tp, 5 * m, 5, "buy", 7, 7);
+
+    const cs = try idx.candles(a, &svc, tp, m, 0, 5 * m);
+    try testing.expectEqual(@as(usize, 2), cs.len);
+    try testing.expectEqual(@as(u64, 0), cs[0].t);
+    try expectPrice(200, 100, cs[0].o);
+    try expectPrice(30, 10, cs[0].h);
+    try expectPrice(50, 50, cs[0].l);
+    try expectPrice(50, 50, cs[0].c);
+    try testing.expectEqual(@as(u64, 200 + 30 + 50), cs[0].volume_sats);
+    try testing.expectEqual(@as(u64, 100 + 10 + 50), cs[0].volume_tokens);
+    try testing.expectEqual(@as(u64, 3), cs[0].n);
+    try testing.expectEqual(2 * m, cs[1].t); // [1m, 2m) is empty: omitted
+    try expectPrice(20, 5, cs[1].o);
+    try testing.expectEqual(@as(u64, 1), cs[1].n);
+    // `from` inside a bucket: trades before it are out, the bucket still starts aligned.
+    const late = try idx.candles(a, &svc, tp, m, 1_500, 6 * m);
+    try testing.expectEqual(@as(usize, 3), late.len);
+    try testing.expectEqual(@as(u64, 0), late[0].t);
+    try testing.expectEqual(@as(u64, 2), late[0].n);
+    try testing.expectEqual(5 * m, late[2].t);
+    // One resolution up: every row of [0, 1h) in one candle.
+    const hour = try idx.candles(a, &svc, tp, 60 * m, 0, 60 * m);
+    try testing.expectEqual(@as(usize, 1), hour.len);
+    try testing.expectEqual(@as(u64, 5), hour[0].n);
+    try expectPrice(7, 7, hour[0].c);
+    // 5000 buckets is the most.
+    _ = try idx.candles(a, &svc, tp, m, 0, 5000 * m);
+    try testing.expectError(error.TooManyBuckets, idx.candles(a, &svc, tp, m, 0, 5000 * m + 1));
+    try testing.expectError(error.TooManyBuckets, idx.candles(a, &svc, tp, m, 30_000, 5000 * m + 30_000));
+}
+
+test "history (0.36.0): stats — the last trade's price, the changes from the prices at the windows' starts in bps, 24 h volumes and counts, the live pools' TVL; null changes without a trade that old; no trade, the deepest pool's marginal price" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    const now: u64 = 10 * idx.day_ms;
+
+    // Nothing at all: no price, no changes.
+    const none = try idx.stats(a, &svc, tp, now);
+    try testing.expect(none.price == null and none.change1h == null and none.change24h == null and none.last_trade_at == null);
+    try testing.expectEqual(@as(u64, 0), none.pools);
+
+    // A live pool, no trade: its marginal price.
+    idx.now_ms = 1;
+    try e.admit(a, &svc, "pool_deploy", null, &.{ 0, 1, 2 }, &.{0});
+    const p0 = poolOf(e.f.tx("pool_deploy"));
+    const only_pool = try idx.stats(a, &svc, tp, now);
+    try expectPrice(p0.bsv_reserve, p0.token_reserve, only_pool.price.?);
+    try testing.expectEqual(@as(u64, 1), only_pool.pools);
+    try testing.expectEqual(p0.bsv_reserve, only_pool.tvl_sats);
+    try testing.expectEqual(p0.token_reserve, only_pool.tvl_tokens);
+    try testing.expect(only_pool.change24h == null);
+
+    // Trades within the last hour only: no trade at either window's start.
+    try putRow(a, &svc, tp, now - 30 * 60_000, 1, "buy", 200, 100); // 2
+    try putRow(a, &svc, tp, now - 10 * 60_000, 2, "sell", 10, 30); // 3
+    const recent = try idx.stats(a, &svc, tp, now);
+    try expectPrice(30, 10, recent.price.?);
+    try testing.expect(recent.change1h == null and recent.change24h == null);
+    try testing.expectEqual(@as(u64, 230), recent.volume24h_sats);
+    try testing.expectEqual(@as(u64, 110), recent.volume24h_tokens);
+    try testing.expectEqual(@as(u64, 1), recent.buys24h);
+    try testing.expectEqual(@as(u64, 1), recent.sells24h);
+    try testing.expectEqual(now - 10 * 60_000, recent.last_trade_at.?);
+
+    // A trade 2 h ago (price 2.4) and one 2 days ago (price 1.5): the changes against them; the
+    // 2-day-old one is out of the 24 h volume.
+    try putRow(a, &svc, tp, now - 2 * idx.hour_ms, 3, "buy", 24, 10);
+    try putRow(a, &svc, tp, now - 2 * idx.day_ms, 4, "sell", 10, 15);
+    const s = try idx.stats(a, &svc, tp, now);
+    try testing.expectEqual(@as(i64, 2500), s.change1h.?); // 2.4 → 3: +25 %
+    try testing.expectEqual(@as(i64, 10000), s.change24h.?); // 1.5 → 3: +100 %
+    try testing.expectEqual(@as(u64, 230 + 24), s.volume24h_sats);
+    try testing.expectEqual(@as(u64, 2), s.buys24h);
+    try testing.expectEqual(@as(u64, 1), s.sells24h);
+    // A fall, truncated toward zero.
+    try testing.expectEqual(@as(i64, -3333), idx.changeBps(.{ .sats = 3, .tokens = 1 }, .{ .sats = 2, .tokens = 1 }));
+}

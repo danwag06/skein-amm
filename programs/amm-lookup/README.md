@@ -87,7 +87,8 @@ order) ‖ vout, big-endian u32:
 | `byLp` (0.33.0) | `lpPubKey (33 bytes) ‖ tp ‖ outpoint → null` | every listed pool of an LP key, live and spent; only `rejected` removes it |
 | `rescinded` (0.33.0) | `tp ‖ lpPubKey → pool record` (a CID link, as `pools`) | the output a validator's Rescind of a listed pool of that key wrote (not listed); removed when the Rescind is rejected |
 | `spentPools` | `tp ‖ outpoint → record` (a CID link) | a checked pool a spend consumed, kept for `rejected` to give back and for `{outpoint}` to follow |
-| `fees` (0.33.0) | `tp ‖ lpPubKey (33 bytes) ‖ swap txid → fee row` (a CID link) | one row per Swap admitted, under its pool's LP key: `{kind: "amm-swap-fees", lp, validator, commission, bsvIn, commissionPkh}`, the three fees in the input asset (src/pool.zig `feesOf`, the outputs where the relay's pair check finds them) |
+| `fees` (0.33.0) | `tp ‖ lpPubKey (33 bytes) ‖ swap txid → fee row` (a CID link) | one row per Swap admitted, under its pool's LP key: `{kind: "amm-swap-fees", lp, validator, commission, bsvIn, commissionPkh}` (0.36.0: the TRADE ROW, `{kind: "amm-trade", …, txid, lpPubKey, side, amountIn, amountOut, bsvReserve, tokenReserve, at}`, docs/AMM.md "The history reads"), the three fees in the input asset (src/pool.zig `feesOf`, the outputs where the relay's pair check finds them) |
+| `trades` (0.36.0) | `tp ‖ at (u64 BE, ms) ‖ swap txid → the same trade row` | every Swap admitted from 0.36.0 on, in time order (`at` the admitting step's time); read by `/trades`, `/candles`, `/stats` |
 | `byCommission` (0.33.0) | `commissionPkh (20 bytes) ‖ tp ‖ swap txid → the same fee row` | the Swaps that paid a commission (not 0) to that key hash |
 
 The fee rows exist for Swaps admitted from 0.33.0 on: a Swap admitted

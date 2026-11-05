@@ -68,7 +68,18 @@ pub const service_name = "ls_amm";
 /// `byLp` (0.33.0): `LpPubKey ‖ tp ‖ outpoint → null`, every listed pool of that LP key, live or
 /// spent (the hops of its lineage), removed only when the transaction that listed it is rejected;
 /// `byValidator` likewise from 0.33.0 (its single-key query still answers the live pools only).
-pub const maps = [_][]const u8{ "pools", "byValidator", "spentPools", "beat", "fees", "byCommission", "rescinded", "byLp" };
+/// The trade rows (0.36.0, David Case 2026-11-05, D1): the fee row grew into the Swap's TRADE ROW
+/// (`tradeRecord`: its fee fields as before, and txid, lpPubKey, side, amountIn, amountOut,
+/// bsvReserve, tokenReserve after the Swap, `at` the admitting step's time in ms); `trades`:
+/// `tp ‖ at (u64 BE) ‖ swap txid → <the same record>`, time order; `fees` and `byCommission` link
+/// the same record. Removed with the fee row on a rejection; rows exist for Swaps admitted from
+/// 0.36.0 on (no backfill).
+pub const maps = [_][]const u8{ "pools", "byValidator", "spentPools", "beat", "fees", "byCommission", "rescinded", "byLp", "trades" };
+
+/// The step's time (ms), the clock of the step whose hook this call runs in: the in-VM call input's
+/// `now` (skein docs/VM.md, "call": the time of the entry that drove the step; replay-exact), set by
+/// main.zig before the hook runs. A trade row's `at`.
+pub var now_ms: u64 = 0;
 
 fn cat(a: Allocator, parts: []const []const u8) ![]u8 {
     return std.mem.concat(a, u8, parts);
@@ -260,7 +271,7 @@ fn rescindOf(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, lp: [33
 /// listed pool input `swap` spends.
 const Listing = union(enum) { deploy, swap: usize };
 
-// ---------------------------------------------------------------- the fee rows (0.33.0)
+// ---------------------------------------------------------------- the fee rows (0.33.0) and trade rows (0.36.0)
 
 fn feeKey(a: Allocator, tp: []const u8, lp: []const u8, txid: [32]u8) ![]u8 {
     return cat(a, &.{ tp, lp, &txid });
@@ -270,26 +281,60 @@ fn commissionKey(a: Allocator, pkh: []const u8, tp: []const u8, txid: [32]u8) ![
     return cat(a, &.{ pkh, tp, &txid });
 }
 
-/// The Swap `tx` (its pool input `input`, its continuation of LpPubKey `lp` at output 0): its fee row
-/// under the LP key, and (a commission not 0) its membership under the commission's key hash. The
-/// fees are src/pool.zig `feesOf`'s, read where the relay's pair check lays them out (`feeLayout`);
-/// a Swap whose fee outputs are not the contract's writes nothing.
-fn putFees(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, input: usize, lp: []const u8) !void {
+fn be64(n: u64) [8]u8 {
+    var b: [8]u8 = undefined;
+    std.mem.writeInt(u64, &b, n, .big);
+    return b;
+}
+
+fn tradeKey(a: Allocator, tp: []const u8, at: u64, txid: [32]u8) ![]u8 {
+    return cat(a, &.{ tp, &be64(at), &txid });
+}
+
+/// The Swap `tx` (its pool input `input`, its continuation `cont` at output 0): its TRADE ROW (0.36.0;
+/// the fee row grown) under the LP key (`fees`), under its time (`trades`), and (a commission not 0)
+/// its membership under the commission's key hash. The fees are src/pool.zig `feesOf`'s, read where
+/// the relay's pair check lays them out (`feeLayout`); the amount in the call's; the amount out the
+/// change of the other asset's reserve between the pool it spent (`pools`: `spent` runs after
+/// `admitted`) and the continuation; a Swap whose fee outputs are not the contract's writes nothing.
+fn putTrade(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, input: usize, cont: PoolFields) !void {
     const f = (try pool.feesOf(a, tx.tx, input)) orelse return;
+    const call = (try pool.parseSwapCall(a, tx.tx.inputs[input].unlocking_script.bytes)) orelse return;
+    const op = tx.tx.inputs[input].previous_outpoint;
+    const spent_cid = (try svc.map("pools").link(try poolKey(a, tp, op.txid.bytes, op.index))) orelse return;
+    const was = try svc.store.getValue(a, spent_cid);
+    const before = if (f.bsv_in) was.getUint("tokenReserve") orelse return error.BadIndex else was.getUint("bsvReserve") orelse return error.BadIndex;
+    const after = if (f.bsv_in) cont.token_reserve else cont.bsv_reserve;
+    if (after > before) return;
+    const fkey = try feeKey(a, tp, &cont.lp, tx.txid);
+    // A re-admission of the same Swap (a dupe hook call): its earlier time row goes, one row stays.
+    if (try svc.map("fees").link(fkey)) |old| if ((try svc.store.getValue(a, old)).getUint("at")) |at0| {
+        _ = try svc.map("trades").remove(try tradeKey(a, tp, at0, tx.txid));
+    };
     const rec = try svc.store.putValue(a, .{ .map = try a.dupe(Entry, &.{
-        .{ .key = "kind", .value = .{ .text = "amm-swap-fees" } },
+        .{ .key = "kind", .value = .{ .text = "amm-trade" } },
         .{ .key = "lp", .value = .{ .uint = f.lp } },
         .{ .key = "validator", .value = .{ .uint = f.validator } },
         .{ .key = "commission", .value = .{ .uint = f.commission } },
         .{ .key = "bsvIn", .value = .{ .boolean = f.bsv_in } },
         .{ .key = "commissionPkh", .value = .{ .bytes = try a.dupe(u8, &f.commission_pkh) } },
+        .{ .key = "txid", .value = .{ .bytes = try a.dupe(u8, &tx.txid) } },
+        .{ .key = "lpPubKey", .value = .{ .bytes = try a.dupe(u8, &cont.lp) } },
+        .{ .key = "side", .value = .{ .text = if (f.bsv_in) "buy" else "sell" } },
+        .{ .key = "amountIn", .value = .{ .uint = call.amount_in } },
+        .{ .key = "amountOut", .value = .{ .uint = before - after } },
+        .{ .key = "bsvReserve", .value = .{ .uint = cont.bsv_reserve } },
+        .{ .key = "tokenReserve", .value = .{ .uint = cont.token_reserve } },
+        .{ .key = "at", .value = .{ .uint = now_ms } },
     }) });
-    try svc.map("fees").putLink(try feeKey(a, tp, lp, tx.txid), rec);
+    try svc.map("fees").putLink(fkey, rec);
+    try svc.map("trades").putLink(try tradeKey(a, tp, now_ms, tx.txid), rec);
     if (f.commission > 0) try svc.map("byCommission").putLink(try commissionKey(a, &f.commission_pkh, tp, tx.txid), rec);
 }
 
-/// A rejected transaction's fee row and its commission membership, gone (the keys from the
-/// transaction: its continuation's LpPubKey at output 0, its txid; the key hash from the row).
+/// A rejected transaction's trade row (its fee row, its time row) and its commission membership,
+/// gone (the keys from the transaction: its continuation's LpPubKey at output 0, its txid; the key
+/// hash and the time from the row).
 fn removeFees(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx) !void {
     if (tx.tx.outputs.len == 0) return;
     const p = pool.poolOfScript(tx.tx.outputs[0].locking_script.bytes) orelse return;
@@ -303,6 +348,7 @@ fn removeFees(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx) !void 
     const cid = (try svc.map("fees").link(key)) orelse return;
     const rec = try svc.store.getValue(a, cid);
     _ = try svc.map("fees").remove(key);
+    if (rec.getUint("at")) |at| _ = try svc.map("trades").remove(try tradeKey(a, tp, at, tx.txid));
     if (rec.getBytes("commissionPkh")) |pkh| _ = try svc.map("byCommission").remove(try commissionKey(a, pkh, tp, tx.txid));
 }
 
@@ -328,11 +374,12 @@ pub fn admitted(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx, o
             continue;
         }
         const why = (try listedAt(a, svc, tp, tx, vout)) orelse continue;
-        try putPool(a, svc, tp, pf);
+        // The trade row first: it reads the spent pool's reserves before the continuation is indexed.
         switch (why) {
-            .swap => |i| try putFees(a, svc, tp, tx, i, &pf.lp),
+            .swap => |i| try putTrade(a, svc, tp, tx, i, pf),
             .deploy => {},
         }
+        try putPool(a, svc, tp, pf);
     }
     try beatIfChanged(a, svc);
 }
@@ -690,6 +737,227 @@ fn answerCommissions(a: Allocator, svc: *Service, tp: []const u8, v: Value) !loo
         o.* = .{ .map = try a.dupe(Entry, &.{ .{ .key = "commissionPkh", .value = .{ .text = try hexOf(a, k) } }, se[0], se[1], se[2] }) };
     }
     return .{ .freeform = .{ .array = out } };
+}
+
+// ---------------------------------------------------------------- the history reads (0.36.0, D1–D3)
+
+/// A trade row as read: its time, its Swap's txid, its record (`putTrade`).
+pub const Trade = struct { at: u64, txid: [32]u8, rec: Value };
+
+/// A price: `sats` per `tokens` token units (base units both), exact (no floats in the program).
+pub const Price = struct {
+    sats: u64,
+    tokens: u64,
+
+    /// x < y, by cross multiplication.
+    pub fn lt(x: Price, y: Price) bool {
+        return @as(u128, x.sats) * y.tokens < @as(u128, y.sats) * x.tokens;
+    }
+};
+
+/// A trade's price, from its amounts by side: a `buy` (sats in) paid `amountIn` sats for `amountOut`
+/// tokens, a `sell` got `amountOut` sats for `amountIn` tokens. Null for a row with no tokens.
+pub fn priceOf(rec: Value) ?Price {
+    const in = rec.getUint("amountIn") orelse return null;
+    const out = rec.getUint("amountOut") orelse return null;
+    const buy = std.mem.eql(u8, rec.getText("side") orelse "", "buy");
+    const p: Price = if (buy) .{ .sats = in, .tokens = out } else .{ .sats = out, .tokens = in };
+    return if (p.tokens == 0) null else p;
+}
+
+/// A trade's volume in each asset: what moved on its sats side and on its token side.
+fn volumeOf(rec: Value) struct { sats: u64, tokens: u64 } {
+    const p = priceOf(rec) orelse return .{ .sats = 0, .tokens = 0 };
+    return .{ .sats = p.sats, .tokens = p.tokens };
+}
+
+fn tradeAt(a: Allocator, svc: *Service, tp: []const u8, kv: anytype) !Trade {
+    if (kv.key.len != tp.len + 40 or kv.value != .cid) return error.BadIndex;
+    return .{
+        .at = std.mem.readInt(u64, kv.key[tp.len..][0..8], .big),
+        .txid = kv.key[tp.len + 8 ..][0..32].*,
+        .rec = try svc.store.getValue(a, kv.value.cid),
+    };
+}
+
+/// Every trade row of the token (`tp`), oldest first (the `trades` map's order: time, then txid).
+fn allTrades(a: Allocator, svc: *Service, tp: []const u8) ![]Trade {
+    const kvs = try svc.map("trades").prefixed(tp);
+    const out = try a.alloc(Trade, kvs.len);
+    for (kvs, out) |kv, *o| o.* = try tradeAt(a, svc, tp, kv);
+    return out;
+}
+
+/// (at, txid) order.
+fn tradeLt(x: Trade, y: Trade) bool {
+    if (x.at != y.at) return x.at < y.at;
+    return std.mem.order(u8, &x.txid, &y.txid) == .lt;
+}
+
+/// A page cursor: the last row's `at ‖ txid`.
+pub const Cursor = struct { at: u64, txid: [32]u8 };
+
+pub const TradeQuery = struct {
+    /// `from ≤ at < to` (null: unbounded).
+    from: ?u64 = null,
+    to: ?u64 = null,
+    limit: usize = 100,
+    /// Rows strictly older than this (at, txid): the next page.
+    before: ?Cursor = null,
+    /// One LP key's rows only (its `fees` rows, D6).
+    lp: ?[33]u8 = null,
+};
+
+/// `/trades`: the token's trade rows, newest first, `q.limit` at most.
+pub fn trades(a: Allocator, svc: *Service, tp: []const u8, q: TradeQuery) ![]Trade {
+    var rows: []Trade = undefined;
+    if (q.lp) |lp| {
+        const kvs = try svc.map("fees").prefixed(try cat(a, &.{ tp, &lp }));
+        var list: std.ArrayList(Trade) = .empty;
+        for (kvs) |kv| {
+            if (kv.value != .cid) return error.BadIndex;
+            const rec = try svc.store.getValue(a, kv.value.cid);
+            // Rows written before 0.36.0 carry no time: not trade rows.
+            const at = rec.getUint("at") orelse continue;
+            try list.append(a, .{ .at = at, .txid = kv.key[kv.key.len - 32 ..][0..32].*, .rec = rec });
+        }
+        std.mem.sort(Trade, list.items, {}, struct {
+            fn f(_: void, x: Trade, y: Trade) bool {
+                return tradeLt(x, y);
+            }
+        }.f);
+        rows = list.items;
+    } else rows = try allTrades(a, svc, tp);
+    var out: std.ArrayList(Trade) = .empty;
+    var i = rows.len;
+    while (i > 0 and out.items.len < q.limit) {
+        i -= 1;
+        const r = rows[i];
+        if (q.to) |to| if (r.at >= to) continue;
+        if (q.from) |from| if (r.at < from) break;
+        if (q.before) |b| if (!tradeLt(r, .{ .at = b.at, .txid = b.txid, .rec = .null })) continue;
+        try out.append(a, r);
+    }
+    return out.items;
+}
+
+/// `/trades?txid=`: the trade row of the Swap `txid` whose continuation is LpPubKey `lp`'s; null none.
+pub fn tradeOf(a: Allocator, svc: *Service, tp: []const u8, lp: [33]u8, txid: [32]u8) !?Trade {
+    const cid = (try svc.map("fees").link(try feeKey(a, tp, &lp, txid))) orelse return null;
+    const rec = try svc.store.getValue(a, cid);
+    return .{ .at = rec.getUint("at") orelse return null, .txid = txid, .rec = rec };
+}
+
+/// One candle: the bucket starting at `t` (ms, a multiple of the resolution), its open, high, low and
+/// close prices (the first, highest, lowest, last trade's), the volume on each side, the trade count.
+pub const Candle = struct { t: u64, o: Price, h: Price, l: Price, c: Price, volume_sats: u64, volume_tokens: u64, n: u64 };
+
+/// The most buckets one `/candles` window may span.
+pub const max_buckets = 5000;
+
+/// `/candles` (D2): the token's trade rows with `from ≤ at < to`, one candle per NON-EMPTY bucket of
+/// `tf` ms (buckets aligned to multiples of `tf` since the epoch), oldest first, across all pools.
+/// `error.TooManyBuckets` when the window spans more than `max_buckets` buckets.
+pub fn candles(a: Allocator, svc: *Service, tp: []const u8, tf: u64, from: u64, to: u64) ![]Candle {
+    if (tf == 0 or to < from) return error.BadQuery;
+    const start = from - from % tf;
+    if ((to - start + tf - 1) / tf > max_buckets) return error.TooManyBuckets;
+    var out: std.ArrayList(Candle) = .empty;
+    for (try allTrades(a, svc, tp)) |r| {
+        if (r.at < from or r.at >= to) continue;
+        const p = priceOf(r.rec) orelse continue;
+        const v = volumeOf(r.rec);
+        const t = r.at - r.at % tf;
+        if (out.items.len > 0 and out.items[out.items.len - 1].t == t) {
+            const c = &out.items[out.items.len - 1];
+            if (c.h.lt(p)) c.h = p;
+            if (p.lt(c.l)) c.l = p;
+            c.c = p;
+            c.volume_sats += v.sats;
+            c.volume_tokens += v.tokens;
+            c.n += 1;
+        } else try out.append(a, .{ .t = t, .o = p, .h = p, .l = p, .c = p, .volume_sats = v.sats, .volume_tokens = v.tokens, .n = 1 });
+    }
+    return out.items;
+}
+
+/// `/stats` (D3): the token at `now` (ms), from its trade rows of the last 24 h and its live pools.
+pub const Stats = struct {
+    /// The last trade's price; none, the deepest live pool's (most sats) marginal price
+    /// (bsvReserve / tokenReserve); no pool either, null.
+    price: ?Price,
+    /// The change from the price at the window's start (the last trade at or before it) to `price`,
+    /// in bps (truncated toward zero); null without a trade at the window's start.
+    change1h: ?i64,
+    change24h: ?i64,
+    volume24h_sats: u64 = 0,
+    volume24h_tokens: u64 = 0,
+    buys24h: u64 = 0,
+    sells24h: u64 = 0,
+    last_trade_at: ?u64,
+    tvl_sats: u64 = 0,
+    tvl_tokens: u64 = 0,
+    /// Live pools.
+    pools: u64 = 0,
+};
+
+pub const hour_ms: u64 = 3_600_000;
+pub const day_ms: u64 = 24 * hour_ms;
+
+/// The change from `then` to `now` in bps, truncated toward zero.
+pub fn changeBps(then: Price, now: Price) i64 {
+    // now/then − 1 = (now.sats·then.tokens − then.sats·now.tokens) / (then.sats·now.tokens)
+    const num = @as(i256, now.sats) * then.tokens - @as(i256, then.sats) * now.tokens;
+    const den = @as(i256, then.sats) * now.tokens;
+    if (den == 0) return 0;
+    const bps = @divTrunc(num * 10_000, den);
+    return std.math.cast(i64, bps) orelse (if (bps < 0) std.math.minInt(i64) else std.math.maxInt(i64));
+}
+
+pub fn stats(a: Allocator, svc: *Service, tp: []const u8, now: u64) !Stats {
+    const rows = try allTrades(a, svc, tp);
+    var st: Stats = .{ .price = null, .change1h = null, .change24h = null, .last_trade_at = null };
+    var last: ?Price = null;
+    var then1h: ?Price = null;
+    var then24h: ?Price = null;
+    const start1h = now -| hour_ms;
+    const start24h = now -| day_ms;
+    for (rows) |r| {
+        if (r.at > now) break;
+        const p = priceOf(r.rec) orelse continue;
+        last = p;
+        st.last_trade_at = r.at;
+        if (r.at <= start1h) then1h = p;
+        if (r.at <= start24h) then24h = p;
+        if (r.at > start24h) {
+            const v = volumeOf(r.rec);
+            st.volume24h_sats += v.sats;
+            st.volume24h_tokens += v.tokens;
+            if (std.mem.eql(u8, r.rec.getText("side") orelse "", "buy")) st.buys24h += 1 else st.sells24h += 1;
+        }
+    }
+    var deepest: ?Price = null;
+    for (try svc.map("pools").prefixed(tp)) |kv| {
+        if (kv.value != .cid) return error.BadIndex;
+        const rec = try svc.store.getValue(a, kv.value.cid);
+        const sats = rec.getUint("bsvReserve") orelse return error.BadIndex;
+        const tokens = rec.getUint("tokenReserve") orelse return error.BadIndex;
+        st.tvl_sats += sats;
+        st.tvl_tokens += tokens;
+        st.pools += 1;
+        if (tokens > 0 and (deepest == null or sats > deepest.?.sats)) deepest = .{ .sats = sats, .tokens = tokens };
+    }
+    st.price = last orelse deepest;
+    if (last) |p| {
+        if (then1h) |t| st.change1h = changeBps(t, p);
+        if (then24h) |t| st.change24h = changeBps(t, p);
+    }
+    return st;
+}
+
+/// The topic prefix (len ‖ topic) a token's rows are keyed under, from its token id.
+pub fn tokenPrefix(a: Allocator, token_id: []const u8) ![]u8 {
+    return topicPrefix(a, try topicOf(a, token_id));
 }
 
 /// `/lookup` (BRC-24, service `ls_amm_<assetId>`), every query naming its token

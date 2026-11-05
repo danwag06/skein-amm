@@ -4,6 +4,28 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.36.0 (2026-11-05)
+
+The history reads, server side (agent-env plans/history-api-build-2026-11-05.md §1; decisions
+D1–D3, D6 in plans/history-api-2026-11-05.md; docs/AMM.md "The history reads"). Programs only.
+
+- **amm-lookup**: one TRADE ROW per admitted Swap, where the 0.33.0 fee row was written (the fee row
+  grew into it, `kind: "amm-trade"`; its fee fields unchanged, so `/positions` and the fee reads
+  answer as before): txid, lpPubKey, side (`buy` = sats in), amountIn (the call's), amountOut (the
+  other asset's reserve before minus after), the three fees, bsvReserve and tokenReserve after the
+  Swap, and `at` = the admitting step's time in ms (the in-VM call input's `now`, set by main.zig
+  before the hook runs; replay-exact). New map `trades: tp ‖ at (u64 BE) ‖ txid → <the record>`;
+  `fees` and `byCommission` link the same record; a rejection removes all three; a re-admission
+  keeps one row. No backfill: Swaps admitted before 0.36.0 have no trade row.
+- **amm-p2p**: three GET reads (filters `trades`, `candles`, `stats`; JSON; `max-age=5`):
+  `/trades?from&to&limit(≤500, default 100)&before&lp` → `{trades, next}` newest first, `?txid=` the
+  one row (404 none), each row's `height` from the overlay state's `placed` (null until the proof
+  lands); `/candles?tf=1m|5m|15m|1h|4h|1d&from&to` → one candle per non-empty bucket
+  `{t, o, h, l, c, volumeSats, volumeTokens, n}`, more than 5000 buckets 400; `/stats` →
+  `{tokenId, price, change1h, change24h, volume24hSats, volume24hTokens, buys24h, sells24h,
+  lastTradeAt, tvlSats, tvlTokens, pools}`. A price is `{sats, tokens}` (exact; no floats).
+- zig 102 (lookup 27, p2p 31).
+
 ## 0.35.1 (2026-11-05)
 
 Settings, the enabled token row: Edit and Disable share the row's action cell, the terms editor opens full width under the token line, and Save / Market only / Cancel sit in one row (0.35.0 dropped the editor into the row's grid as a third cell, squeezing the text and pushing Disable onto its own line). Pages only.

@@ -368,3 +368,187 @@ pub fn parseTxid(text: []const u8) ?[32]u8 {
 pub fn txCache(ch: *Chain, txid: [32]u8) !Cache {
     return if ((try ch.status(txid)) == .proven) .imm else .state;
 }
+
+// ---------------------------------------------------------------- the history reads (0.36.0, D1–D3, D6)
+
+/// Where the overlay has `txid` mined for the token's topic: its `placed` map (skein-overlay
+/// state.zig: `tp ‖ txid → height (u32 BE) ‖ offset (u64 BE) ‖ block hash`, written once the proof
+/// landed), read here as the overlay state the reads load holds it; null while not mined.
+pub fn placedHeight(placed: *w.store.Map, tp: []const u8, txid: [32]u8) !?u32 {
+    const v = (try placed.get(try std.mem.concat(placed.maps.arena, u8, &.{ tp, &txid }))) orelse return null;
+    if (v != .bytes or v.bytes.len < 4) return error.BadIndex;
+    return std.mem.readInt(u32, v.bytes[0..4], .big);
+}
+
+/// The history reads' functions.
+pub const History = enum { trades, candles, stats };
+
+/// The resolutions `/candles` takes, in ms.
+pub fn timeframe(text: []const u8) ?u64 {
+    const tfs = [_]struct { []const u8, u64 }{
+        .{ "1m", 60_000 },          .{ "5m", 300_000 },
+        .{ "15m", 900_000 },        .{ "1h", 3_600_000 },
+        .{ "4h", 14_400_000 },      .{ "1d", 86_400_000 },
+    };
+    for (tfs) |t| if (eql(u8, t[0], text)) return t[1];
+    return null;
+}
+
+pub const max_trades = 500;
+
+fn writePrice(jw: *std.json.Stringify, p: idx.Price) !void {
+    try jw.beginObject();
+    try jw.objectField("sats");
+    try jw.write(p.sats);
+    try jw.objectField("tokens");
+    try jw.write(p.tokens);
+    try jw.endObject();
+}
+
+fn writeTrade(a: Allocator, jw: *std.json.Stringify, t: idx.Trade, height: ?u32) !void {
+    const r = t.rec;
+    try jw.beginObject();
+    try jw.objectField("txid");
+    try jw.write(&w.header.toHex(t.txid));
+    try jw.objectField("lpPubKey");
+    try jw.write(try hexAlloc(a, r.getBytes("lpPubKey") orelse return error.BadIndex));
+    try jw.objectField("side");
+    try jw.write(r.getText("side") orelse return error.BadIndex);
+    inline for (.{ .{ "amountIn", "amountIn" }, .{ "amountOut", "amountOut" }, .{ "feeLp", "lp" }, .{ "feeValidator", "validator" }, .{ "feeCommission", "commission" }, .{ "bsvReserve", "bsvReserve" }, .{ "tokenReserve", "tokenReserve" } }) |f| {
+        try jw.objectField(f[0]);
+        try jw.write(r.getUint(f[1]) orelse return error.BadIndex);
+    }
+    try jw.objectField("at");
+    try jw.write(t.at);
+    try jw.objectField("height");
+    try jw.write(height);
+    try jw.endObject();
+}
+
+/// A cursor's text: hex of `at (u64 BE) ‖ txid` (40 bytes).
+pub fn cursorText(a: Allocator, c: idx.Cursor) ![]const u8 {
+    var b: [40]u8 = undefined;
+    std.mem.writeInt(u64, b[0..8], c.at, .big);
+    @memcpy(b[8..], &c.txid);
+    return hexAlloc(a, &b);
+}
+
+pub fn parseCursor(text: []const u8) ?idx.Cursor {
+    if (text.len != 80) return null;
+    var b: [40]u8 = undefined;
+    _ = std.fmt.hexToBytes(&b, text) catch return null;
+    return .{ .at = std.mem.readInt(u64, b[0..8], .big), .txid = b[8..].* };
+}
+
+fn intParam(a: Allocator, q: []const u8, name: []const u8) !?u64 {
+    const t = (try queryParam(a, q, name)) orelse return null;
+    return std.fmt.parseInt(u64, t, 10) catch error.BadParam;
+}
+
+/// One history read (H1 `/trades`, H2 `/candles`, H3 `/stats`) over the pool lookup's index
+/// `svc`, the overlay's `placed` map (each trade's `height`), the token `token`, the query `q`, at
+/// `now` (ms, the read's clock: `/stats`' windows). JSON, cache `state`.
+pub fn historyRead(a: Allocator, svc: *lookup.Service, ch: *Chain, placed: *w.store.Map, token: []const u8, h: History, q: []const u8, now: u64) !Value {
+    const tp = try idx.tokenPrefix(a, token);
+    var out: std.Io.Writer.Allocating = .init(a);
+    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    switch (h) {
+        .trades => {
+            // ?txid=: one row (its LP key from the Swap's continuation at output 0, in the chain state).
+            if (try queryParam(a, q, "txid")) |text| {
+                const txid = parseTxid(text) orelse return httpError(a, 400, "want ?txid=<txid>: 64 hex characters");
+                const raw = (try ch.txRaw(txid)) orelse return httpError(a, 404, "no trade for this txid");
+                const t = Transaction.parse(a, raw) catch return httpError(a, 404, "no trade for this txid");
+                if (t.outputs.len == 0) return httpError(a, 404, "no trade for this txid");
+                const p = pool.poolOfScript(t.outputs[0].locking_script.bytes) orelse return httpError(a, 404, "no trade for this txid");
+                const tr = (try idx.tradeOf(a, svc, tp, p.lp, txid)) orelse return httpError(a, 404, "no trade for this txid");
+                try writeTrade(a, &jw, tr, try placedHeight(placed, tp, txid));
+                return httpCached(a, 200, "application/json", .state, out.written());
+            }
+            var tq: idx.TradeQuery = .{};
+            const bad = "want ?from=<ms>&to=<ms>&limit=<n≤500>&before=<cursor>&lp=<hex33>";
+            tq.from = intParam(a, q, "from") catch return httpError(a, 400, bad);
+            tq.to = intParam(a, q, "to") catch return httpError(a, 400, bad);
+            if (intParam(a, q, "limit") catch return httpError(a, 400, bad)) |n| {
+                if (n == 0 or n > max_trades) return httpError(a, 400, bad);
+                tq.limit = @intCast(n);
+            }
+            if (try queryParam(a, q, "before")) |c| tq.before = parseCursor(c) orelse return httpError(a, 400, bad);
+            if (try queryParam(a, q, "lp")) |k| {
+                if (k.len != 66) return httpError(a, 400, bad);
+                var lp: [33]u8 = undefined;
+                _ = std.fmt.hexToBytes(&lp, k) catch return httpError(a, 400, bad);
+                tq.lp = lp;
+            }
+            const rows = try idx.trades(a, svc, tp, tq);
+            try jw.beginObject();
+            try jw.objectField("trades");
+            try jw.beginArray();
+            for (rows) |r| try writeTrade(a, &jw, r, try placedHeight(placed, tp, r.txid));
+            try jw.endArray();
+            // The next page's cursor: the last row's, when the page is full.
+            try jw.objectField("next");
+            if (rows.len == tq.limit) try jw.write(try cursorText(a, .{ .at = rows[rows.len - 1].at, .txid = rows[rows.len - 1].txid })) else try jw.write(null);
+            try jw.endObject();
+        },
+        .candles => {
+            const bad = "want ?tf=1m|5m|15m|1h|4h|1d&from=<ms>&to=<ms>";
+            const tf = timeframe((try queryParam(a, q, "tf")) orelse return httpError(a, 400, bad)) orelse return httpError(a, 400, bad);
+            const from = (intParam(a, q, "from") catch return httpError(a, 400, bad)) orelse return httpError(a, 400, bad);
+            const to = (intParam(a, q, "to") catch return httpError(a, 400, bad)) orelse return httpError(a, 400, bad);
+            if (to < from) return httpError(a, 400, bad);
+            const cs = idx.candles(a, svc, tp, tf, from, to) catch |e| switch (e) {
+                error.TooManyBuckets => return httpError(a, 400, "the window spans more than 5000 buckets"),
+                else => return e,
+            };
+            try jw.beginArray();
+            for (cs) |c| {
+                try jw.beginObject();
+                try jw.objectField("t");
+                try jw.write(c.t);
+                inline for (.{ "o", "h", "l", "c" }) |f| {
+                    try jw.objectField(f);
+                    try writePrice(&jw, @field(c, f));
+                }
+                try jw.objectField("volumeSats");
+                try jw.write(c.volume_sats);
+                try jw.objectField("volumeTokens");
+                try jw.write(c.volume_tokens);
+                try jw.objectField("n");
+                try jw.write(c.n);
+                try jw.endObject();
+            }
+            try jw.endArray();
+        },
+        .stats => {
+            const s = try idx.stats(a, svc, tp, now);
+            try jw.beginObject();
+            try jw.objectField("tokenId");
+            try jw.write(token);
+            try jw.objectField("price");
+            if (s.price) |p| try writePrice(&jw, p) else try jw.write(null);
+            try jw.objectField("change1h");
+            try jw.write(s.change1h);
+            try jw.objectField("change24h");
+            try jw.write(s.change24h);
+            try jw.objectField("volume24hSats");
+            try jw.write(s.volume24h_sats);
+            try jw.objectField("volume24hTokens");
+            try jw.write(s.volume24h_tokens);
+            try jw.objectField("buys24h");
+            try jw.write(s.buys24h);
+            try jw.objectField("sells24h");
+            try jw.write(s.sells24h);
+            try jw.objectField("lastTradeAt");
+            try jw.write(s.last_trade_at);
+            try jw.objectField("tvlSats");
+            try jw.write(s.tvl_sats);
+            try jw.objectField("tvlTokens");
+            try jw.write(s.tvl_tokens);
+            try jw.objectField("pools");
+            try jw.write(s.pools);
+            try jw.endObject();
+        },
+    }
+    return httpCached(a, 200, "application/json", .state, out.written());
+}

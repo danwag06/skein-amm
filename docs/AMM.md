@@ -485,6 +485,34 @@ answers (amm-lookup `answer`, the same code `/lookup` runs), P3's pools its `{lp
 minimum to the lookup's rows; D11, D13): no route of this app. The pages (web/ui) read only these
 routes and the wallet; they send `/lookup` nowhere.
 
+## The history reads (0.36.0)
+
+David Case, 2026-11-05 (agent-env plans/history-api-2026-11-05.md, D1–D3, D6; build brief
+plans/history-api-build-2026-11-05.md): the pool lookup writes ONE TRADE ROW per admitted Swap and
+three plain reads answer from those rows, computed on read (nothing precomputed, no backfill: Swaps
+admitted before 0.36.0 have no row).
+
+**The trade row** (amm-lookup `putTrade`, where the 0.33.0 fee row was written; the fee row grew
+into it): `{kind: "amm-trade", txid, lpPubKey, side, amountIn, amountOut, lp, validator,
+commission, bsvIn, commissionPkh, bsvReserve, tokenReserve, at}` — `side` `buy` (sats in) or
+`sell` (tokens in); `amountIn` the call's (the fees included), `amountOut` what the pool paid out
+(the other asset's reserve before minus after); the three fees in the input asset; the reserves the
+continuation holds after the Swap; `at` the admitting step's time in ms (the in-VM call input's
+`now`, the time of the entry that drove the step: per host, replay-exact). Keys: `trades: tp ‖ at
+(u64 BE) ‖ swap txid`, and the 0.33.0 `fees` / `byCommission` keys, all linking the one record. A
+rejection removes it.
+
+**The routes** (amm-p2p, filters `trades`, `candles`, `stats`; JSON; cache `state`; amounts integers
+in base units; a price is `{sats, tokens}`: `sats` per `tokens` token units, exact, from one trade's
+amounts — a buy `amountIn / amountOut`, a sell `amountOut / amountIn`):
+
+| # | route | answer |
+|---|---|---|
+| H1 | `GET /@<token>/amm/trades?from=<ms>&to=<ms>&limit=<n≤500>&before=<cursor>&lp=<hex33>` | `{trades: [<row>], next: <cursor> \| null}` newest first, `from ≤ at < to` (both optional), `limit` default 100, `next` the last row's cursor when the page is full (hex of `at (u64 BE) ‖ txid`), `lp` one LP key's rows (D6's position history); a row `{txid, lpPubKey, side, amountIn, amountOut, feeLp, feeValidator, feeCommission, bsvReserve, tokenReserve, at, height}`, `height` where the overlay has the txid `placed` (its `<app>/state` map `placed`, written once the proof landed), else null |
+| H1 | `GET /@<token>/amm/trades?txid=<txid>` | the one row; 404 none |
+| H2 | `GET /@<token>/amm/candles?tf=1m\|5m\|15m\|1h\|4h\|1d&from=<ms>&to=<ms>` | `[{t, o, h, l, c, volumeSats, volumeTokens, n}]` one per NON-EMPTY bucket, oldest first, across all pools: `t` the bucket's start (a multiple of `tf` since the epoch), `o`/`h`/`l`/`c` prices, the volumes each side's amounts summed, `n` the trades; `from ≤ at < to`, both required; more than 5000 buckets, 400 |
+| H3 | `GET /@<token>/amm/stats` | `{tokenId, price, change1h, change24h, volume24hSats, volume24hTokens, buys24h, sells24h, lastTradeAt, tvlSats, tvlTokens, pools}` at the read's time: `price` the last trade's, else the deepest live pool's (most sats) marginal price `{bsvReserve, tokenReserve}`, else null; the changes in bps (integers, truncated toward zero) from the last trade at or before the window's start, null without one; volumes and counts over the trades of the last 24 h; TVL the live pools' reserves summed; `pools` the live pool count |
+
 ## Interfaces
 
 **Overlay** (base URL `<handle>.<host>/amm`):
@@ -740,6 +768,7 @@ writes fails inside the call). Exact paths match before a prefix, so
 | `/spends` | read | `spends` → `amm-p2p.spends` | 0.9.0 |
 | `/token` | read | `token` → `amm-setup.token` | 0.22.0 |
 | `/pools/beef`, `/positions`, `/fees/validator`, `/fees/commission`, `/terms`, `/tx`, `/swaps` | read | `poolsBeef`, `positions`, `validatorFees`, `commissionFees`, `readTerms`, `tx`, `swaps` → `amm-p2p.<the same>` | 0.34.0 ("The public read API") |
+| `/trades`, `/candles`, `/stats` | read | `trades`, `candles`, `stats` → `amm-p2p.<the same>` | 0.36.0 ("The history reads") |
 | `/.live/tm_color_<txid>_0-live`, `/.live/ls_amm_<txid>_0-live` | the runtime's liveness read (no program, skein #138) | | |
 | `/live` | gone | | 0.5.0 (410 in 0.4.0) |
 

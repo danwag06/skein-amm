@@ -5,6 +5,7 @@
 const std = @import("std");
 const idx = @import("index.zig");
 const lookup = @import("lookup");
+const vm = @import("overlay_sk");
 
 pub const version = "0.1.0";
 
@@ -60,5 +61,16 @@ pub fn documentation(_: std.mem.Allocator, _: []const u8) anyerror![]const u8 {
 }
 
 pub fn main() u8 {
+    stepTime();
     return lookup.main(idx.spec);
+}
+
+/// The step's time for the hooks (0.36.0, a trade row's `at`): the in-VM call input's `now`, the time
+/// of the entry that drove the step (skein docs/VM.md, "call"; replay-exact). The input is read
+/// again by `lookup.main`.
+fn stepTime() void {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.wasm_allocator);
+    defer arena_state.deinit();
+    const in = vm.input(arena_state.allocator()) catch return;
+    idx.now_ms = in.getUint("now") orelse 0;
 }

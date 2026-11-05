@@ -1455,6 +1455,9 @@ test "read API (0.34.0): the routes and their filters in the manifest — plain 
         .{ "/spends", "spends" },
         .{ "/tx", "tx" },
         .{ "/swaps", "swaps" },
+        .{ "/trades", "trades" },
+        .{ "/candles", "candles" },
+        .{ "/stats", "stats" },
     };
     for (want) |x| {
         try testing.expectEqualStrings(try std.fmt.allocPrint(a, "amm-p2p.{s}", .{x[1]}), scbor.Value.str(m.get("filters").?.get(x[1])).?);
@@ -1609,4 +1612,120 @@ test "read API (0.34.0): P7 /terms — the validator's terms with its identity a
     const none = try jsonOf(a, try reads.termsJson(a, null, pkh, 0));
     try testing.expect(none.object.get("validator").? == .null);
     try testing.expectEqual(@as(i64, 0), none.object.get("market").?.object.get("minCommissionBps").?.integer);
+}
+
+fn httpBody(v: Value) []const u8 {
+    return v.getBytes("body").?;
+}
+
+fn httpStatus(v: Value) u64 {
+    return v.getUint("status").?;
+}
+
+test "history reads (0.36.0): H1 /trades — newest first, each row's height from the overlay's `placed` (null until the proof lands), limit and cursor, ?lp=, ?txid= (404 none); bad parameters 400" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    amm_idx.now_ms = 7_000;
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const s1 = w.beef.txidOf(unhex(a, vec.swap_bsv_in));
+    const s2 = w.beef.txidOf(unhex(a, vec.swap_tokens_in));
+    const maps = try w.store.Maps.create(a, e.ms.store());
+    var placed = maps.map(null);
+    const tp = try amm_idx.tokenPrefix(a, e.token);
+
+    const r0 = try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "", 0);
+    try testing.expectEqual(@as(u64, 200), httpStatus(r0));
+    try testing.expectEqualStrings("public, max-age=5", r0.get("headers").?.getText("cache-control").?);
+    const j0 = try jsonOf(a, httpBody(r0));
+    const rows = j0.object.get("trades").?.array.items;
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expect(rows[0].object.get("height").? == .null);
+    try testing.expect(j0.object.get("next").? == .null);
+    // Same time: txid order, newest (greatest) first.
+    const first: [32]u8 = if (std.mem.order(u8, &s1, &s2) == .gt) s1 else s2;
+    try testing.expectEqualStrings(&w.header.toHex(first), rows[0].object.get("txid").?.string);
+    for (rows) |r| {
+        const o = r.object;
+        try testing.expectEqualStrings(vec.lp, o.get("lpPubKey").?.string);
+        try testing.expectEqual(@as(i64, 7_000), o.get("at").?.integer);
+        const buy = eql(u8, o.get("txid").?.string, &w.header.toHex(s1));
+        try testing.expectEqualStrings(if (buy) "buy" else "sell", o.get("side").?.string);
+        try testing.expectEqual(@as(i64, if (buy) 20_000 else 50_000), o.get("amountIn").?.integer);
+        try testing.expectEqual(@as(i64, if (buy) 60 else 150), o.get("feeLp").?.integer);
+        try testing.expectEqual(@as(i64, if (buy) 10 else 25), o.get("feeValidator").?.integer);
+        try testing.expectEqual(@as(i64, if (buy) 20 else 50), o.get("feeCommission").?.integer);
+        try testing.expect(o.get("amountOut").?.integer > 0);
+        try testing.expect(o.get("bsvReserve").?.integer > 0 and o.get("tokenReserve").?.integer > 0);
+    }
+
+    // The proof landed for the sats-in Swap: the overlay placed it at height 42.
+    var val: [44]u8 = .{0} ** 44;
+    std.mem.writeInt(u32, val[0..4], 42, .big);
+    try placed.put(try std.mem.concat(a, u8, &.{ tp, &s1 }), .{ .bytes = &val });
+    const one = try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, try std.fmt.allocPrint(a, "txid={s}", .{&w.header.toHex(s1)}), 0)));
+    try testing.expectEqual(@as(i64, 42), one.object.get("height").?.integer);
+    try testing.expectEqualStrings("buy", one.object.get("side").?.string);
+    const other = try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, try std.fmt.allocPrint(a, "txid={s}", .{&w.header.toHex(s2)}), 0)));
+    try testing.expect(other.object.get("height").? == .null);
+    try testing.expectEqual(@as(u64, 404), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, try std.fmt.allocPrint(a, "txid={s}", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.pool_deploy)))}), 0)));
+    try testing.expectEqual(@as(u64, 404), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "txid=" ++ "77" ** 32, 0)));
+    try testing.expectEqual(@as(u64, 400), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "txid=abc", 0)));
+
+    // Paging: a full page carries the cursor; the next page from it; then an empty one.
+    const pg1 = try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "limit=1", 0)));
+    const cur = pg1.object.get("next").?.string;
+    try testing.expectEqual(@as(usize, 80), cur.len);
+    const pg2 = try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, try std.fmt.allocPrint(a, "limit=1&before={s}", .{cur}), 0)));
+    try testing.expect(!eql(u8, pg1.object.get("trades").?.array.items[0].object.get("txid").?.string, pg2.object.get("trades").?.array.items[0].object.get("txid").?.string));
+    const pg3 = try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, try std.fmt.allocPrint(a, "limit=1&before={s}", .{pg2.object.get("next").?.string}), 0)));
+    try testing.expectEqual(@as(usize, 0), pg3.object.get("trades").?.array.items.len);
+    // The window and the LP key.
+    try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "from=7001", 0)))).object.get("trades").?.array.items.len);
+    try testing.expectEqual(@as(usize, 2), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "from=7000&to=7001&lp=" ++ vec.lp, 0)))).object.get("trades").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "lp=" ++ unknown_lp, 0)))).object.get("trades").?.array.items.len);
+    for ([_][]const u8{ "limit=501", "limit=0", "limit=x", "from=-1", "before=zz", "lp=02ab" }) |bad|
+        try testing.expectEqual(@as(u64, 400), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, bad, 0)));
+    try testing.expectEqual(@as(u64, 200), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .trades, "limit=500", 0)));
+}
+
+test "history reads (0.36.0): H2 /candles — the six resolutions, prices as {sats, tokens}, non-empty buckets only; a window over 5000 buckets, an unknown tf or a missing bound 400; H3 /stats" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    amm_idx.now_ms = 7_000;
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const maps = try w.store.Maps.create(a, e.ms.store());
+    var placed = maps.map(null);
+
+    for ([_][]const u8{ "1m", "5m", "15m", "1h", "4h", "1d" }) |tf| {
+        const r = try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .candles, try std.fmt.allocPrint(a, "tf={s}&from=0&to=600000", .{tf}), 0);
+        try testing.expectEqual(@as(u64, 200), httpStatus(r));
+        const cs = (try jsonOf(a, httpBody(r))).array.items;
+        try testing.expectEqual(@as(usize, 1), cs.len);
+        const c = cs[0].object;
+        try testing.expectEqual(@as(i64, 0), c.get("t").?.integer);
+        try testing.expectEqual(@as(i64, 2), c.get("n").?.integer);
+        try testing.expect(c.get("o").?.object.get("sats").?.integer > 0 and c.get("o").?.object.get("tokens").?.integer > 0);
+        try testing.expect(c.get("volumeSats").?.integer > 20_000);
+        try testing.expect(c.get("volumeTokens").?.integer > 50_000);
+    }
+    try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .candles, "tf=1m&from=7001&to=600000", 0)))).array.items.len);
+    try testing.expectEqual(@as(u64, 200), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .candles, "tf=1m&from=0&to=300000000", 0)));
+    for ([_][]const u8{ "tf=1m&from=0&to=300000001", "tf=2m&from=0&to=60000", "tf=1m&to=60000", "tf=1m&from=0", "from=0&to=60000", "tf=1m&from=10&to=5" }) |bad|
+        try testing.expectEqual(@as(u64, 400), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .candles, bad, 0)));
+
+    const st = (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .stats, "", 8_000)))).object;
+    try testing.expectEqualStrings(e.token, st.get("tokenId").?.string);
+    try testing.expect(st.get("price").?.object.get("sats").?.integer > 0);
+    try testing.expect(st.get("change1h").? == .null);
+    try testing.expect(st.get("change24h").? == .null);
+    try testing.expectEqual(@as(i64, 1), st.get("buys24h").?.integer);
+    try testing.expectEqual(@as(i64, 1), st.get("sells24h").?.integer);
+    try testing.expectEqual(@as(i64, 7_000), st.get("lastTradeAt").?.integer);
+    try testing.expectEqual(@as(i64, 1), st.get("pools").?.integer);
+    try testing.expect(st.get("tvlSats").?.integer > 0 and st.get("tvlTokens").?.integer > 0);
+    try testing.expect(st.get("volume24hSats").?.integer > 20_000);
 }

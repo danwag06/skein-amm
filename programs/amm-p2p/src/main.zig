@@ -34,6 +34,9 @@
 //!                   the public read routes (0.34.0, reads.zig; docs/AMM.md "The public read API"):
 //!                   /pools/beef (P3), /positions (P4), /fees/validator (P5), /fees/commission (P6),
 //!                   /terms (P7), /tx (P9), /swaps (P10); plain GETs, cache headers per class
+//!   trades, candles, stats
+//!                   the history reads (0.36.0, reads.zig `historyRead`): /trades (H1), /candles
+//!                   (H2), /stats (H3), over the pool lookup's trade rows
 //!   amm.swap.submit, amm.swap.status, amm.swap.terms   an in-VM call of the interface amm.swap/1 (relay.zig)
 //!   amm.pool.terms, amm.pool.affirm   an in-VM call of the interface amm.pool/1 (the validator's terms,
 //!                   0.9.0; the affirmation of a proposed pool, 0.11.0: amm-validator's fn `affirm`
@@ -319,7 +322,7 @@ fn spendsRead(a: Allocator, in: Value, arg: Value) !Value {
 }
 
 /// The public read routes' functions (0.34.0; the manifest's filters name them).
-const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps };
+const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps, trades, candles, stats };
 
 /// One public read (reads.zig): P3 to P7, P9, P10.
 fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
@@ -334,6 +337,14 @@ fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
     const token = rec.getText("tokenId") orelse return reads.httpError(a, 404, "no token yet: this instance has had no deploy");
     const st = try loadState(a, in);
     var svc = try reads.loadLookup(a, vm.store(), try vm.head(a, try lookup.headName(a, relay.app_name, amm_lookup.service_name)));
+    // The history reads (0.36.0): the trade rows, each trade's height from the overlay's `placed`.
+    const hist: ?reads.History = switch (r) {
+        .trades => .trades,
+        .candles => .candles,
+        .stats => .stats,
+        else => null,
+    };
+    if (hist) |h| return reads.historyRead(a, &svc, st.ch, st.map("placed"), token, h, q, @intCast(st.now));
     const list = switch (r) {
         .poolsBeef => "lp",
         .positions => "lp",

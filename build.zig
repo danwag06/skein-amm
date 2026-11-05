@@ -138,6 +138,7 @@ fn imports(b: *std.Build, m: Mods, program: []const u8) []const std.Build.Module
     };
     const more: []const std.Build.Module.Import = if (std.mem.eql(u8, program, "amm-lookup")) &.{
         .{ .name = "lookup", .module = m.lookup },
+        .{ .name = "overlay_sk", .module = m.overlay_sk },
     } else if (std.mem.eql(u8, program, "amm-validator")) &.{
         .{ .name = "wallet", .module = m.wallet },
         .{ .name = "message", .module = m.message },
