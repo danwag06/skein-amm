@@ -72,7 +72,7 @@ const wire = (p: PoolState) => ({ outpoint: p.outpoint, bsvReserve: Number(p.bsv
 
 const af = { fetch: async () => new Response("{}", { status: 404 }) };
 /** The pools route's answer the Swap page holds (P2): the one pool, its LP key, its validator's peer. */
-const held = () => ({ market: { commissionPkh: null, minCommissionBps: 0 }, pools: [{ ...pool(OLD, 1_000_000n, 5_000_000n), lpPubKey: LP, validatorPeerId: PEER }] });
+const held = () => ({ market: { commissionPkh: null, minCommissionBps: 0 }, validators: [{ identity: SKEIN, peerId: PEER }], pools: [{ ...pool(OLD, 1_000_000n, 5_000_000n), lpPubKey: LP, validatorPeerId: PEER }] });
 const accepted = (txid: string): SwapOutcome => ({ status: "accepted", id: "r2", txid, completed: { internalized: false } as never });
 const spent = (p?: PoolState): SwapOutcome => ({ status: "refused", id: "r1", reason: "pool_spent", ...(p ? { pool: p } : {}) });
 

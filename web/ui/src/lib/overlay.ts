@@ -9,7 +9,7 @@
  * | # | route | answer |
  * |---|---|---|
  * | P1 | `GET <origin>/amm/pools` (and as an event stream) | `[{tokenId, …P2 row}]`, every enabled token's live pools (the host's) |
- * | P2 | `GET <origin>/@<token>/amm/pools` (and as an event stream) | `{market: {commissionPkh, minCommissionBps}, pools: [{lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId}]}`: only pools whose validator beats now and whose commission is at or above the market's minimum (the host's) |
+ * | P2 | `GET <origin>/@<token>/amm/pools` (and as an event stream) | `{market: {commissionPkh, minCommissionBps}, validators: [{identity, peerId}] (0.34.1: beating now), pools: [{lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId}]}`: only pools whose validator beats now and whose commission is at or above the market's minimum (the host's) |
  * | P3 | `GET /@<token>/amm/pools/beef?lp=k1,k2` | `{pools: [P2 row without validatorPeerId], beef: <base64 BEEF of their transactions>}` |
  * | P4 | `GET /@<token>/amm/positions?lp=k1,k2` | `[{lpPubKey, status: live|rescinded|closed, outpoint?, current?, sats, tokens, swaps}]` |
  * | P5 | `GET /@<token>/amm/fees/validator?id=k1,k2` | `[{validatorIdentityKey, sats, tokens, swaps, pools}]` |
@@ -142,16 +142,26 @@ function toMarket(x: unknown): Market {
   return { commissionPkh: pkh, minCommissionBps: min };
 }
 
-/** P2's answer: the market and the pools a swap may use now. */
+/** A validator beating on the token's topic now (P2's `validators`, 0.34.1): its identity key and libp2p peer ID. */
+export interface BeatingValidator {
+  identity: string;
+  peerId: string;
+}
+
+/** P2's answer: the market, the pools a swap may use now, and (0.34.1) the validators beating on the token's topic now. */
 export interface PoolsAnswer {
   market: Market;
   pools: PoolRow[];
+  validators: BeatingValidator[];
 }
 
 /** P2's JSON. */
 export function parsePools(x: unknown): PoolsAnswer {
-  const a = x as { market?: unknown; pools?: unknown } | null;
-  return { market: toMarket(a?.market), pools: poolRows(a?.pools) };
+  const a = x as { market?: unknown; pools?: unknown; validators?: unknown } | null;
+  const validators = (Array.isArray(a?.validators) ? (a!.validators as Record<string, unknown>[]) : [])
+    .filter((v) => v && typeof v.identity === "string")
+    .map((v) => ({ identity: String(v.identity).toLowerCase(), peerId: typeof v.peerId === "string" ? v.peerId : "" }));
+  return { market: toMarket(a?.market), pools: poolRows(a?.pools), validators };
 }
 
 /** P1's JSON: every enabled token's rows, each naming its `tokenId`. */

@@ -21,12 +21,14 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 
 describe("the pools routes (P1, P2)", () => {
   it("P2: {market, pools}; each row the engine's PoolState (bigints) with its LP key and its validator's peer ID", () => {
-    const a = parsePools({ market: { commissionPkh: "AB".repeat(20), minCommissionBps: 5 }, pools: [row("aa_0", { validatorPeerId: PEER }), { junk: true }] });
+    const a = parsePools({ market: { commissionPkh: "AB".repeat(20), minCommissionBps: 5 }, validators: [{ identity: K.toUpperCase(), peerId: PEER }, { junk: 1 }], pools: [row("aa_0", { validatorPeerId: PEER }), { junk: true }] });
     expect(a.market).toEqual({ commissionPkh: "ab".repeat(20), minCommissionBps: 5 });
+    // 0.34.1: the validators beating on the token's topic now.
+    expect(a.validators).toEqual([{ identity: K, peerId: PEER }]);
     expect(a.pools).toEqual([
       { outpoint: "aa_0", bsvReserve: 1000000n, tokenReserve: 5000000n, liquidityFeeBps: 30n, validationFeeBps: 5n, commissionBps: 10n, validatorIdentityKey: K, lpPubKey: LP, validatorPeerId: PEER },
     ]);
-    expect(parsePools({ pools: [] })).toEqual({ market: { commissionPkh: null, minCommissionBps: 0 }, pools: [] });
+    expect(parsePools({ pools: [] })).toEqual({ market: { commissionPkh: null, minCommissionBps: 0 }, pools: [], validators: [] });
     expect(toPoolRow(row("x_0", { commissionBps: undefined }))?.commissionBps).toBe(0n);
   });
 
@@ -60,8 +62,8 @@ describe("the pools routes (P1, P2)", () => {
     const got: unknown[] = [];
     const off = watchPools("http://x/@t/amm/pools", parsePools, (a) => got.push(a), { EventSource: FakeES });
     expect(made.map((m) => m.url)).toEqual(["http://x/@t/amm/pools"]);
-    made[0]!.es.fns.get("pools")!({ data: JSON.stringify({ market: {}, pools: [row("aa_0", { validatorPeerId: PEER })] }) });
-    made[0]!.es.fns.get("pools")!({ data: JSON.stringify({ market: {}, pools: [] }) });
+    made[0]!.es.fns.get("pools")!({ data: JSON.stringify({ market: {}, validators: [{ identity: K, peerId: PEER }], pools: [row("aa_0", { validatorPeerId: PEER })] }) });
+    made[0]!.es.fns.get("pools")!({ data: JSON.stringify({ market: {}, validators: [{ identity: K, peerId: PEER }], pools: [] }) });
     expect(got).toHaveLength(2);
     expect((got[1] as { pools: unknown[] }).pools).toEqual([]);
     off();

@@ -15,7 +15,6 @@ import {
   NO_TERMS_TEXT,
   useValidatorTerms,
   type HostedToken,
-  type PoolRow,
   type Position,
   type Session,
 } from "../data/exchange";
@@ -257,20 +256,12 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
   );
 }
 
-/**
- * Whether a position's pool is listed by the host's pools route (0.34.0: the page reads no
- * liveness; the host lists a pool only while its validator is beating).
- */
-export function listedLive(p: Pick<Position, "outpoint">, rows: PoolRow[] | null): boolean {
-  return (rows ?? []).some((r) => r.outpoint.replace("_", ".") === p.outpoint);
-}
-
-export function Liquidity({ session, hosted, rows }: { session: Session; hosted: HostedToken[] | null; rows?: PoolRow[] | null }) {
+export function Liquidity({ session, hosted }: { session: Session; hosted: HostedToken[] | null }) {
   const connected = session.status === "connected";
   const positions = useMyPositions(connected);
   const [closed, setClosed] = useState<{ msg: string; txid: string } | null>(null);
   // 0.32.0: the cards are the live positions; the per-token fees line counts the closed ones too.
-  const live = positions.data?.filter((p) => !p.closed).map((p) => ({ ...p, validator: { ...p.validator, live: listedLive(p, rows ?? null) } })) ?? null;
+  const live = positions.data?.filter((p) => !p.closed) ?? null;
   const byToken = positions.data ? feesByToken(positions.data) : [];
   if (!connected) {
     return (

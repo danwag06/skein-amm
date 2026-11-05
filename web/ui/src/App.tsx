@@ -90,7 +90,7 @@ function PageView({ route, session, root, hosted }: { route: Route; session: Ses
     case "swap":
       return <SwapPage session={session} {...(route.tokenId ? { tokenId: route.tokenId } : {})} tokens={hosted.tokens} />;
     case "liquidity":
-      return <Liquidity session={session} hosted={hosted.tokens} rows={hosted.rows} />;
+      return <Liquidity session={session} hosted={hosted.tokens} />;
     case "tokens":
       return <YourTokens session={session} />;
     case "settings":

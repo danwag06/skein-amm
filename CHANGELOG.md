@@ -4,6 +4,15 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.34.1 (2026-11-04)
+
+- Pages only (David, review item 8 of 0.34.0): the pools route `GET /@<token>/amm/pools` (P2) carries
+  `validators: [{identity, peerId}]`, the validators beating on the token's topic now (the
+  open-exchange host adds it; the pools filter is unchanged). Positions marks a position's validator
+  live when its identity is in that set, read by ONE plain P2 GET per token the wallet has
+  positions in (not a stream), on load; 0.34.0's mark (the pool listed on the host-wide stream) is
+  gone. Nothing else changes.
+
 ## 0.34.0 (2026-11-04)
 
 The exchange's public read API (agent-env plans/exchange-api-build-2026-11-04.md §B; decisions

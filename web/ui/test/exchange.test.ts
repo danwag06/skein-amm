@@ -97,6 +97,8 @@ interface Instance {
   /** The host's pools routes (P1, P2): each token's listed pools (the host filtered them). */
   pools: Record<string, unknown[]>;
   market: { commissionPkh: string | null; minCommissionBps: number };
+  /** P2's `validators` (0.34.1): beating on the token's topic now. */
+  validators: { identity: string; peerId: string }[];
   /** The transactions P3's BEEF carries. */
   poolTxs: Transaction[];
   /** P4: records by LpPubKey (unknown: closed with zeros). */
@@ -126,6 +128,7 @@ function instance(): Instance {
     discovery: { on: false },
     pools: { [TOKEN]: [wirePool(poolDeploy.id("hex"), v.pool0)] },
     market: { commissionPkh: null, minCommissionBps: 0 },
+    validators: [{ identity: SKEIN, peerId: PEER }],
     poolTxs: [fund, tokenDeploy, poolDeploy],
     lpPools: {},
     terms: { identity: SKEIN, peerId: PEER, lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 0 },
@@ -177,7 +180,7 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
   }
   const [, token, path] = tok;
   const rows = (inst.pools[token!] ?? []) as Record<string, unknown>[];
-  if (path === "/pools") return json({ market: inst.market, pools: rows });
+  if (path === "/pools") return json({ market: inst.market, validators: inst.validators, pools: rows });
   if (path === "/pools/beef") {
     const keys = list(u, "lp");
     const b = new Beef();
@@ -476,14 +479,20 @@ describe("exchange.ts, wired", () => {
     connect({ pools: [row, again] });
     inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 0, swaps: 1 };
     expect(await myPositions()).toEqual([
-      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: false }, feesEarnedSats: 60n, feesEarnedTokens: 0n },
+      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 60n, feesEarnedTokens: 0n },
     ]);
-    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`]);
+    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/pools`]);
+    // 0.34.1: live = the validator is in P2's `validators` (beating now), not whether the pool is listed.
+    inst.validators = [];
+    expect((await myPositions())[0]!.validator.live).toBe(false);
+    inst.validators = [{ identity: SKEIN, peerId: PEER }];
+    inst.pools[TOKEN] = [];
+    expect((await myPositions())[0]!.validator.live).toBe(true);
 
     // Rescinded: the card's status from the record, the Rescind's output and its state.
     inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "rescinded", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 150, swaps: 2 };
     expect(await myPositions()).toEqual([
-      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: false }, rescinded: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
+      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, rescinded: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
     ]);
 
     // Closed: kept, marked closed (no card), for its fees; a close of a position not held is refused.
@@ -518,9 +527,9 @@ describe("exchange.ts, wired", () => {
     inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
     inst.txs[pd] = atomic(poolDeploy, [fund, tokenDeploy]);
     expect(await myPositions()).toEqual([
-      { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: false }, feesEarnedSats: 0n, feesEarnedTokens: 0n },
+      { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 0n, feesEarnedTokens: 0n },
     ]);
-    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/tx?id=${pd}`]);
+    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/pools`, `GET /@${TOKEN}/amm/tx?id=${pd}`]);
     expect(internalized).toHaveLength(1);
     const ia = internalized[0] as { tx: number[]; outputs: { outputIndex: number; protocol: string; insertionRemittance: { basket: string; tags: string[]; customInstructions: string } }[]; labels: string[] };
     expect(ia.labels).toEqual(["amm-pool-deploy"]);
@@ -866,7 +875,7 @@ describe("requests per page (0.34.0)", () => {
     expect(since(0)).toEqual(["GET /amm/tokens"]);
   });
 
-  it("Positions: load = the token list + ONE /positions per token; the deploy form's terms ONE /terms", async () => {
+  it("Positions: load = the token list + per token ONE /positions and ONE plain /pools (0.34.1: the validators beating, for the live mark); the deploy form's terms ONE /terms", async () => {
     const pd = poolDeploy.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
     connect({ held: [{ outpoint: `${DEPLOY}.0`, satoshis: 1, spendable: true, lockingScript: tokenDeploy.outputs[0]!.lockingScript.toHex() }], pools: [{ outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci }] });
@@ -874,7 +883,8 @@ describe("requests per page (0.34.0)", () => {
     await myPositions();
     await myTokens();
     await validatorTerms(TOKEN);
-    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/terms`]);
+    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/pools`, `GET /@${TOKEN}/amm/terms`]);
+    expect(streams).toEqual([]);
   });
 
   it("Settings: load = the token list + defaults + discovery state + the claim card (card + admin) + discovery's list pages + (only for wallet-only tokens) ONE ?ids=", async () => {

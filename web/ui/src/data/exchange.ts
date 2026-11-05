@@ -58,6 +58,7 @@ import {
   readDiscoveryIds,
   readDiscoveryList,
   readPoolsBeef,
+  readPools,
   readPositions,
   readTerms,
   readTx,
@@ -1092,8 +1093,8 @@ function withMeta(customInstructions: string | undefined, sym: string | undefine
  * deploy in the history whose pool output has no `amm-pools` row, its pool still at that output,
  * is filed then (`internalizeAction` basket insertion, as the deploy files it; its BEEF `GET
  * /@<token>/amm/tx?id=`). Closed ones are marked `closed`, kept for their fees. `validator.live`
- * is not read here (no liveness read on this page: the page marks a pool live when the host's
- * pools route lists it).
+ * (0.34.1, David): the validator is live when it is in the token's pools route's `validators` (the
+ * validators beating on the token's topic now): ONE plain `GET /@<token>/amm/pools` per token.
  */
 export async function myPositions(): Promise<Position[]> {
   const { wallet } = needWallet();
@@ -1121,6 +1122,7 @@ export async function myPositions(): Promise<Position[]> {
     }
     const t = enabled.get(tokenId);
     const meta = { sym: t?.sym ?? tokenId.slice(0, 8), dec: t?.dec ?? 0, ...(t?.icon ? { icon: t.icon } : {}) };
+    const beating = new Set((await readPools(base).catch(() => null))?.validators.map((x) => x.identity) ?? []);
     for (const p of pools) {
       const row = keys.get(p.lpPubKey)!;
       const fees = { feesEarnedSats: p.sats, feesEarnedTokens: p.tokens };
@@ -1138,7 +1140,7 @@ export async function myPositions(): Promise<Position[]> {
         ...meta,
         sats: p.current.bsvReserve,
         tokens: p.current.tokenReserve,
-        validator: { identityKey: p.current.validatorIdentityKey, live: false },
+        validator: { identityKey: p.current.validatorIdentityKey, live: beating.has(p.current.validatorIdentityKey.toLowerCase()) },
         ...(p.status === "rescinded" ? { rescinded: true } : {}),
         ...fees,
       });
