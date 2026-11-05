@@ -1348,3 +1348,265 @@ test "the commission key (0.16.0): the instance's own, BRC-43 level 1 `amm commi
 test {
     _ = relay.market;
 }
+
+// ================================================================ the public read API (0.34.0)
+
+const lookup_mod = @import("lookup");
+const amm_idx = @import("amm_lookup");
+const ov_engine = @import("skein_overlay");
+
+fn ltxOf(a: Allocator, raw: []const u8) !lookup_mod.Tx {
+    const txid = w.beef.txidOf(raw);
+    const cid = w.store.hashCid(.tx, txid);
+    return .{ .cid = try a.dupe(u8, cid[0..]), .txid = txid, .tx = try Transaction.parse(a, raw) };
+}
+
+fn mineHeader(prev: [32]u8, merkle_root: [32]u8, time: u32) [80]u8 {
+    var h = w.header.Header{ .version = 1, .prev_hash = prev, .merkle_root = merkle_root, .time = time, .bits = 0x207fffff, .nonce = 0 };
+    while (true) : (h.nonce += 1) {
+        const raw = h.serialize();
+        if (w.header.powOk(&raw)) return raw;
+    }
+}
+
+/// A BUMP for a block holding one transaction: its root is the txid.
+fn soloPath(a: Allocator, height: u32, txid: [32]u8) ![]const u8 {
+    var path: std.ArrayList(u8) = .empty;
+    try path.appendSlice(a, &.{ 0xfd, 0, 0, 0x01, 0x01, 0x00, 0x02 });
+    std.mem.writeInt(u16, path.items[1..3], @intCast(height), .little);
+    try path.appendSlice(a, &txid);
+    return path.items;
+}
+
+/// The fixtures' pool and its two Swaps, admitted by the pool lookup's hooks (as amm-lookup's own
+/// tests do) over a store holding them; the chain state holding them too, `fund` proven in block 1.
+const ReadEnv = struct {
+    ms: w.store.MemStore,
+    svc: lookup_mod.Service,
+    ch: w.state.State,
+    token: []const u8,
+    topic: []const u8,
+
+    fn init(a: Allocator) !*ReadEnv {
+        const e = try a.create(ReadEnv);
+        e.ms = w.store.MemStore.init(testing.allocator);
+        const s = e.ms.store();
+        const id = w.beef.txidOf(unhex(a, vec.token_deploy));
+        e.token = try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(id)});
+        e.topic = try amm_idx.topicOf(a, e.token);
+        e.svc = try reads.loadLookup(a, s, null);
+        e.ch = try w.state.State.load(a, s, null, .regtest);
+        const all = [_][]const u8{ vec.fund, vec.token_deploy, vec.pool_deploy, vec.swap_bsv_in, vec.swap_tokens_in };
+        var held = std.AutoHashMap([32]u8, void).init(a);
+        for (all) |h| {
+            const raw = unhex(a, h);
+            _ = try s.putBitcoin(a, .tx, raw);
+            _ = try e.ch.putTx(w.beef.txidOf(raw), raw);
+            try held.put(w.beef.txidOf(raw), {});
+        }
+        // Mined, one block each: every fixture transaction spending one not held (the funding ones),
+        // so the chain state's BEEFs reach proven transactions.
+        var prev = w.header.hash(&w.chain.Network.regtest.genesis());
+        var height: u32 = 0;
+        for (all) |h| {
+            const t = try Transaction.parse(a, unhex(a, h));
+            var roots = false;
+            for (t.inputs) |in| roots = roots or !held.contains(in.previous_outpoint.txid.bytes);
+            if (!roots) continue;
+            const txid = w.beef.txidOf(unhex(a, h));
+            height += 1;
+            const hd = mineHeader(prev, txid, 1_700_000_000 + height * 600);
+            _ = try e.ch.addHeaders(&.{&hd});
+            prev = w.header.hash(&hd);
+            try e.ch.putProof(txid, try w.merkle.MerklePath.parse(a, try soloPath(a, height, txid)));
+        }
+        const pd = unhex(a, vec.pool_deploy);
+        const s1 = unhex(a, vec.swap_bsv_in);
+        const s2 = unhex(a, vec.swap_tokens_in);
+        try amm_idx.admitted(a, &e.svc, e.topic, try ltxOf(a, pd), &.{ 0, 1, 2 }, &.{0});
+        try amm_idx.admitted(a, &e.svc, e.topic, try ltxOf(a, s1), &.{ 0, 1 }, &.{0});
+        try amm_idx.spent(a, &e.svc, e.topic, .{ .txid = w.beef.txidOf(pd), .vout = 0 }, try ltxOf(a, s1));
+        try amm_idx.admitted(a, &e.svc, e.topic, try ltxOf(a, s2), &.{ 0, 2, 3, 4 }, &.{ 0, 1 });
+        try amm_idx.spent(a, &e.svc, e.topic, .{ .txid = w.beef.txidOf(s1), .vout = 0 }, try ltxOf(a, s2));
+        return e;
+    }
+    fn deinit(self: *ReadEnv) void {
+        self.ms.deinit();
+    }
+};
+
+const unknown_lp = "02" ++ "a0" ** 32;
+
+fn jsonOf(a: Allocator, text: []const u8) !std.json.Value {
+    return std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+}
+
+test "read API (0.34.0): the routes and their filters in the manifest — plain reads, no handler; no /pools (the host's)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try dagjson.decode(a, manifest_json);
+    const want = [_][2][]const u8{
+        .{ "/pools/beef", "poolsBeef" },
+        .{ "/positions", "positions" },
+        .{ "/fees/validator", "validatorFees" },
+        .{ "/fees/commission", "commissionFees" },
+        .{ "/terms", "readTerms" },
+        .{ "/spends", "spends" },
+        .{ "/tx", "tx" },
+        .{ "/swaps", "swaps" },
+    };
+    for (want) |x| {
+        try testing.expectEqualStrings(try std.fmt.allocPrint(a, "amm-p2p.{s}", .{x[1]}), scbor.Value.str(m.get("filters").?.get(x[1])).?);
+        var found = false;
+        for (m.get("routes").?.array) |r| {
+            if (!eql(u8, scbor.Value.str(r.get("address")).?, x[0])) continue;
+            try testing.expectEqualStrings("http", scbor.Value.str(r.get("transport")).?);
+            try testing.expect(r.get("handler") == null);
+            try testing.expectEqualStrings(x[1], scbor.Value.str(r.get("filters").?.array[0]).?);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+    for (m.get("routes").?.array) |r| try testing.expect(!eql(u8, scbor.Value.str(r.get("address")).?, "/pools"));
+}
+
+test "read API (0.34.0): list parameters — comma-separated, percent-decoded, in order; absent is null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = (try reads.queryList(a, "?x=1&lp=02aa%2C03bb,,04cc", "lp")).?;
+    try testing.expectEqual(@as(usize, 3), l.len);
+    try testing.expectEqualStrings("02aa", l[0]);
+    try testing.expectEqualStrings("03bb", l[1]);
+    try testing.expectEqualStrings("04cc", l[2]);
+    try testing.expect((try reads.queryList(a, "lpx=1", "lp")) == null);
+    try testing.expectEqual(@as(usize, 0), (try reads.queryList(a, "lp=", "lp")).?.len);
+}
+
+test "read API (0.34.0): P4 /positions — the lookup's {lpPubKeys} answer, one record per key in query order, an unknown key closed with zeros; P5, P6 likewise; a bad key refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const s2 = w.beef.txidOf(unhex(a, vec.swap_tokens_in));
+
+    const v = try reads.lookupAnswer(a, &e.svc, &e.ch, e.token, "lpPubKeys", &.{ unknown_lp, vec.lp });
+    const j = try jsonOf(a, try reads.valueJson(a, v));
+    try testing.expectEqual(@as(usize, 2), j.array.items.len);
+    const first = j.array.items[0].object;
+    try testing.expectEqualStrings(unknown_lp, first.get("lpPubKey").?.string);
+    try testing.expectEqualStrings("closed", first.get("status").?.string);
+    try testing.expectEqual(@as(i64, 0), first.get("sats").?.integer);
+    const mine = j.array.items[1].object;
+    try testing.expectEqualStrings(vec.lp, mine.get("lpPubKey").?.string);
+    try testing.expectEqualStrings("live", mine.get("status").?.string);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(s2)}), mine.get("outpoint").?.string);
+    try testing.expectEqualStrings(vec.lp, mine.get("current").?.object.get("lpPubKey").?.string);
+    try testing.expectEqual(@as(i64, 2), mine.get("swaps").?.integer);
+
+    const vf = try jsonOf(a, try reads.valueJson(a, try reads.lookupAnswer(a, &e.svc, &e.ch, e.token, "validatorIdentityKeys", &.{ vec.identity, unknown_lp })));
+    try testing.expectEqualStrings(vec.identity, vf.array.items[0].object.get("validatorIdentityKey").?.string);
+    try testing.expectEqual(@as(i64, 2), vf.array.items[0].object.get("swaps").?.integer);
+    try testing.expectEqual(@as(i64, 0), vf.array.items[1].object.get("swaps").?.integer);
+
+    const unknown_pkh = "55" ** 20;
+    const cf = try jsonOf(a, try reads.valueJson(a, try reads.lookupAnswer(a, &e.svc, &e.ch, e.token, "commissionPkhs", &.{unknown_pkh})));
+    try testing.expectEqualStrings(unknown_pkh, cf.array.items[0].object.get("commissionPkh").?.string);
+    try testing.expectEqual(@as(i64, 0), cf.array.items[0].object.get("swaps").?.integer);
+
+    try testing.expectError(error.BadQuery, reads.lookupAnswer(a, &e.svc, &e.ch, e.token, "lpPubKeys", &.{"02zz"}));
+}
+
+test "read API (0.34.0): P3 /pools/beef — the LP keys' current pools (an unknown key none), every live pool with no key; one BEEF of their transactions" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const s2 = w.beef.txidOf(unhex(a, vec.swap_tokens_in));
+
+    const mine = try reads.currentPools(a, &e.svc, &e.ch, e.token, &.{ unknown_lp, vec.lp });
+    try testing.expectEqual(@as(usize, 1), mine.len);
+    try testing.expectEqualSlices(u8, &s2, &reads.rowOutpoint(mine[0]).?.txid);
+    try testing.expectEqualStrings(vec.lp, mine[0].getText("lpPubKey").?);
+    try testing.expect(mine[0].get("validatorPeerId") == null);
+    try testing.expectEqual(@as(usize, 0), (try reads.currentPools(a, &e.svc, &e.ch, e.token, &.{unknown_lp})).len);
+    const all = try reads.currentPools(a, &e.svc, &e.ch, e.token, null);
+    try testing.expectEqual(@as(usize, 1), all.len);
+
+    const beef = try ov_engine.state.beefOfMany(&e.ch, &.{s2});
+    const j = try jsonOf(a, try reads.poolsBeefJson(a, mine, beef));
+    try testing.expectEqual(@as(usize, 1), j.object.get("pools").?.array.items.len);
+    const b64 = j.object.get("beef").?.string;
+    const back = try a.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(b64));
+    try std.base64.standard.Decoder.decode(back, b64);
+    try testing.expectEqualSlices(u8, beef, back);
+    // The BEEF holds the pool's transaction and its ancestry to the proven funding.
+    const parsed = try w.beef.parse(a, back);
+    var has = false;
+    for (parsed.entries) |en| has = has or eql(u8, &en.txid, &s2);
+    try testing.expect(has);
+}
+
+test "read API (0.34.0): P8 /spends list form — one record per outpoint in query order" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const pd = w.beef.txidOf(unhex(a, vec.pool_deploy));
+    const s2 = w.beef.txidOf(unhex(a, vec.swap_tokens_in));
+    const ss = [_]reads.Spend{
+        try reads.spendOf(a, &e.ch, .{ .txid = s2, .vout = 0 }),
+        try reads.spendOf(a, &e.ch, .{ .txid = pd, .vout = 0 }),
+    };
+    const j = try jsonOf(a, try reads.spendsJson(a, &ss));
+    try testing.expectEqual(@as(usize, 2), j.array.items.len);
+    try testing.expect(j.array.items[0].object.get("spentBy") == null);
+    try testing.expectEqual(@as(i64, 0), j.array.items[0].object.get("hops").?.integer);
+    try testing.expectEqual(@as(i64, 2), j.array.items[1].object.get("hops").?.integer);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}.0", .{&w.header.toHex(s2)}), j.array.items[1].object.get("current").?.string);
+}
+
+test "read API (0.34.0): P9 /tx — the transaction's BEEF; immutable only when proven, else the short cache; unknown none" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const fund = w.beef.txidOf(unhex(a, vec.fund));
+    const s2 = w.beef.txidOf(unhex(a, vec.swap_tokens_in));
+    try testing.expectEqual(reads.Cache.imm, try reads.txCache(&e.ch, fund));
+    try testing.expectEqual(reads.Cache.state, try reads.txCache(&e.ch, s2));
+    try testing.expect((try e.ch.beefOf(s2)) != null);
+    try testing.expect((try e.ch.beefOf(.{0x77} ** 32)) == null);
+    try testing.expect(reads.parseTxid(&w.header.toHex(s2)) != null);
+    try testing.expect(reads.parseTxid("abc") == null);
+    const h = try reads.httpCached(a, 200, "application/octet-stream", .imm, "x");
+    try testing.expectEqualStrings("public, max-age=31536000, immutable", h.get("headers").?.getText("cache-control").?);
+    try testing.expectEqualStrings("application/octet-stream", h.getText("type").?);
+    try testing.expectEqualStrings("public, max-age=5", reads.Cache.state.header());
+}
+
+test "read API (0.34.0): P7 /terms — the validator's terms with its identity and peer, and the market's; no terms, validator null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const id = unhex(a, vec.identity);
+    const pkh: [20]u8 = .{0x55} ** 20;
+    const j = try jsonOf(a, try reads.termsJson(a, .{ .identity = id, .peer_id = PEER_ID_OF_G, .lp_fee_bps = 30, .validator_fee_bps = 5, .commission_bps = 25 }, pkh, 10));
+    const v = j.object.get("validator").?.object;
+    try testing.expectEqualStrings(vec.identity, v.get("identity").?.string);
+    try testing.expectEqualStrings(PEER_ID_OF_G, v.get("peerId").?.string);
+    try testing.expectEqual(@as(i64, 30), v.get("lpFeeBps").?.integer);
+    try testing.expectEqual(@as(i64, 5), v.get("validatorFeeBps").?.integer);
+    try testing.expectEqual(@as(i64, 25), v.get("commissionBps").?.integer);
+    const m = j.object.get("market").?.object;
+    try testing.expectEqualStrings("55" ** 20, m.get("commissionPkh").?.string);
+    try testing.expectEqual(@as(i64, 10), m.get("minCommissionBps").?.integer);
+    const none = try jsonOf(a, try reads.termsJson(a, null, pkh, 0));
+    try testing.expect(none.object.get("validator").? == .null);
+    try testing.expectEqual(@as(i64, 0), none.object.get("market").?.object.get("minCommissionBps").?.integer);
+}

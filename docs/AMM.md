@@ -16,7 +16,7 @@ topic per token, registered by root at runtime.
 | `amm-lookup` | `programs/amm-lookup` | `ls_amm_<assetId>` (0.21.0; `ls_amm` before, its index still `<app>/ls_amm`): the listed pools (below, "The listing"), per token; its beat on `ls_amm_<assetId>-live`, the prices ("Prices") |
 | `amm-validator` | `programs/amm-validator` | the validator, for every registered token (always, 0.8.1): `swap` (a libp2p direct call; it submits by message to its own overlay), `affirm` (0.11.0; 0.13.0: it picks the nonce; called in-VM by `amm.pool.affirm`), root's `rescind` (0.13.0; 0.11.0–0.12.x: `close`) |
 | `amm-setup` | `programs/amm-setup` | the token's setup (0.22.0): the deploy event in `amm/deploy` (`kernel.beef`) → the head `amm/token`, the token's topic and lookups registered with the engine by call (skein-overlay 0.18.0), the deploy submitted when the seed did not take it; the read `/token` ("The token's setup", below) |
-| `amm-p2p` | `programs/amm-p2p` | the relay (`amm.swap/1`; `amm.pool/1`: `terms`, `affirm`), the read `/spends`, the pages (`www/` from the app's tree); the catch-up utility, unscheduled |
+| `amm-p2p` | `programs/amm-p2p` | the relay (`amm.swap/1`; `amm.pool/1`: `terms`, `affirm`), the read `/spends` and (0.34.0) the public read API, the pages (`www/` from the app's tree); the catch-up utility, unscheduled |
 | | `src/pool.zig` | the pool library (module `pool`), over `1color`'s parser and rules |
 | | `pool/Pool.runar.go` | the contract |
 | | `web/ui` → `www/` | the AMM pages; `www/color/` the 1Color pages |
@@ -439,6 +439,52 @@ beat's, else the newest naming it). Polled every `REFRESH_MS`. A token no
 beat reports is priced from this skein's own listing and liveness. The
 topic manager's beat carries no prices.
 
+0.34.0 (D6): the pages read no beats. A token's price comes from its pool list, the pools route
+(`GET /@<token>/amm/pools`, the host's, held as an event stream; the landing page holds the
+host-wide `GET /amm/pools`); the beat is the validator liveness filter only, applied by the host.
+
+## The public read API (0.34.0)
+
+David Case, 2026-11-04 (agent-env plans/exchange-api-2026-11-04.md §0, D1–D25): the exchange's
+public API is plain HTTP reads over the same index the overlay protocol (`/submit`, `/lookup`)
+populates; nothing is removed from `/submit` or `/lookup` (D8). The route table, verbatim from the
+build brief (agent-env plans/exchange-api-build-2026-11-04.md):
+
+**The routes** (the whole public API after this build; cache classes: `state` = `Cache-Control: public, max-age=5`; `imm` = `public, max-age=31536000, immutable` ONLY when the bytes are of a proven (mined,
+BUMP in chain state) transaction, else `state`; `stream` = `text/event-stream`, no cache)
+
+| # | route | answered by | answer | class |
+|---|---|---|---|---|
+| P1 | `GET <origin>/amm/pools` | HOST (A) | `[{tokenId, …P2 row}]` over every enabled token | state + stream |
+| P2 | `GET <origin>/@<token>/amm/pools` | HOST (A) | `[{lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId}]` — ONLY pools whose validator is beating on `tm_color_<token>-live` now (peer ID from the beat's `from`) AND whose `commissionBps` ≥ the instance's market minimum; plus top-level `market: {commissionPkh, minCommissionBps}` → answer shape `{market, pools: [...]}` | state + stream |
+| P3 | `GET /@<token>/amm/pools/beef?lp=k1,k2` | amm-p2p (B) | `{pools: [{…P2 row without validatorPeerId}], beef: <base64 BEEF of the current pool txs>}`; no `lp` = every live pool | state |
+| P4 | `GET /@<token>/amm/positions?lp=k1,k2` | amm-p2p (B) via the lookup's `{lpPubKeys}` answer | `[{lpPubKey, status: live\|rescinded\|closed, outpoint?, current?: {…P2 row}, sats, tokens, swaps}]` one per key in query order | state |
+| P5 | `GET /@<token>/amm/fees/validator?id=k1,k2` | amm-p2p (B) via `{validatorIdentityKeys}` | `[{validatorIdentityKey, sats, tokens, swaps, pools}]` | state |
+| P6 | `GET /@<token>/amm/fees/commission?pkh=h1,h2` | amm-p2p (B) via `{commissionPkhs}` | `[{commissionPkh, sats, tokens, swaps}]` | state |
+| P7 | `GET /@<token>/amm/terms` | amm-p2p (B) | `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps} \| null, market: {commissionPkh, minCommissionBps}}` (the two `/call` answers in one, unsigned) | state |
+| P8 | `GET /@<token>/amm/spends?outpoint=a,b` | amm-p2p (B) | `[{outpoint, spentBy?, current?, hops, closed}]` one per outpoint in query order (today's single form kept working) | state |
+| P9 | `GET /@<token>/amm/tx?id=<txid>` | amm-p2p (B) | the transaction's BEEF bytes, `application/octet-stream` (`beefFor`); 404 unknown | imm |
+| P10 | `GET /@<token>/amm/swaps?id=<id>` | amm-p2p (B) | the relay record as `amm.swap.status` answers it, unsigned | state |
+| P11 | `GET /@<token>/amm/token` | unchanged | | state |
+| P12 | `GET <origin>/amm/tokens` | swap app (D) | rows gain `iconUrl` = `/@discovery/1color/<token>/icon` (origin-relative), the data-URL `icon` field GOES | state |
+| P13 | `GET /@discovery/1color/tokens?ids=a,b` and paged `?limit=&skip=` | color-lookup (C) | rows `{tokenId, topic, sym, dec, iconUrl?, txid, vout}`; with `ids`: one row per id in query order, unknown = `{tokenId, listed: false}`; `iconUrl` RELATIVE to the list (`<token>/icon`) | state |
+| P14 | `GET /@discovery/1color/<token>` | color-lookup (C) | `{tokenId, topic, sym, dec, txid, vout, iconUrl?}` | state |
+| P15 | `GET /@discovery/1color/<token>/icon` | color-lookup (C) | the icon bytes with the deploy's media type; BRC-161 JSON deploy (icon = a string): 404 and the list/detail carry `iconUrl` = that string only when it is an http(s) URL | imm |
+| P16 | `GET /@discovery/1color/<token>/deploy` | color-lookup (C) | the deploy's BEEF bytes, `application/octet-stream` | imm |
+| P17 | `GET <origin>/.well-known/skein`, `/skeins?key=`, `/amm/admin`, `/amm/defaults`, `/amm/discovery` | unchanged | | state |
+| P18 | `GET <origin>/api/openapi.json`, `<origin>/api/` | files in swap www (D) | the OpenAPI 3.1 document; the reference page | state |
+
+List parameters are comma-separated; answers list one record per key in query order (D1). `/submit`,
+`/lookup`, `/sendMessage`, `/call` (writes) and the `.live`/`.events` host reads stay as they are.
+
+This app answers P3–P10 (amm-p2p, reads.zig; filters `poolsBeef`, `positions`, `validatorFees`,
+`commissionFees`, `readTerms`, `spends`, `tx`, `swaps`); P4–P6 are the pool lookup's own list
+answers (amm-lookup `answer`, the same code `/lookup` runs), P3's pools its `{lpPubKeys}` records'
+`current` (live, or a rescinded pool's output the LP's Close takes back) or, with no `lp`, its
+`{tokenId}` rows. P1 and P2 (`/pools`) are the HOST's (it joins its liveness and the market's
+minimum to the lookup's rows; D11, D13): no route of this app. The pages (web/ui) read only these
+routes and the wallet; they send `/lookup` nowhere.
+
 ## Interfaces
 
 **Overlay** (base URL `<handle>.<host>/amm`):
@@ -693,6 +739,7 @@ writes fails inside the call). Exact paths match before a prefix, so
 | `/requests` | read | `requests` → `amm-p2p.requests` | 0.9.0; the config app's in 0.17.0; removed in 0.19.0 |
 | `/spends` | read | `spends` → `amm-p2p.spends` | 0.9.0 |
 | `/token` | read | `token` → `amm-setup.token` | 0.22.0 |
+| `/pools/beef`, `/positions`, `/fees/validator`, `/fees/commission`, `/terms`, `/tx`, `/swaps` | read | `poolsBeef`, `positions`, `validatorFees`, `commissionFees`, `readTerms`, `tx`, `swaps` → `amm-p2p.<the same>` | 0.34.0 ("The public read API") |
 | `/.live/tm_color_<txid>_0-live`, `/.live/ls_amm_<txid>_0-live` | the runtime's liveness read (no program, skein #138) | | |
 | `/live` | gone | | 0.5.0 (410 in 0.4.0) |
 

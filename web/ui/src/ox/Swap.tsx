@@ -1,17 +1,22 @@
-/** Swap one token: you pay / you receive, the quote routed across the token's pools, and the Route panel. */
-import { useEffect, useState } from "react";
+/**
+ * Swap one token: you pay / you receive, the quote routed across the token's pools, and the Route
+ * panel. 0.34.0 (D11–D16): the page holds the token's pools route as a stream (`useTokenPools`);
+ * a quote is computed from it (no request); the fee line is the pool's own; a leg with no answer
+ * yet offers "Check again".
+ */
+import { useMemo, useState } from "react";
 import { Id } from "../components/Id";
 import { sameToken } from "../lib/tokenId";
 import {
+  checkSwapAgain,
   executeSwap,
+  poolFees,
+  poolViews,
   quoteSwap,
   useMyTokens,
   useTokenPools,
-  hasTerms,
-  NO_TERMS_TEXT,
-  belowMinimumText,
-  useValidatorTerms,
   useWalletSats,
+  withLeg,
   type HostedToken,
   type Quote,
   type Session,
@@ -81,16 +86,15 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
   const [editSlippage, setEditSlippage] = useState(false);
   const [slippageText, setSlippageText] = useState((DEFAULT_SLIPPAGE_BPS / 100).toString());
   const [allowPartial, setAllowPartial] = useState(true);
-  const [quote, setQuote] = useState<Quote | null>(null);
-  const [quoteError, setQuoteError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState<string | null>(null);
   const [result, setResult] = useState<SwapResult | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
 
   const sats = useWalletSats(connected);
   const mine = useMyTokens(connected);
-  const pools = useTokenPools(token.tokenId, connected);
-  const terms = useValidatorTerms(token.tokenId);
+  const pools = useTokenPools(token.tokenId);
+  const views = poolViews(pools.data, token.tokenId);
   const mineToken = mine.data?.find((t) => t.tokenId === token.tokenId);
   // A sell spends the swap basket's outputs first, then what the wallet sends into it (0.12.0).
   const inSwaps = mineToken?.inSwaps ?? 0n;
@@ -103,23 +107,15 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
   const amountIn = parseInput(amountText, payDec);
   const badAmount = amountText.trim() !== "" && amountIn === null;
 
-  // Re-quote as the amount, side, options or pools change (debounced).
-  useEffect(() => {
-    setQuote(null);
-    setQuoteError(null);
-    if (amountIn === null || amountIn === 0n) return;
-    let live = true;
-    const t = setTimeout(() => {
-      quoteSwap({ tokenId: token.tokenId, side, amountIn, maxSlippageBps: slippageBps, allowPartial }).then(
-        (q) => live && setQuote(q),
-        (e: unknown) => live && setQuoteError(e instanceof Error ? e.message : String(e)),
-      );
-    }, 250);
-    return () => {
-      live = false;
-      clearTimeout(t);
-    };
-  }, [token.tokenId, side, amountIn, slippageBps, allowPartial, token.marginalPrice, connected]);
+  // The quote, computed from the pools the page holds (D12: no request), as the amount, side, options or pools change.
+  const { quote, quoteError } = useMemo((): { quote: Quote | null; quoteError: string | null } => {
+    if (amountIn === null || amountIn === 0n || pools.data === null) return { quote: null, quoteError: null };
+    try {
+      return { quote: quoteSwap({ tokenId: token.tokenId, side, amountIn, maxSlippageBps: slippageBps, allowPartial }, pools.data, { sym: token.sym, dec: token.dec }), quoteError: null };
+    } catch (e) {
+      return { quote: null, quoteError: e instanceof Error ? e.message : String(e) };
+    }
+  }, [token.tokenId, token.sym, token.dec, side, amountIn, slippageBps, allowPartial, pools.data]);
 
   function flip() {
     setSide(side === "buy" ? "sell" : "buy");
@@ -291,6 +287,31 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
                 {result.legs.map((l) => (
                   <li key={l.poolOutpoint}>
                     {l.txid ? <Id value={l.txid} kind="txid" label="transaction id" /> : <span>{l.error}</span>}
+                    {l.checkId && (
+                      <>
+                        {" "}
+                        <button
+                          type="button"
+                          className="btn-link"
+                          disabled={checking === l.poolOutpoint}
+                          onClick={() => {
+                            setChecking(l.poolOutpoint);
+                            checkSwapAgain(l).then(
+                              (next) => {
+                                setResult((r) => (r ? withLeg(r, next) : r));
+                                setChecking(null);
+                              },
+                              (e: unknown) => {
+                                setResult((r) => (r ? withLeg(r, { ...l, error: e instanceof Error ? e.message : String(e) }) : r));
+                                setChecking(null);
+                              },
+                            );
+                          }}
+                        >
+                          {checking === l.poolOutpoint ? "Checking…" : "Check again"}
+                        </button>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -331,7 +352,7 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
             <>
               <p className="muted small">Enter an amount to see how the quote splits it across {token.sym}&apos;s pools.</p>
               <ul className="legs">
-                {(pools.data?.pools ?? []).map((p) => (
+                {views.map((p) => (
                   <li key={p.outpoint} className="leg">
                     <Id value={p.outpoint} kind="outpoint" label="pool" />
                     <span className="num leg-amt">
@@ -345,16 +366,17 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
               </ul>
             </>
           )}
-          {(pools.data?.hidden ?? 0) > 0 && <p className="muted small">{belowMinimumText(pools.data!.hidden)}</p>}
+          {pools.error && <p className="muted small">{pools.error}</p>}
           {(() => {
-            const fees = quote?.fees ?? (hasTerms(terms.data) ? terms.data.fees : undefined);
-            if (fees)
-              return (
-                <p className="muted small">
-                  Fees per leg: LP {fees.lpBps} · validator {fees.validatorBps} bps, taken from the amount in.
-                </p>
-              );
-            return terms.data && !hasTerms(terms.data) ? <p className="muted small">{NO_TERMS_TEXT}</p> : null;
+            // D13: the fee line from the pool's own record.
+            const first = pools.data?.pools[0];
+            const fees = quote?.fees ?? (first ? poolFees(first) : undefined);
+            if (!fees) return null;
+            return (
+              <p className="muted small">
+                Fees per leg: LP {fees.lpBps} · validator {fees.validatorBps} bps, taken from the amount in.
+              </p>
+            );
           })()}
         </section>
       </div>

@@ -9,10 +9,9 @@
  * POST; src/lib/overlay.ts), or to the connected BRC-100 wallet. There are no DEV keys or DEV services.
  *
  *   AMM_OVERLAY        the AMM app's base URL: `https://<handle>.<host>/<app>`
- *                      or a host's dev form `<host>/@<handle>/<app>` (GET
- *                      listTopicManagers, GET listLookupServiceProviders,
- *                      POST lookup, POST submit, GET .live/tm_color_<txid>_0-live, POST call under
- *                      it). The pages are the app's `www/`, served at
+ *                      or a host's dev form `<host>/@<handle>/<app>` (0.34.0: the
+ *                      public read API's GETs, src/lib/overlay.ts; POST call and
+ *                      sendMessage, signed; POST submit at the host root). The pages are the app's `www/`, served at
  *                      `<base>/` (index.html), so the base is the page's own
  *                      directory (`appBaseOf`; at the origin's root, `<origin>/amm`);
  *                      `VITE_AMM_OVERLAY` overrides
@@ -75,9 +74,6 @@ function pageHref(): string | undefined {
 export const AMM_OVERLAY = (
   env?.VITE_AMM_OVERLAY ?? (pageHref() ? appBaseOf(pageHref()!) : undefined) ?? "http://127.0.0.1:8100/@amm/amm"
 ).replace(/\/+$/, "");
-
-/** How often the Swap page re-reads the instance (topics, pools, live validators). `VITE_AMM_REFRESH_MS`. */
-export const REFRESH_MS = Number(env?.VITE_AMM_REFRESH_MS ?? 10_000);
 
 /** The peer instance whose liveness read (`GET .live/tm_color_<txid>_0-live`) tells us whether our heartbeat is heard. `VITE_AMM_PEER_OVERLAY`; unset or "" disables. */
 export const AMM_PEER_OVERLAY = (env?.VITE_AMM_PEER_OVERLAY ?? "").replace(/\/+$/, "");

@@ -14,31 +14,20 @@ import { BigNumber, ECDSA, Beef, Hash, LockingScript, P2PKH, PrivateKey, PublicK
 import { computeSwap, type Leg, type PoolState } from "@amm-poc/matching-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BRC29, brc29Side, isBrc29 } from "./brc29Wallet";
-import { PENDING_PAYOUTS_KEY, PendingPayoutStore, internalizeNow, isLegacyPayout, type KV } from "../src/wallet/pendingPayouts";
+import { settleStagedSwaps, stagedLegs, swapPayoutOf } from "../src/wallet/swapPayouts";
 import { receiptOutput } from "../src/wallet/color";
 import { tokenP2pkhScript as tokenP2pkhScriptOf } from "../src/lp/poolDeploy";
 import { PoolTemplate, decodeOneColor } from "../src/pool";
-import {
-  liveTopicOf,
-  mergeLive,
-  liveUrl,
-  noLiveness,
-  parseLiveBeats,
-  parseLookupAnswer,
-  parseOutputList,
-  parseTokenTopic,
-  type SignedFetch,
-} from "../src/lib/overlay";
+import { parseTokenTopic, toPoolState as poolOfWire, type LiveAnswer } from "../src/lib/overlay";
 import { buildMarketView, marginalPrice, validatorStatus } from "../src/market/view";
 import { buildPlanRequest, goneFromLookup, livePools, quote, type SwapForm } from "../src/market/plan";
-import { PEER, beatEntry, liveFor } from "./liveRead";
+import { PEER, liveFor } from "./liveRead";
 import {
   LEG_COMMISSION_PREFIX,
   LEG_PAYOUT_PREFIX,
   assetIdOf,
   legDerivation,
   legKeyInputOf,
-  pendingSwapPayouts,
   planSwapLeg,
   prepareSwap,
   selectExactTokenInputs,
@@ -51,10 +40,9 @@ import {
   type SatsInput,
 } from "../src/market/swapAction";
 import { dagBytes, parseSwapTerms, readBytes, swapTerms, toPoolState, type AuthFetchLike } from "../src/market/relay";
-import { relaySwap, checkAgain } from "../src/market/swapFlow";
+import { relaySwap, checkAgain, swapIdOf } from "../src/market/swapFlow";
 import topics from "./fixtures/instance-v2/listTopicManagers.json";
 import lookupAll from "./fixtures/instance-v2/lookup-all.json";
-import liveRead from "./fixtures/live-read.json";
 import beefAnswer from "./fixtures/instance-v2/lookup-outpoint-beef.json";
 import v from "./fixtures/amm-topic-vectors.json";
 
@@ -69,10 +57,10 @@ const SDK_ID = TOKEN_ID;
 
 describe("market view from the instance's answers", () => {
   const tokenTopics = Object.keys(topics).map(parseTokenTopic).filter((t) => t !== null);
-  // The liveness read's shape (skein #138), with the v2 instance's recorded validator and peer, 28 s old.
+  // The v2 instance's recorded validator and peer, seen 5 s ago (0.34.0: the pools route's rows name it).
   const NOW = 1790844766808;
-  const live = parseLiveBeats(liveRead, NOW);
-  const pools = parseLookupAnswer(lookupAll);
+  const live = liveFor(["03cdee31ef0446ffb95aeae00353d9ab4c26a8555d597a9930b0ddd4f4cc1ae0d0"], NOW);
+  const pools = (lookupAll as { result: Parameters<typeof poolOfWire>[0][] }).result.map(poolOfWire);
 
   it("names (BRC-207): tm_color_<txid>_0 is a native token, tm_color_<txid>_<vout> a legacy one, anything else (the old tm_<txid>_0 included) is not a token", () => {
     expect(tokenTopics).toEqual([
@@ -110,34 +98,10 @@ describe("market view from the instance's answers", () => {
     expect(failed[0]!.liveError).toBe("GET …/.live/…: 500");
   });
 
-  it("the liveness read (GET <base>/.live/tm_color_<txid>_0-live): each body decoded to {identityKey, peerId}; every beat the read returns is live", () => {
-    expect(liveUrl("http://a.localhost:8100/amm/", liveTopicOf(`tm_color_${TXID}_0`))).toBe(`http://a.localhost:8100/amm/.live/tm_color_${TXID}_0-live`);
-    expect(live.kept).toBe(true);
-    expect("windowMs" in live).toBe(false);
-    expect(live.validators).toEqual([
-      { identityKey: "03cdee31ef0446ffb95aeae00353d9ab4c26a8555d597a9930b0ddd4f4cc1ae0d0", peerId: PEER, at: 1790844738661, ageMs: 28147, live: true },
-    ]);
+  it("a validator's status from the liveness the plan reads (0.34.0: the pools route's rows): live with its peer ID, case-insensitive; unknown keys not seen", () => {
     const id = live.validators[0]!.identityKey;
     expect(validatorStatus(id.toUpperCase(), live)).toMatchObject({ live: true, seen: true, peerId: PEER });
-    // A beat 200 s old that the read returned: live (the instance's window is the one judgement); its age kept.
-    expect(parseLiveBeats(liveRead, 1790844738661 + 200_000).validators[0]).toMatchObject({ live: true, ageMs: 200_000 });
-    // The latest beat per identity; newest first.
-    const k2 = "02" + "22".repeat(32);
-    const two = parseLiveBeats([beatEntry(k2, PEER, 900), beatEntry(id, PEER, 800), beatEntry(id, PEER, 950)], 1000);
-    expect(two.validators.map((x) => [x.identityKey, x.at])).toEqual([[id, 950], [k2, 900]]);
-    // The identity is the sender, the peer ID `from`; the body is not read (the beat has none).
-    expect(parseLiveBeats([{ sender: id.toUpperCase(), at: 900, body: Utils.toBase64([1, 2, 3]), from: PEER }], 1000).validators).toMatchObject([{ identityKey: id, peerId: PEER }]);
-    // Skipped: no peer ID, a sender that is not a key, no sender.
-    const odd = parseLiveBeats([{ sender: id, at: 900, body: "" }, { sender: "zz", at: 900, from: PEER }, { at: 900, from: PEER }, "junk"], 1000);
-    expect(odd.validators).toEqual([]);
-    expect(parseLiveBeats({ not: "an array" }, 1000).validators).toEqual([]);
-    // 404: the instance keeps no liveness for the topic.
-    expect(noLiveness(5)).toEqual({ now: 5, validators: [], kept: false });
-    // Several topics' answers as one: the latest beat per identity.
-    const merged = mergeLive([parseLiveBeats([beatEntry(id, PEER, 800), beatEntry(k2, PEER, 900)], 1000), parseLiveBeats([beatEntry(id, PEER, 950)], 1000), noLiveness(1000)], 1000);
-    expect(merged.kept).toBe(true);
-    expect(merged.validators.map((x) => [x.identityKey, x.at, x.live])).toEqual([[id, 950, true], [k2, 900, true]]);
-    expect(mergeLive([noLiveness(1000)], 1000).kept).toBe(false);
+    expect(validatorStatus("02" + "99".repeat(32), live)).toEqual({ identityKey: "02" + "99".repeat(32), live: false, seen: false });
   });
 
   it("marginal price is exact bigint arithmetic", () => {
@@ -178,9 +142,9 @@ describe("plan display", () => {
     // Only poolC: nothing to plan, and why.
     expect(buildPlanRequest(TOKEN_ID, form, [poolC], live, 0)).toEqual({ ok: false, error: "no pool's validator is live on this token" });
     expect(buildPlanRequest(TOKEN_ID, form, [poolA], null, 0)).toEqual({ ok: false, error: "no liveness read for this token: no pool can be planned" });
-    expect(buildPlanRequest(TOKEN_ID, form, [poolA], noLiveness(0), 0)).toMatchObject({ ok: false, error: expect.stringMatching(/keeps no liveness/) });
-    // A beat 200 s old that the read returned: planned (the pages keep no window of their own).
-    const old = parseLiveBeats([beatEntry(poolA.validatorIdentityKey, PEER, 0)], 200_000);
+    expect(buildPlanRequest(TOKEN_ID, form, [poolA], { now: 0, validators: [], kept: false }, 0)).toMatchObject({ ok: false, error: expect.stringMatching(/keeps no liveness/) });
+    // A validator seen 200 s ago: planned (the pages keep no window of their own).
+    const old: LiveAnswer = { now: 200_000, kept: true, validators: [{ identityKey: poolA.validatorIdentityKey, peerId: PEER, at: 0, ageMs: 200_000, live: true }] };
     expect(buildPlanRequest(TOKEN_ID, form, [poolA], old, 0).ok).toBe(true);
     // The leg's validator carries the peer ID the swap names.
     expect(quote(req.request, live, 0).view.legs[0]!.validator).toMatchObject({ live: true, peerId: PEER });
@@ -410,7 +374,7 @@ describe("the leg's sats (0.29.0: an amm-swap output)", () => {
   it("the recorded lookup BEEF (v2 instance, before the commission) parses; its pool is the pre-commission template, which no longer decodes", () => {
     // Recorded when the instance ran the previous fixtures (pool_deploy without
     // CommissionBps); the swaps below use the current pool_deploy as the lookup's AtomicBEEF.
-    const [out] = parseOutputList(beefAnswer);
+    const [out] = (beefAnswer as { outputs: { beef: number[]; outputIndex: number }[] }).outputs;
     const tx = Transaction.fromAtomicBEEF(out!.beef);
     expect(tx.id("hex")).not.toBe(poolDeploy.id("hex"));
     expect(PoolTemplate.decode(tx.outputs[out!.outputIndex]!.lockingScript)).toBeNull();
@@ -431,7 +395,7 @@ describe("the leg's sats (0.29.0: an amm-swap output)", () => {
     expect(f.satoshis).toBe(satsInput.satoshis);
     // The relay's funding transaction: the sats output's own, as AtomicBEEF.
     expect(Beef.fromBinary(f.atomicBeef).atomicTxid).toBe(satsInput.txid);
-    expect(prepared.expires).toBe(1_000 + 120_000);
+    expect(prepared.expires).toBe(1_000 + 15_000); // 0.34.0 (D15): SWAP_TTL_MS 15 s
     // The signature over the sats input uses the key its row names.
     expect(calls[2]!.args).toMatchObject({ protocolID: [2, "amm swap"], keyID: satsInput.keyID, counterparty: "self" });
   });
@@ -512,9 +476,6 @@ describe("the payout keys (0.29.1): derived from the leg's first staged input, r
     const com = legDerivation(keyInput, "commission");
     const own = side.privateKey({ protocolID: BRC29, keyID: `${com.derivationPrefix} ${com.derivationSuffix}`, counterparty: side.identityKey });
     expect(tx.outputs[4]!.lockingScript.toHex()).toBe(new P2PKH().lock(own.toAddress()).toHex());
-    // The unfinished-step entries are still written (0.29.3: no key material in them).
-    const recs = pendingSwapPayouts(prepared, TOKEN_ID, "http://x/amm", 1);
-    expect(recs.map((r) => [r.vout, r.receipt, r.remittance])).toEqual([[1, undefined, undefined], [4, undefined, undefined]]);
   });
 
   it("tokens in, own commission: from input 2 (the first token row) alone — the BRC-29 payout (sender the user) and the commission's receipt key match outputs 1 and 4; the same inputs give the same keys", async () => {
@@ -613,40 +574,29 @@ function fakeRelay(answer: (fn: string, args: Record<string, unknown>, n: number
   return { af, calls };
 }
 const ok = (fn: string, result: unknown) => ({ status: 200, body: { fn, result } });
-const noSleep = async () => undefined;
 
-describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", () => {
-  it("submits {funding (the sats output's transaction), swap, pool, validator, expires} as DAG-JSON bytes, polls while pending, accepts: internalize (basket insertion); no relinquishOutput", async () => {
+describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until the relay rests; the record read plain behind Check again)", () => {
+  it("submits {funding (the sats output's transaction), swap, pool, validator, expires} as DAG-JSON bytes; the held answer is the settled record (0.34.0, D15: no poll); accepts: internalize (basket insertion); no relinquishOutput", async () => {
     const { wallet, calls, prepared, vkey } = await satsIn();
     let final: Transaction | undefined;
-    const { af, calls: http } = fakeRelay(async (fn, args, n) => {
-      if (fn === "amm.swap.submit") {
-        final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
-        return ok(fn, { id: ID, status: "pending" });
-      }
-      return n < 3 ? ok(fn, { id: ID, status: "pending" }) : ok(fn, { id: ID, status: "accepted", tx: dagBytes(final!.toBinary()), txid: final!.id("hex") });
+    const { af, calls: http } = fakeRelay(async (fn, args) => {
+      final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
+      return ok(fn, { id: ID, status: "accepted", tx: dagBytes(final.toBinary()), txid: final.id("hex") });
     });
-    const seen: string[] = [];
     const before = calls.length;
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://amm2.localhost:8300/amm", sleep: noSleep, now: () => 0, onRecord: (r) => seen.push(r.status) }, prepared, PEER);
+    const o = await relaySwap({ wallet, authFetch: af, base: "http://amm2.localhost:8300/amm" }, prepared, PEER);
 
-    expect(http.map((c) => [c.url, c.method, c.headers, c.body.fn])).toEqual([
-      ["http://amm2.localhost:8300/amm/call", "POST", { "content-type": "application/json" }, "amm.swap.submit"],
-      ["http://amm2.localhost:8300/amm/call", "POST", { "content-type": "application/json" }, "amm.swap.status"],
-      ["http://amm2.localhost:8300/amm/call", "POST", { "content-type": "application/json" }, "amm.swap.status"],
-    ]);
+    expect(http.map((c) => [c.url, c.method, c.headers, c.body.fn])).toEqual([["http://amm2.localhost:8300/amm/call", "POST", { "content-type": "application/json" }, "amm.swap.submit"]]);
     expect(http[0]!.body.args).toEqual({
       funding: dagBytes(prepared.funding.atomicBeef),
       swap: dagBytes(prepared.swap.toBinary()),
       pool: `${poolDeploy.id("hex")}_0`,
       validator: dagBytes(Utils.toArray(v.identity, "hex")),
       peerId: PEER,
-      expires: 121_000,
+      expires: 16_000, // 0.34.0 (D15): 15 s after the leg was prepared
     });
     expect((http[0]!.body.args.funding as { "/": { bytes: string } })["/"].bytes).not.toMatch(/=/);
     expect(Beef.fromBinary(readBytes(http[0]!.body.args.funding)!).atomicTxid).toBe(prepared.funding.txid);
-    expect(http[1]!.body.args).toEqual({ id: ID });
-    expect(seen).toEqual(["pending", "pending", "accepted"]);
 
     expect(o).toMatchObject({ status: "accepted", id: ID, txid: final!.id("hex"), completed: { internalized: true, errors: [] } });
     const after = calls.slice(before);
@@ -675,7 +625,7 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
       return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER);
+    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted" || prepared.payout.kind !== "brc29") throw new Error(`expected acceptance, got ${o.status}`);
     expect(o.completed).toEqual({ txid: o.txid, internalized: true, errors: [] });
     const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
@@ -688,14 +638,14 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
     const other = Transaction.fromBinary(prepared.swap.toBinary());
     other.outputs[1]!.satoshis = 2;
     const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "accepted", tx: other.toHex(), txid: other.id("hex") }));
-    await expect(relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER)).rejects.toThrow(/not the swap we built/);
+    await expect(relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).rejects.toThrow(/not the swap we built/);
     expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 
   it("refused: nothing to undo (0.29.0: the leg's outputs stay in amm-swap), and the refusal's pool for the replan", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "refused", reason: "pool_spent", pool: `${poolDeploy.id("hex")}_0`, poolState: wirePool }));
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER);
+    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
     expect(o).toEqual({
       status: "refused",
       id: ID,
@@ -709,41 +659,52 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
     expect(quote(req.request, liveFor([v.identity]), 0).plan.legs.map((l) => l.outpoint)).toEqual([wirePool.outpoint]);
   });
 
-  it("timeout: nothing to undo", async () => {
+  it("timeout: nothing to undo; a pending record (the host let go before the relay rested): no answer yet, its id kept", async () => {
     const { wallet, calls, prepared } = await satsIn();
-    const { af } = fakeRelay((fn, _a, n) => ok(fn, { id: ID, status: n === 1 ? "pending" : "timeout" }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep, now: () => 0 }, prepared, PEER)).toEqual({ status: "timeout", id: ID });
+    const pending = fakeRelay((fn) => ok(fn, { id: ID, status: "pending" }));
+    expect(await relaySwap({ wallet, authFetch: pending.af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "no answer yet" });
+    expect(pending.calls).toHaveLength(1);
+    const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "timeout" }));
+    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "timeout", id: ID });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
   it("an error answer to submit (the instance does not serve the function): nothing recorded, nothing to undo", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const { af } = fakeRelay((fn) => ({ status: 404, body: { fn, error: { code: "unknown-fn", message: "amm.swap.submit is not provided" } } }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER)).toEqual({ status: "failed", reason: "amm.swap.submit: unknown-fn: amm.swap.submit is not provided" });
+    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "failed", reason: "amm.swap.submit: unknown-fn: amm.swap.submit is not provided" });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
-  it("no answer: nothing is aborted; still pending past expiry + grace is unknown; Check again settles it", async () => {
+  it("no answer (a network failure, the host's 503 past its bound): nothing is aborted, the swap's id (sha256 of the swap) kept; Check again reads the record ONCE, plain (GET /swaps?id=), and settles it", async () => {
     const { wallet, calls, prepared, vkey } = await satsIn();
+    const id = swapIdOf(prepared);
+    expect(id).toBe(Utils.toHex(Hash.sha256(prepared.swap.toBinary()) as number[]));
     const lost: AuthFetchLike = { fetch: async () => { throw new Error("network down"); } };
-    expect(await relaySwap({ wallet, authFetch: lost, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", reason: "amm.swap.submit: network down" });
-
-    let t = 0;
-    const pending = fakeRelay((fn) => ok(fn, { id: ID, status: "pending" }));
-    const o = await relaySwap({ wallet, authFetch: pending.af, base: "http://x/amm", sleep: async () => void (t += 60_000), now: () => t }, prepared, PEER);
-    expect(o).toEqual({ status: "unknown", id: ID, reason: "still pending past the swap's expiry" });
-    expect(pending.calls.length).toBe(4); // submit + polls until 121,000 + 30,000
+    expect(await relaySwap({ wallet, authFetch: lost, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id, reason: "no answer yet: amm.swap.submit: network down" });
+    const bound = fakeRelay(() => ({ status: 503, body: "the request is still waiting" }));
+    expect(await relaySwap({ wallet, authFetch: bound.af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id, reason: "no answer yet" });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
 
     const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
-    const later = fakeRelay((fn) => ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") }));
-    expect(await checkAgain({ wallet, authFetch: later.af, base: "http://x/amm", now: () => t }, prepared, ID)).toMatchObject({ status: "accepted", txid: final.id("hex") });
+    const asked: string[] = [];
+    const read = async (url: string) => {
+      asked.push(url);
+      return new Response(JSON.stringify({ id, status: "accepted", tx: dagBytes(final.toBinary()), txid: final.id("hex") }), { status: 200 });
+    };
+    expect(await checkAgain({ wallet, authFetch: lost, base: "http://x/@t/amm", fetch: read }, prepared, id)).toMatchObject({ status: "accepted", txid: final.id("hex") });
+    expect(asked).toEqual([`http://x/@t/amm/swaps?id=${id}`]);
+    // Still out, or unknown to the relay: no answer yet, nothing done.
+    const still = async () => new Response(JSON.stringify({ id, status: "pending" }), { status: 200 });
+    expect(await checkAgain({ wallet, authFetch: lost, base: "http://x/@t/amm", fetch: still }, prepared, id)).toEqual({ status: "unknown", id, reason: "no answer yet" });
+    const none = async () => new Response("{}", { status: 404 });
+    expect(await checkAgain({ wallet, authFetch: lost, base: "http://x/@t/amm", fetch: none }, prepared, id)).toMatchObject({ status: "unknown", id });
   });
 
   it("the relay's transport failure is no answer: nothing aborted", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "failed", reason: "dial", detail: "no route" }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "the relay could not reach the validator (dial: no route)" });
+    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "the relay could not reach the validator (dial: no route)" });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
@@ -759,108 +720,80 @@ describe("relay: amm.swap.submit / amm.swap.status over the app's /call route", 
   });
 });
 
-describe("unfinished steps (0.29.3): a to-do list, no key material; Finish re-derives the key from the final transaction", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  /** A fake instance over the final transaction: its token's one live pool, that pool's BEEF. */
-  const instanceOf = (final: Transaction, asked: unknown[] = []): SignedFetch => {
-    const beef = final.toAtomicBEEF(true);
-    return { fetch: async (_url, init) => {
-      const q = JSON.parse(String(init!.body));
-      asked.push(q);
-      const body = q.query.beef
-        ? { type: "output-list", outputs: [{ beef, outputIndex: 0 }] }
-        : { type: "freeform", result: [{ outpoint: `${final.id("hex")}_0`, bsvReserve: "1", tokenReserve: "1", liquidityFeeBps: 30, validationFeeBps: 5, validatorIdentityKey: v.identity }] };
-      return new Response(JSON.stringify(body), { status: 200 });
-    } };
+describe("the silent pass (0.34.0, D18, D24): the swap basket's staged legs settled from the pool's spender, no browser note", () => {
+  /** The leg's staged sats row as the wallet lists it in `amm-swap` (its keyID naming the pool outpoint, src/market/activeSwap.ts `swapKeyID`). */
+  const satsRowOf = (prepared: PreparedSwap, pool: string) => ({
+    outpoint: prepared.funding.outpoint,
+    satoshis: prepared.funding.input.satoshis,
+    lockingScript: prepared.funding.input.lockingScript,
+    customInstructions: JSON.stringify({ sats: true, assetId: TOKEN_ID, protocolID: SWAP_KEYS, keyID: `amm-swap-${pool.replace("_", ".")}:sats`, counterparty: "self" }),
+  });
+  /** The wallet with its `amm-swap` rows `rows`. */
+  const withRows = (w: ReturnType<typeof fakeWallet>, rows: unknown[]) =>
+    ({ ...w.wallet, listOutputs: async (a: { basket?: string }) => (a.basket === "amm-swap" ? { totalOutputs: rows.length, outputs: rows } : w.wallet.listOutputs(a as never)) }) as unknown as WalletInterface;
+  /** The token instance's reads: `/spends` (the pool's spender) and `/tx` (its BEEF). */
+  const instanceOf = (spentBy: Transaction | null, asked: string[] = []) => async (url: string) => {
+    asked.push(url);
+    const u = new URL(url);
+    if (u.pathname.endsWith("/spends")) return new Response(JSON.stringify({ outpoint: u.searchParams.get("outpoint"), ...(spentBy ? { spentBy: spentBy.id("hex") } : {}), hops: 0, closed: false }), { status: 200 });
+    if (u.pathname.endsWith("/tx") && spentBy && u.searchParams.get("id") === spentBy.id("hex")) return new Response(new Uint8Array(spentBy.toAtomicBEEF(true)), { status: 200 });
+    return new Response("{}", { status: 404 });
   };
-  const memKVOf = () => {
-    const mem = new Map<string, string>();
-    return { mem, kv: { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, val: string) => void mem.set(k, val) } as KV };
-  };
 
-  it("tokens in (BRC-29 payout): the entry {id, kind, txid, vout, tokenId, base, createdAt, final} round-trips; after a reload Finish finds the signed swap in the pool's BEEF, re-derives the key from its input 2, takes it in, clears the entry", async () => {
-    const { wallet, calls, prepared, vkey } = await tokensIn();
-    const { mem, kv } = memKVOf();
-    const service = `ls_amm_${TOKEN_ID}`;
-    const [rec] = pendingSwapPayouts(prepared, TOKEN_ID, "http://x/amm", 1);
-    expect(Object.keys(rec!).sort()).toEqual(["base", "createdAt", "final", "id", "kind", "tokenId", "txid", "vout"]);
-    expect(new PendingPayoutStore(kv).save(rec!)).toBe(true);
-    expect(JSON.parse(mem.get(PENDING_PAYOUTS_KEY)!)).toEqual({ [rec!.id]: rec });
-    const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
-    const store = new PendingPayoutStore(kv); // the reload
-    expect(store.list()).toEqual([rec]);
-    const asked: unknown[] = [];
-    const r = await internalizeNow(wallet, store, instanceOf(final, asked), "http://x/amm", store.list()[0]!);
-    expect(r).toEqual({ accepted: true, txid: final.id("hex") });
-    expect(asked).toEqual([{ service, query: { tokenId: TOKEN_ID } }, { service, query: { tokenId: TOKEN_ID, outpoint: `${final.id("hex")}_0`, beef: true } }]);
-    const ia = calls.filter((c) => c.method === "internalizeAction");
-    expect(ia).toHaveLength(1);
-    if (prepared.payout.kind !== "brc29") throw new Error("expected a BRC-29 payout");
-    expect((ia[0]!.args as { outputs: unknown[] }).outputs).toEqual([{ outputIndex: 1, protocol: "wallet payment", paymentRemittance: prepared.payout.remittance }]);
-    expect(store.list()).toEqual([]);
+  it("the rows grouped by token and the pool outpoint their keyID names; other rows passed over", () => {
+    const pool = `${"ab".repeat(32)}.3`;
+    const rows = [
+      { lockingScript: "76a914" + "00".repeat(20) + "88ac", customInstructions: JSON.stringify({ sats: true, assetId: TOKEN_ID, keyID: `amm-swap-${pool}:sats` }) },
+      { lockingScript: "76a914" + "00".repeat(20) + "88ac", customInstructions: JSON.stringify({ keyID: "other" }) },
+    ];
+    expect(stagedLegs(rows)).toEqual(new Map([[TOKEN_ID, new Set([pool])]]));
   });
 
-  it("sats in (token payout): Finish re-derives the receipt (sender the pool's validator) from input 1 and takes it in through the module's basket", async () => {
-    const { wallet, calls, prepared, vkey } = await satsIn();
-    const { kv } = memKVOf();
-    const store = new PendingPayoutStore(kv);
-    const [rec] = pendingSwapPayouts(prepared, TOKEN_ID, "http://x/amm", 1);
-    store.save(rec!);
+  it("sats in (token payout): the pool's spender is this wallet's swap — ONE /spends, its /tx, the receipt re-derived from input 1 taken in through the module's basket", async () => {
+    const w = fakeWallet();
+    const { prepared, vkey, pool } = await satsIn(w);
     const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
-    expect(await internalizeNow(wallet, store, instanceOf(final), "http://x/amm", rec!)).toEqual({ accepted: true, txid: final.id("hex") });
+    const asked: string[] = [];
+    const taken = await settleStagedSwaps(withRows(w, [satsRowOf(prepared, pool.outpoint)]), () => "http://x/@t/amm", instanceOf(final, asked));
+    expect(taken).toEqual([final.id("hex")]);
+    expect(asked).toEqual([`http://x/@t/amm/spends?outpoint=${pool.outpoint.replace("_", ".")}`, `http://x/@t/amm/tx?id=${final.id("hex")}`]);
     if (prepared.payout.kind !== "color") throw new Error("expected a receipt");
-    const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
+    const ia = w.calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
     expect(ia.outputs).toEqual([{ outputIndex: 1, protocol: "basket insertion", insertionRemittance: { basket: `p color ${TOKEN_ID.slice(0, 64)}v0`, customInstructions: colorReceiptInstructions(prepared.payout.receipt) } }]);
-    expect(store.list()).toEqual([]);
   });
 
-  it("another wallet's swap in the pool's BEEF is no match: not found, the entry stays", async () => {
-    const { prepared, vkey } = await tokensIn();
-    const [rec] = pendingSwapPayouts(prepared, TOKEN_ID, "http://x/amm", 1);
-    const store = new PendingPayoutStore(memKVOf().kv);
-    store.save(rec!);
+  it("tokens in (BRC-29 payout): re-derived from input 2, taken in as a wallet payment", async () => {
+    const w = fakeWallet({ fundingVout: 2 });
+    const { prepared, vkey, pool } = await tokensIn(w);
+    const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
+    expect(await settleStagedSwaps(withRows(w, [satsRowOf(prepared, pool.outpoint)]), () => "http://x/@t/amm", instanceOf(final))).toEqual([final.id("hex")]);
+    if (prepared.payout.kind !== "brc29") throw new Error("expected a BRC-29 payout");
+    const ia = w.calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
+    expect(ia.outputs).toEqual([{ outputIndex: 1, protocol: "wallet payment", paymentRemittance: prepared.payout.remittance }]);
+  });
+
+  it("another wallet's swap spent the pool: nothing taken in (the rows stay the user's); the pool unspent: no /tx read; a failed read: nothing", async () => {
+    const { prepared, vkey, pool } = await tokensIn();
     const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
     const stranger = brc29Side(key(77));
+    const other = fakeWallet({ fundingVout: 2 });
+    const strangerWallet = { ...withRows(other, [satsRowOf(prepared, pool.outpoint)]), getPublicKey: async (a: { identityKey?: boolean }) => ({ publicKey: a.identityKey ? stranger.identityKey : stranger.publicKey(a as never) }) } as unknown as WalletInterface;
+    expect(await settleStagedSwaps(strangerWallet, () => "http://x/@t/amm", instanceOf(final))).toEqual([]);
+    expect(other.calls.some((c) => c.method === "internalizeAction")).toBe(false);
+    const asked: string[] = [];
+    const w = fakeWallet({ fundingVout: 2 });
+    expect(await settleStagedSwaps(withRows(w, [satsRowOf(prepared, pool.outpoint)]), () => "http://x/@t/amm", instanceOf(null, asked))).toEqual([]);
+    expect(asked).toHaveLength(1);
+    expect(await settleStagedSwaps(withRows(w, [satsRowOf(prepared, pool.outpoint)]), () => "http://x/@t/amm", async () => { throw new Error("down"); })).toEqual([]);
+    expect(w.calls.some((c) => c.method === "internalizeAction")).toBe(false);
+  });
+
+  it("swapPayoutOf: an output of another's swap is no match", async () => {
+    const { prepared, vkey } = await tokensIn();
+    const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
+    const stranger = brc29Side(key(78));
     const otherWallet = { ...fakeWallet().wallet, getPublicKey: async (a: { identityKey?: boolean }) => ({ publicKey: a.identityKey ? stranger.identityKey : stranger.publicKey(a as never) }) } as unknown as WalletInterface;
-    await expect(internalizeNow(otherWallet, store, instanceOf(final), "http://x/amm", rec!)).rejects.toThrow(/not on the instance yet/);
-    expect(store.list()).toEqual([rec]);
-  });
-
-  it("an entry from before 0.29.3 (a move back with its own receipt and AtomicBEEF, as Dan's): listed and finished once with its own bytes, no lookup", async () => {
-    const w = fakeWallet();
-    const me = w.side.identityKey;
-    const derivationPrefix = "cHJlZml4MTIzNDU2Nzg5MA==";
-    const derivationSuffix = "c3VmZml4MTIzNDU2Nzg5MA==";
-    const receipt = { assetId: SDK_ID, derivationPrefix, derivationSuffix, senderIdentityKey: me };
-    const recv = w.side.publicKey({ protocolID: colorProtocolID(SDK_ID, derivationPrefix, derivationSuffix), keyID: "color", counterparty: me, forSelf: true });
-    const mb = new Transaction();
-    mb.addInput({ sourceTXID: fund.id("hex"), sourceOutputIndex: 1, sourceTransaction: fund, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-    mb.addOutput({ satoshis: 1, lockingScript: LockingScript.fromHex(tokenP2pkhScriptOf(SDK_ID, 200n, recv)) });
-    mb.inputs[0]!.unlockingScript = await new P2PKH().unlock(taker).sign(mb, 0);
-    const txid = mb.id("hex");
-    for (const kind of ["move-back", "close"] as const) {
-      const old = { id: `${txid}:0`, kind, txid, vout: 0, satoshis: 1, lockingScript: mb.outputs[0]!.lockingScript.toHex(), receipt, final: true, tokenId: SDK_ID, atomicBeef: Utils.toHex(mb.toAtomicBEEF(true)), description: "AMM move back: AMM2", createdAt: 1 };
-      const { kv } = memKVOf();
-      kv.setItem(PENDING_PAYOUTS_KEY, JSON.stringify({ [old.id]: old })); // as 0.29.2 and before wrote it
-      const store = new PendingPayoutStore(kv);
-      expect(store.list()).toEqual([old]);
-      expect(isLegacyPayout(store.list()[0]!)).toBe(true);
-      const none: SignedFetch = { fetch: async () => { throw new Error("no lookup for an entry with its own BEEF"); } };
-      expect(await internalizeNow(w.wallet, store, none, "http://x/amm", store.list()[0]!)).toEqual({ accepted: true, txid });
-      const ia = w.calls.filter((c) => c.method === "internalizeAction").at(-1)!.args as { outputs: unknown[] };
-      expect(ia.outputs).toEqual([receiptOutput(0, receipt)]);
-      expect(store.list()).toEqual([]);
-    }
-  });
-
-  it("an old swap entry not found on the instance: an error, and the entry stays", async () => {
-    const store = new PendingPayoutStore(memKVOf().kv);
-    const rec = { id: `${"ab".repeat(32)}:1`, kind: "swap" as const, txid: "ab".repeat(32), vout: 1, satoshis: 5, lockingScript: "76a914" + "00".repeat(20) + "88ac", remittance: { derivationPrefix: "AA==", derivationSuffix: "AA==", senderIdentityKey: "02" + "11".repeat(32) }, final: false, tokenId: `${"cd".repeat(32)}_0`, description: "AMM swap payout", createdAt: 1 };
-    store.save(rec);
-    const af: SignedFetch = { fetch: async () => new Response(JSON.stringify({ type: "freeform", result: [] }), { status: 200 }) };
-    await expect(internalizeNow(fakeWallet().wallet, store, af, "http://x/amm", rec)).rejects.toThrow(/not on the instance yet/);
-    expect(store.list()).toEqual([rec]);
+    expect(await swapPayoutOf(otherWallet, final, 1, TOKEN_ID)).toBeNull();
   });
 });
 
@@ -901,19 +834,15 @@ describe("the commission", () => {
     expect(prepared.swap.outputs[4]!.lockingScript.toHex()).toBe(new P2PKH().lock(own.toAddress()).toHex());
     expect(prepared.plan.args[5]).toBe(c.pkh);
 
-    const recs = pendingSwapPayouts(prepared, TOKEN_ID, "http://x/amm", 1);
-    // The token payout and the commission are both unfinished-step entries (0.29.3: no receipt or remittance in them).
-    const txid0 = prepared.swap.id("hex");
-    expect(recs).toEqual([
-      { id: `${txid0}:1`, kind: "swap", txid: txid0, vout: 1, tokenId: TOKEN_ID, base: "http://x/amm", createdAt: 1, final: false },
-      { id: `${txid0}:4`, kind: "swap", txid: txid0, vout: 4, tokenId: TOKEN_ID, base: "http://x/amm", createdAt: 1, final: false },
-    ]);
+    // The silent pass recognizes both as this wallet's (0.34.0: no browser note; keys re-derived from the swap's inputs).
+    expect((await swapPayoutOf(wallet, prepared.swap, 1, TOKEN_ID))?.outputIndex).toBe(1);
+    expect((await swapPayoutOf(wallet, prepared.swap, 4, TOKEN_ID))?.outputIndex).toBe(4);
 
     const { af } = fakeRelay(async (fn, args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
       return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER);
+    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted") throw new Error(`expected acceptance, got ${o.status}`);
     expect(o.completed.internalized).toBe(true);
     const ia = calls.find((x) => x.method === "internalizeAction")!.args as { outputs: unknown[] };
@@ -938,15 +867,16 @@ describe("the commission", () => {
     expect(decodeOneColor(Utils.toArray(script, "hex"))).toMatchObject({ role: "value", amount: 50n });
     expect(script.endsWith(new P2PKH().lock(own.toAddress()).toHex())).toBe(true);
     expect(prepared.funding.outputs).toBe(2);
-    // Both are pending records: the sats payout (BRC-29), the token commission (its receipt).
-    expect(pendingSwapPayouts(prepared, TOKEN_ID, "http://x/amm", 1).map((r) => [r.vout, r.remittance, r.receipt])).toEqual([[1, undefined, undefined], [4, undefined, undefined]]);
+    // The silent pass recognizes both: the sats payout (BRC-29), the token commission (its receipt).
+    expect((await swapPayoutOf(wallet, prepared.swap, 1, TOKEN_ID))?.outputIndex).toBe(1);
+    expect((await swapPayoutOf(wallet, prepared.swap, 4, TOKEN_ID))?.outputIndex).toBe(4);
 
     const { af } = fakeRelay(async (fn, args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
       for (const i of [0, 1, 2]) expect(spendValid(final, i)).toBe(true);
       return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm", sleep: noSleep }, prepared, PEER);
+    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted" || prepared.payout.kind !== "brc29") throw new Error(`expected acceptance, got ${o.status}`);
     const ia = calls.find((x) => x.method === "internalizeAction")!.args as { outputs: unknown[] };
     expect(ia.outputs).toEqual([

@@ -156,6 +156,7 @@ Swaps admitted from 0.33.0 on:
 
 ```ts
 interface PoolState {
+  lpPubKey: string;        // 0.34.0: the pool's LpPubKey (hex), its id
   outpoint: string;
   bsvReserve: bigint;
   tokenReserve: bigint;
@@ -163,7 +164,6 @@ interface PoolState {
   validationFeeBps: bigint;
   commissionBps: bigint;   // the Pool's CommissionBps (the relay's commission)
   validatorIdentityKey: string;
-  lastSeen?: number;
 }
 ```
 
@@ -172,13 +172,11 @@ reserve above 2^53 - 1 loses precision in a client's `JSON.parse`. That is
 the route's encoding, not this service's. `validatorIdentityKey` is
 lowercase hex text.
 
-## Liveness join
+## Liveness
 
-`setLiveJoin` / `liveOf` merge `lastSeen` from a `live` map
-(`identityKey → {peerId, at}`) when one is wired; nothing wires one in
-`main.zig` (since skein-amm 0.4.0 liveness is the runtime's read, `GET
-/amm/.live/tm_color_<txid>_0-live`, which the page joins itself; no map is kept in
-the graph). Without a join, `lastSeen` is left out.
+The lookup joins no liveness (0.34.0: `lastSeen`, `setLiveJoin`, `liveOf` gone, dead since
+0.9.0): which pools are live is the host's judgement, joining its own beats to this index when it
+answers the pools route (`GET /@<token>/amm/pools`, the Open Exchange host).
 
 ## Tests
 
@@ -197,5 +195,4 @@ sharing the compiled Pool template:
   `spentPools`;
 - `{outpoint}` follows three hops to the newest continuation over the
   chain state's spends;
-- `{validatorIdentityKey}` returns only that validator's pools;
-- the liveness join.
+- `{validatorIdentityKey}` returns only that validator's pools.

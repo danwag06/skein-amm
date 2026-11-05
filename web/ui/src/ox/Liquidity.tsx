@@ -9,13 +9,13 @@ import { Id } from "../components/Id";
 import {
   closePosition,
   deployPosition,
-  recoverPosition,
   useMyPositions,
   useMyTokens,
   hasTerms,
   NO_TERMS_TEXT,
   useValidatorTerms,
   type HostedToken,
+  type PoolRow,
   type Position,
   type Session,
 } from "../data/exchange";
@@ -257,68 +257,20 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
   );
 }
 
-/** Recover a position: file the row of a pool this wallet deployed whose row was never filed (0.12.1). */
-function RecoverForm() {
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<{ outpoint: string; sym: string; filed: boolean } | null>(null);
-
-  async function recover() {
-    setBusy(true);
-    setError(null);
-    setDone(null);
-    try {
-      const r = await recoverPosition(text.trim());
-      setDone(r);
-      if (r.filed) setText("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form
-      className="panel recover"
-      aria-label="Recover a position"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void recover();
-      }}
-    >
-      <div className="field">
-        <label htmlFor="recover-outpoint">Recover a position</label>
-        <input id="recover-outpoint" className="mono" placeholder="<txid>.<vout>" value={text} onChange={(e) => setText(e.target.value)} aria-describedby="recover-help" />
-        <span id="recover-help" className="help">
-          A pool you deployed that is missing here: paste its outpoint.
-        </span>
-      </div>
-      {error && <Notice kind="bad">{error}</Notice>}
-      {done &&
-        (done.filed ? (
-          <Notice kind="ok">
-            Recovered {done.sym} / BSV: <Id value={done.outpoint} kind="outpoint" label="pool" /> is in your positions.
-          </Notice>
-        ) : (
-          <Notice kind="bad">Your wallet did not accept the pool&apos;s row.</Notice>
-        ))}
-      <div className="actions">
-        <button type="submit" className="btn btn-outline" disabled={busy || text.trim() === ""}>
-          {busy ? "Recovering…" : "Recover"}
-        </button>
-      </div>
-    </form>
-  );
+/**
+ * Whether a position's pool is listed by the host's pools route (0.34.0: the page reads no
+ * liveness; the host lists a pool only while its validator is beating).
+ */
+export function listedLive(p: Pick<Position, "outpoint">, rows: PoolRow[] | null): boolean {
+  return (rows ?? []).some((r) => r.outpoint.replace("_", ".") === p.outpoint);
 }
 
-export function Liquidity({ session, hosted }: { session: Session; hosted: HostedToken[] | null }) {
+export function Liquidity({ session, hosted, rows }: { session: Session; hosted: HostedToken[] | null; rows?: PoolRow[] | null }) {
   const connected = session.status === "connected";
   const positions = useMyPositions(connected);
   const [closed, setClosed] = useState<{ msg: string; txid: string } | null>(null);
   // 0.32.0: the cards are the live positions; the per-token fees line counts the closed ones too.
-  const live = positions.data?.filter((p) => !p.closed) ?? null;
+  const live = positions.data?.filter((p) => !p.closed).map((p) => ({ ...p, validator: { ...p.validator, live: listedLive(p, rows ?? null) } })) ?? null;
   const byToken = positions.data ? feesByToken(positions.data) : [];
   if (!connected) {
     return (
@@ -361,7 +313,6 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
             ))}
           </div>
         )}
-        <RecoverForm />
       </section>
       <section className="stack">
         <h2 className="section-title">Deploy a position</h2>

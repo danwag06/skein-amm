@@ -1,18 +1,17 @@
 /**
  * Your tokens: the wallet's own 1Color tokens with balance (the BRC-207 module's), each marked on
  * this exchange or not; beside the balance, what the swap basket holds of it,
- * with "Move back" (0.12.0: the recovery path for a stuck swap). 0.29.3: an "Unfinished" card, shown
- * only while the browser lists unfinished steps (a swap payout the wallet has not taken in), one
- * "Finish" per step; no automatic retry. 0.29.6: a swap never signed gets "Dismiss" too (drops the
- * entry only); the swap-basket line shows the sats staged for the token, Move back offered for
- * tokens or sats. 0.30.0: "Send" on a token with a balance — an inline form (handle, amount, memo)
+ * with "Move back" (0.12.0: the recovery path for a stuck swap). 0.34.0 (D18, D24): no
+ * "Unfinished" card: on load a silent pass settles the swap basket's staged legs (a payout this
+ * wallet's swap left is taken in; nothing is shown). 0.29.6: the swap-basket line shows the sats
+ * staged for the token, Move back offered for tokens or sats. 0.30.0: "Send" on a token with a balance — an inline form (handle, amount, memo)
  * under the row, one open at a time; @1sat/actions `send1Color` builds the send through the wallet's
  * 1Color module and delivers it to the handle's messagebox (BRC-232); the row then says what happened.
  */
 import { useState } from "react";
 import type { Send1ColorResult } from "@1sat/actions";
-import { COLOR_DEPLOY_HREF, dismissUnfinished, finishUnfinished, moveBackTokens, sendTokens, useMyTokens, useUnfinished, type Session, type Unfinished, type WalletToken } from "../data/exchange";
-import { ago, fmtAmount, fmtSats, parseInput } from "./format";
+import { COLOR_DEPLOY_HREF, moveBackTokens, sendTokens, useMyTokens, useSettleSwaps, type Session, type WalletToken } from "../data/exchange";
+import { fmtAmount, fmtSats, parseInput } from "./format";
 import { NeedWallet, Notice, TokenName } from "./bits";
 
 function Status({ t }: { t: WalletToken }) {
@@ -230,86 +229,10 @@ function TokenRow({ t, sending, setSending }: { t: WalletToken; sending: boolean
   );
 }
 
-const KIND_TEXT: Record<Unfinished["kind"], string> = { swap: "Swap payout", "move-back": "Move back", close: "Close", "remove-liquidity": "Remove liquidity" };
-
-function UnfinishedRow({ u }: { u: Unfinished }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  return (
-    <li className="ttable-row">
-      <span>
-        {KIND_TEXT[u.kind]} <span className="muted small">{u.tokenId.slice(0, 8)}…</span>
-      </span>
-      <span className="r muted small">
-        <span className="mono">{u.txid.slice(0, 12)}…</span>
-        {u.final ? "" : " (not signed yet)"} · {ago(u.createdAt)} ago
-      </span>
-      <span className="r">
-        <button
-          type="button"
-          className="btn btn-outline"
-          disabled={busy}
-          onClick={() => {
-            setBusy(true);
-            setError(null);
-            finishUnfinished(u.id).then(
-              () => setBusy(false),
-              (e: unknown) => {
-                setError(e instanceof Error ? e.message : String(e));
-                setBusy(false);
-              },
-            );
-          }}
-          aria-label={`Finish: take the ${KIND_TEXT[u.kind].toLowerCase()} into your wallet`}
-        >
-          {busy ? "Finishing…" : "Finish"}
-        </button>
-        {u.dismissable && (
-          <>
-            {" "}
-            <button
-              type="button"
-              className="btn btn-outline"
-              disabled={busy}
-              onClick={() => {
-                setError(null);
-                try {
-                  dismissUnfinished(u.id);
-                } catch (e: unknown) {
-                  setError(e instanceof Error ? e.message : String(e));
-                }
-              }}
-              aria-label="Dismiss: forget this unsigned swap; nothing was paid to you"
-            >
-              Dismiss
-            </button>
-          </>
-        )}
-        {error && <span className="bad small"> {error}</span>}
-      </span>
-    </li>
-  );
-}
-
-function UnfinishedCard() {
-  const list = useUnfinished();
-  if (list.length === 0) return null;
-  return (
-    <section className="panel ttable" aria-label="Unfinished">
-      <h2 className="h2 h2-sm">Unfinished</h2>
-      <p className="fg2 small">Outputs paid to you that your wallet has not taken in yet. Finish takes one in.</p>
-      <ul className="ttable-rows">
-        {list.map((u) => (
-          <UnfinishedRow key={u.id} u={u} />
-        ))}
-      </ul>
-    </section>
-  );
-}
-
 export function YourTokens({ session }: { session: Session }) {
   const connected = session.status === "connected";
   const mine = useMyTokens(connected);
+  useSettleSwaps(connected);
   const [sending, setSending] = useState<string | null>(null);
   return (
     <>
@@ -327,7 +250,6 @@ export function YourTokens({ session }: { session: Session }) {
         <NeedWallet session={session} what="your tokens" />
       ) : (
         <>
-          <UnfinishedCard />
           {mine.error && <Notice kind="bad">Could not read your tokens: {mine.error}</Notice>}
           <section className="panel ttable" aria-label="Your tokens">
             <div className="ttable-head" aria-hidden="true">

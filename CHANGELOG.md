@@ -4,6 +4,45 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.34.0 (2026-11-04)
+
+The exchange's public read API (agent-env plans/exchange-api-build-2026-11-04.md §B; decisions
+D1–D25 in plans/exchange-api-2026-11-04.md §0; the route table in docs/AMM.md "The public read
+API"). Plain GETs, JSON unless bytes, comma lists answered one record per key in query order,
+cache headers per class. Nothing is removed from `/submit` or `/lookup` (D8).
+
+- **amm-lookup**: the `{tokenId}` rows carry the pool's `lpPubKey` (hex: its id, D2); `lastSeen`,
+  `liveOf`, `LiveJoin`, `setLiveJoin` and their README section gone (dead since 0.9.0; the
+  liveness join is the host's, D11). The 0.33.0 list queries stay on `/lookup`.
+- **amm-p2p read routes** (filters, no handler; reads.zig): `/pools/beef?lp=` (P3: the LP keys'
+  current pools — live, or a rescinded pool's output — and ONE base64 BEEF of their transactions;
+  no `lp`, every live pool), `/positions?lp=` (P4), `/fees/validator?id=` (P5),
+  `/fees/commission?pkh=` (P6) — each the lookup's own list answer (amm-lookup's `answer`,
+  imported as a module, the same code over the same index) — `/terms` (P7: the validator's terms
+  with this instance's identity and peer ID, and the market's commission key hash and minimum, in
+  one, unsigned), `/spends?outpoint=a,b` (P8: one record per outpoint; one outpoint the single
+  object as before), `/tx?id=` (P9: the transaction's Atomic BEEF; `immutable` only when proven
+  in chain state), `/swaps?id=` (P10: the relay record as `amm.swap.status` answers it,
+  unsigned). `/pools` is the host's (P1, P2), not this app's.
+- **Pages** (web/ui): the pages send `/lookup` nowhere and read no beats (a test checks the
+  sources). Swap holds the token's pools route as an event stream; quotes from it (no request);
+  the fee line the pool's own; the market minimum, `useValidatorTerms`, the `.live` reads and the
+  10 s price poll gone (D11–D13, D16). A swap reads ONE `/pools/beef?lp=` for its legs, the
+  commission key hash and peer IDs from the held pools; expiry 15 s; the submit's held answer is
+  the settled record, no poll; no answer yet → "Check again" reads `/swaps?id=` once (D14, D15).
+  The landing prices hold the host-wide pools route; the token list is read once per page load
+  (D4, D22). Your tokens: ONE discovery `?ids=` for held tokens off the list (D17); the Unfinished
+  card and its localStorage store gone, a silent pass over the swap basket's staged legs settles
+  them (D18, D24); Move back, Close, the swap-basket send and the deploy submit at
+  `<origin>/submit` + `X-Topics` (D19). Positions: ONE `/positions?lp=` per token (D9); a deploy
+  in the history with no `amm-pools` row is filed while its pool is still at the deploy's output
+  (D23); "Recover a position" gone; Close's pool BEEF by its LP key. Settings: swap's identity
+  from the claim card (`instanceIdentity` gone), Enable's deploy from the wallet else discovery's
+  `/<token>/deploy`, `?ids=` for wallet-only candidates, the deploy form's terms `/terms` (D20,
+  D21).
+- Needs, to run as intended: the host's pools routes (skein 0.2.6 + open-exchange 0.11.0, part A)
+  and discovery's `/tokens`, `/<token>/deploy` (skein-1color 0.14.0, part C).
+
 ## 0.33.0 (2026-11-04)
 
 - **Fee rows in the pool lookup** (agent-env plans/fee-rows-and-reindex-2026-11-04.md, as

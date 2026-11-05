@@ -278,7 +278,10 @@ test "admitted: a pool deploy that passes the checks is indexed once, and the an
     try testing.expectEqual(@as(u64, vec.validator_fee_bps), entry.get("validationFeeBps").?.uint);
     try testing.expectEqual(@as(u64, vec.commission_bps), entry.get("commissionBps").?.uint);
     try testing.expectEqualStrings(vec.identity, entry.getText("validatorIdentityKey").?);
-    try testing.expect(entry.get("lastSeen") == null); // no liveness program wired: README, "Liveness join"
+    // 0.34.0: the pool's LpPubKey (its id) in the answer; no `lastSeen` (the liveness join is the host's).
+    try testing.expectEqualStrings(vec.lp, entry.getText("lpPubKey").?);
+    try testing.expect(entry.get("lastSeen") == null);
+    try testing.expectEqual(@as(usize, 8), entry.map.len);
 
     // {outpoint}: a direct hit is 0 hops.
     const q = try e.q(a, &.{.{ .key = "outpoint", .value = .{ .text = try opStr(a, pd_txid, 0) } }});
@@ -712,41 +715,6 @@ test "answer: {validatorIdentityKey} returns only that validator's pools" {
     const idb = try idx.answer(a, &svc, &ch, try e.q(a, &.{.{ .key = "validatorIdentityKey", .value = .{ .text = &hex_b } }}));
     try testing.expectEqual(@as(usize, 1), idb.freeform.array.len);
     try testing.expectEqualStrings(try opStr(a, pool_b.txid, 0), idb.freeform.array[0].getText("outpoint").?);
-}
-
-test "liveness join: setLiveJoin merges lastSeen when a live map is wired, and leaves it null otherwise" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const e = try Env.init(a);
-    defer e.deinit();
-    var svc = try e.svc(a);
-    var ch = try e.chain(a);
-
-    try e.admit(a, &svc, "pool_deploy", null, &.{0}, &.{0});
-
-    // No liveness program wired: lastSeen stays null.
-    const before = try idx.answer(a, &svc, &ch, try e.q(a, &.{}));
-    try testing.expect(before.freeform.array[0].get("lastSeen") == null);
-
-    // A liveness service's own head, holding `{identityKey → {peerId, at}}`
-    // (README, "Liveness join" — an assumed shape: no such program exists
-    // yet). `svc.name` here stands in for "amm-live".
-    var live_svc = try lookup.Service.load(a, e.ms.store(), "amm-live", &.{"live"}, null);
-    const identity = key33(vec.identity);
-    // A kernel-level MST value (`Map.put`'s `MValue`, wallet-zig's
-    // store.zig), not wallet-zig's own `cbor.Value`: the literal is left
-    // untyped so it infers the right (kernel) `Entry`.
-    const live_val: w.store.MValue = .{ .map = &.{
-        .{ .key = "peerId", .value = .{ .string = "12D3KooW..." } },
-        .{ .key = "at", .value = .{ .int = 1_700_000_000_000 } },
-    } };
-    try live_svc.map("live").put(&identity, live_val);
-    idx.setLiveJoin(.{ .svc = &live_svc });
-    defer idx.setLiveJoin(null);
-
-    const after = try idx.answer(a, &svc, &ch, try e.q(a, &.{}));
-    try testing.expectEqual(@as(u64, 1_700_000_000_000), after.freeform.array[0].get("lastSeen").?.uint);
 }
 
 // ---------------------------------------------------------------- the fee rows (0.33.0)

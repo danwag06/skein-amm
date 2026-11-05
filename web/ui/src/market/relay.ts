@@ -6,7 +6,11 @@
  *
  *   amm.swap.terms   (reads)   {} → {commissionPkh: bytes(20) | null, minCommissionBps}
  *   amm.swap.submit  (writes)  {funding, swap, pool, validator, peerId, expires} → the record
- *   amm.swap.status  (reads)   {id} → the record
+ *                              (0.34.0, D15: the host holds the request until the relay thread
+ *                              rests, so the answer is the settled record; past the host's bound,
+ *                              503: no answer yet)
+ *   amm.swap.status  (reads)   {id} → the record (0.34.0: the pages read it plain, `GET
+ *                              <base>/swaps?id=`, src/lib/overlay.ts `readSwap`, behind "Check again")
  *
  *   commissionPkh  the address the relay takes the pool's commission at
  *              (Swap's `commissionPkh`; 0.16.0: hash160 of the instance's
@@ -24,8 +28,8 @@
  *              of the leg's `amm-swap` sats output, the swap's input 1
  *   swap       bytes: the raw swap, the validator's slot `OP_0`
  *   pool       text `<txid>_<vout>`; validator bytes(33); expires unix ms
- *   peerId     text: the validator's libp2p peer ID, from the token's liveness
- *              read (`GET <base>/.live/tm_color_<txid>_0-live`, the beat's body): the
+ *   peerId     text: the validator's libp2p peer ID, from the pools route's row
+ *              (`validatorPeerId`, 0.34.0: the host joined it from the beat): the
  *              relay dials it (or, when it is the relay's own node, hands the
  *              swap to its own validator program); it looks at no liveness
  *
@@ -233,26 +237,4 @@ export async function submitSwap(af: AuthFetchLike, base: string, s: SwapSubmit)
 
 export async function swapStatus(af: AuthFetchLike, base: string, id: string): Promise<SwapRecord> {
   return parseSwapRecord(await callApp(af, base, SWAP_STATUS_FN, { id }));
-}
-
-export interface AwaitOptions {
-  intervalMs?: number;
-  /** Stop polling at this unix ms; a record still pending then is returned as is. */
-  until: number;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  onRecord?: (r: SwapRecord) => void;
-}
-
-/** Polls `amm.swap.status` while the record is pending, up to `until`. */
-export async function awaitSwap(af: AuthFetchLike, base: string, first: SwapRecord, o: AwaitOptions): Promise<SwapRecord> {
-  const now = o.now ?? Date.now;
-  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let r = first;
-  while (r.status === "pending" && now() < o.until) {
-    await sleep(o.intervalMs ?? 1000);
-    r = await swapStatus(af, base, r.id);
-    o.onRecord?.(r);
-  }
-  return r;
 }

@@ -1,5 +1,20 @@
 # @amm-poc/market-ui
 
+**skein-amm 0.34.0: the public read API** (agent-env plans/exchange-api-2026-11-04.md D1–D25;
+docs/AMM.md "The public read API"; `src/lib/overlay.ts` carries the route table). Every read is a
+plain GET; the pages send `/lookup` nowhere and read no `.live/` beats (`test/overlay.test.ts`
+checks the sources). Swap holds the token's pools route as an event stream (quotes from it, no
+request; the fee line the pool's own; a swap = ONE `/pools/beef?lp=` + each leg's relay `/call`,
+15 s expiry, "Check again" = ONE `/swaps?id=`); the landing prices hold the host-wide pools route;
+the token list is read once per page load; Positions = ONE `/positions?lp=` per token (a deploy
+in the history but not in `amm-pools` filed then), Close's pool BEEF by its LP key; Your tokens'
+metadata for tokens off the list = ONE discovery `?ids=`; Move back and every page submit go to
+`<origin>/submit` + `X-Topics`; Settings' identity from the claim card, Enable's deploy from the
+wallet or discovery's `/<token>/deploy`, the deploy form's terms `/terms`. GONE: Recover a position,
+the Unfinished card and its browser store (`amm-poc.pending-payouts.v1`; a silent pass over the
+swap basket's staged legs settles them, `src/wallet/swapPayouts.ts`), the market-minimum line,
+the price poll (`VITE_AMM_REFRESH_MS`).
+
 **skein-amm 0.13.0: the validator's nonce, no input named, the LP's Close**
 (David Case, 2026-10-22; docs/AMM.md). The pool's state carries the
 validator's key, nonce and affirmation (layout 2, `src/pool/artifact.ts`;
@@ -340,7 +355,6 @@ untracked, or the environment):
 |---|---|---|
 | `VITE_AMM_OVERLAY` | the page's own directory (`appBaseOf`) | the AMM app's base URL (every page); its origin is the instance (messagebox, `/.well-known/auth`, `/explore`). Set it for a dev server on another origin |
 | `VITE_AMM_PEER_OVERLAY` | (none) | another node's AMM base URL: the Validator page reads this instance's liveness and peer ID from its `.live/tm_color_<txid>_0-live` reads (0.4.0); unset disables |
-| `VITE_AMM_REFRESH_MS` | `10000` | the Swap page's refresh |
 | `VITE_FEE_RATE` | `100` | the swap's miner fee rate, sats per 1000 bytes: the funding output carries `ceil(size × rate / 1000)` for the final swap (below, "Funding") |
 
 ## Dev server
@@ -683,8 +697,8 @@ public/
   manifest.json        W3C manifest + metanet.groupPermissions ("Permissions")
 src/
   lib/
-    config.ts          VITE_AMM_OVERLAY / VITE_AMM_PEER_OVERLAY / VITE_AMM_REFRESH_MS
-    overlay.ts         the instance client: listTopicManagers, lookup (freeform and BEEF), live; topic names
+    config.ts          VITE_AMM_OVERLAY / VITE_AMM_PEER_OVERLAY / VITE_FEE_RATE
+    overlay.ts         the public read API's client (0.34.0): pools routes and their stream, /pools/beef, /positions, /terms, /spends, /tx, /swaps, discovery's /tokens and /<token>/deploy; topic names
     keys.ts             validator signing-key derivation (BRC-43, "amm pool", anyone counterparty)
   pool/
     pool.artifact.json  Pool contract artifact, dumped from pool/dump_test.go (see below)
@@ -738,7 +752,7 @@ test/
   lp.test.ts            inventory grouping, icon resolution, ordinals picker, deploy outputs and
                         customInstructions per icon choice, the wallet calls, decimals
   fixtures/amm-topic-vectors.json  programs/amm-topic fixture transactions (copied, see its _source)
-  overlay.test.ts        parseLookupAnswer against recorded /lookup answers
+  overlay.test.ts        the public read API's client (0.34.0); no page source asks /lookup or .live
   swap.test.ts           Swap page: market view from recorded v2 answers, plan display, races; the funding
                          action's shape and exact amount, the swap's inputs checked with Spend for sats in and
                          tokens in (amm-topic fixture pools, funding built in-test by the fake wallet), the

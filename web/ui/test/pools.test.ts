@@ -469,7 +469,7 @@ describe("close (0.13.0; 0.29.3 one path, a module plan): the tokens to a module
     expect(b.calls.some((c) => c.method === "createAction")).toBe(false);
   });
 
-  it("the submit (BRC-22, plain fetch): the STEAK, or nothing decided (503)", async () => {
+  it("the submit (BRC-22, plain fetch; 0.34.0, D19: at the HOST ROOT, routed by X-Topics): the STEAK, or nothing decided (503)", async () => {
     const { wallet } = fakeWallet(3, honest((a) => side.privateKey(a)));
     const s = await prepareClose({ wallet, tokenId: TOKEN_ID, poolOutput: poolOutput(), lpKey: lpRef });
     const STEAK = { [s.topic]: { outputsToAdmit: [1], coinsToRetain: [], coinsRemoved: [0] } };
@@ -481,8 +481,8 @@ describe("close (0.13.0; 0.29.3 one path, a module plan): the tokens to a module
       const found = q.service === `ls_color_${TOKEN_ID}` && q.query.type === "color-admission" && q.query.topic === `tm_color_${TOKEN_ID}` && q.query.outpoints[0] === `${s.txid}.1` && seen.length > 2;
       return new Response(JSON.stringify({ type: "output-list", outputs: found ? [{ beef: [], outputIndex: 1 }] : [] }), { status: 200 });
     }) as unknown as SignedFetch["fetch"];
-    const r = await submitToOverlay("http://x/amm", s.topic, s.beef, fetchFn as never);
-    expect(seen[0]!.url).toBe("http://x/amm/submit");
+    const r = await submitToOverlay("http://x/@tok/amm", s.topic, s.beef, fetchFn as never);
+    expect(seen[0]!.url).toBe("http://x/submit");
     expect(seen[0]!.init.headers).toEqual({ "content-type": "application/octet-stream", "x-topics": s.topic });
     expect(r).toEqual({ steak: STEAK });
     expect(steakText(r)).toBe(`admitted under ${s.topic} (outputs 1)`);

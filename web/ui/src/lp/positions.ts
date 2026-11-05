@@ -1,7 +1,8 @@
 /**
- * 0.33.0: the rows are read here; their pools' state and fees come from ONE `ls_amm_<assetId>`
- * `{tokenId, lpPubKeys}` query per token (src/data/exchange.ts `myPositions`), not from `/spends` per
- * row as below; the pool output's BEEF (`colorOutput`) is read only when the LP acts (Close).
+ * 0.34.0 (D9): the rows are read here; their pools' state and fees come from ONE `GET
+ * /@<token>/amm/positions?lp=k1,k2` per token (src/data/exchange.ts `myPositions`), not from
+ * `/spends` per row as below; the pool output's BEEF is read only when the LP acts (Close: `GET
+ * /@<token>/amm/pools/beef?lp=<its key>`).
  *
  * The connected wallet's positions (skein-amm 0.9.0, David Case 2026-10-09;
  * 0.12.0: the rows in the exchange's basket `amm-pools`, no claim): the pool
@@ -29,8 +30,7 @@
  */
 import { Utils, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
 import { PoolTemplate } from "../pool";
-import { lookup, parseOutputList, type LookupOutput, type SignedFetch } from "../lib/overlay";
-import { colorQuery, parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
+import { parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
 import { POOLS_BASKET } from "../wallet/color";
 import { POOL_TAG, isPoolRow } from "./poolRows";
 import { LP_KEY_PROTOCOL, lpKeyIdOfDescription, poolCustomInstructions, type BasketRow } from "./poolDeploy";
@@ -56,7 +56,7 @@ export interface PositionRow {
   lpPubKey?: string;
 }
 
-/** The label a pool deploy (and a Recover) gives its action (src/lp/poolDeploy.ts). */
+/** The label a pool deploy gives its action (src/lp/poolDeploy.ts). */
 export const POOL_DEPLOY_LABEL = "amm-pool-deploy";
 
 /**
@@ -150,17 +150,6 @@ export function positionRowsOf(rows: BasketRow[]): PositionRow[] {
     }
   }
   return out;
-}
-
-/** An unspent 1Color output of token `tokenId` with its BEEF: BRC-207 `color-spendability` at `ls_color_<tokenId>`, its instance `base`. */
-export async function colorOutput(af: SignedFetch | null, base: string, tokenId: string, outpoint: string): Promise<LookupOutput> {
-  const op = parseOutpoint(outpoint);
-  if (!op) throw new Error(`not an outpoint: ${outpoint}`);
-  const { service, query } = colorQuery("color-spendability", tokenId, [`${op.txid}.${op.vout}`]);
-  const outs = parseOutputList(await lookup(af, base, service, query));
-  const o = outs.find((x) => x.outputIndex === op.vout) ?? outs[0];
-  if (!o) throw new Error(`${service}: no unspent output ${outpoint}`);
-  return o;
 }
 
 /** One token's positions summed (0.32.0): the Liquidity page's line above the cards. */

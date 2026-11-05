@@ -3,9 +3,8 @@
  * outputs free; skein-amm 0.13.0). One path (0.29.0, David Case 2026-11-02: "we should just use
  * create action directly"; 0.29.1: the page-built close and layout 1 gone; 0.29.3: a module plan):
  *
- *   1. The pool's current output: followed from the position's deploy by the chain state
- *      (`GET <base>/spends`, src/lp/positions.ts), its BEEF from the token's 1Color lookup
- *      (BRC-207 `color-spendability` at `ls_color_<tokenId>`).
+ *   1. The pool's current output and its BEEF: 0.34.0, `GET /@<token>/amm/pools/beef?lp=<its LP
+ *      key>` (the pool's current output by its LP key, live or rescinded).
  *   2. The LP's one output (`PoolTemplate.planClose`): every token, one sat, to a NEW module
  *      receiving key of the user's own (`newReceivingKey`, sender the user's identity). The pool's
  *      sats go to the wallet's change: no payout output, no remittance.
@@ -18,7 +17,7 @@
  *      change takes the pool's sats; the page fills the pool input over the wallet's transaction
  *      (`callUnlock` + the LP's `createSignature`, checked with `Spend`) at signAction; the
  *      module approves and submits, the wallet broadcasts and marks the pool row spent.
- *   4. `POST <base>/submit` (`x-topics: tm_color_<assetId>`), the close's AtomicBEEF: the page's
+ *   4. `POST <origin>/submit` (`x-topics: tm_color_<assetId>`), the close's AtomicBEEF: the page's
  *      own submit. Nothing is taken in afterwards and nothing is kept in the browser.
  */
 import { Beef, PublicKey, Transaction, type WalletInterface } from "@bsv/sdk";
@@ -131,8 +130,10 @@ export async function prepareClose(i: CloseInput): Promise<PreparedClose> {
 export type Steak = Record<string, { outputsToAdmit: number[]; coinsToRetain: number[]; coinsRemoved: number[] }>;
 
 /**
- * Submit to the instance (BRC-22; skein-overlay 0.9.1, docs/OVERLAY.md "Submitting"): `POST
- * <base>/submit` (`x-topics` the token topic, the body the BEEF) waits on the submission and
+ * Submit to the exchange (BRC-22; skein-overlay 0.9.1, docs/OVERLAY.md "Submitting"): 0.34.0 (D19,
+ * David Case 2026-11-04): `POST <origin>/submit` at the HOST ROOT of `base` (`x-topics` the token
+ * topic, which the host routes to the instance serving it; the body the BEEF) — no token list read
+ * for an instance base — waits on the submission and
  * answers the STEAK; 503 with Retry-After when nothing is decided within the host's bound (the
  * submission stands: `steak` absent). Plain `fetch`, unsigned (0.6.3; David 2026-10-08: "We
  * shouldn't be using authfetch for the submit http method."): the front door (shruggr/skein#135)
@@ -145,21 +146,22 @@ export async function submitToOverlay(
   beef: number[],
   fetchFn: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init),
 ): Promise<{ steak?: Steak }> {
-  const res = await fetchFn(`${base}/submit`, {
+  const url = `${new URL(base).origin}/submit`;
+  const res = await fetchFn(url, {
     method: "POST",
     headers: { "content-type": "application/octet-stream", "x-topics": topic },
     body: new Uint8Array(beef),
   });
   const text = await res.text();
   if (res.status === 503) return {};
-  if (!res.ok) throw new Error(`POST ${base}/submit: ${res.status} ${text.slice(0, 300)}`);
+  if (!res.ok) throw new Error(`POST ${url}: ${res.status} ${text.slice(0, 300)}`);
   let steak: unknown;
   try {
     steak = JSON.parse(text);
   } catch {
     /* not JSON */
   }
-  if (!steak || typeof steak !== "object" || Array.isArray(steak)) throw new Error(`POST ${base}/submit: want the STEAK, got ${text.slice(0, 300)}`);
+  if (!steak || typeof steak !== "object" || Array.isArray(steak)) throw new Error(`POST ${url}: want the STEAK, got ${text.slice(0, 300)}`);
   return { steak: steak as Steak };
 }
 

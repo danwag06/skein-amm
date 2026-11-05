@@ -60,14 +60,16 @@ import type { LookupOutput } from "../lib/overlay";
 import { isPoolRow } from "../lp/poolRows";
 import { basketBeef } from "../lp/wallet";
 import { outpointText, parseOutpoint, parseTokenId, sdkTokenId } from "../lib/tokenId";
-import { payoutId, type PendingPayout } from "../wallet/pendingPayouts";
 import { WALLET_PAYMENT, identityKeyOf, newBrc29Payout, type Brc29Payout } from "../wallet/brc29";
 import { SWAP_BASKET, newReceivingKey, receiptOutput, type ColorReceipt } from "../wallet/color";
 
 /** A P2PKH unlocking script's upper bound: push(DER ≤ 72 + sighash byte) + push(33-byte key). */
 export const P2PKH_UNLOCK_LENGTH = 108;
-/** How long the relay may take (the swap's `expires`). */
-export const SWAP_TTL_MS = 2 * 60_000;
+/**
+ * How long the relay may take (the swap's `expires`): 15 s (0.34.0, D15, David Case 2026-11-04;
+ * was 120 s, a 10-05 builder number): the held submit returns inside it.
+ */
+export const SWAP_TTL_MS = 15_000;
 
 const toHex = (b: number[]) => Utils.toHex(b);
 
@@ -679,18 +681,4 @@ export async function completeSwap(wallet: WalletInterface, p: PreparedSwap, raw
 
 function internalizeOutputOf(o: SwapPayout): InternalizeOutput {
   return o.kind === "brc29" ? { outputIndex: o.outputIndex, protocol: WALLET_PAYMENT, paymentRemittance: { ...o.remittance } } : receiptOutput(o.outputIndex, o.receipt);
-}
-
-/**
- * The unfinished-step entries of the swap's outputs to the taker (the payout, and the taker's own
- * commission): 0.29.3, no key material — `{id, kind: "swap", txid, vout, tokenId, base, createdAt,
- * final: false}`, the keys re-derived from the final transaction (src/wallet/pendingPayouts.ts).
- * Written before the swap is submitted; their txid is provisional: the validator's signature
- * changes it.
- */
-export function pendingSwapPayouts(p: PreparedSwap, tokenId: string, base: string, now = Date.now()): PendingPayout[] {
-  const txid = p.swap.id("hex");
-  return [p.payout, p.commission.payout]
-    .filter((o): o is SwapPayout => o !== undefined)
-    .map((o) => ({ id: payoutId(txid, o.outputIndex), kind: "swap" as const, txid, vout: o.outputIndex, tokenId, base, createdAt: now, final: false }));
 }

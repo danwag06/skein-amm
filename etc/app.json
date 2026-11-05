@@ -1,7 +1,7 @@
 {
   "kind": "app",
   "name": "amm",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "programs": {
     "overlay": "bin/overlay.wasm",
     "color-topic": "bin/color-topic.wasm",
@@ -117,7 +117,14 @@
     "tokens": "color-lookup.tokens",
     "spends": "amm-p2p.spends",
     "sync": "overlay.sync",
-    "token": "amm-setup.token"
+    "token": "amm-setup.token",
+    "poolsBeef": "amm-p2p.poolsBeef",
+    "positions": "amm-p2p.positions",
+    "validatorFees": "amm-p2p.validatorFees",
+    "commissionFees": "amm-p2p.commissionFees",
+    "readTerms": "amm-p2p.readTerms",
+    "tx": "amm-p2p.tx",
+    "swaps": "amm-p2p.swaps"
   },
   "roles": {
     "root": [
@@ -226,7 +233,56 @@
       "filters": [
         "token"
       ]
+    },
+    {
+      "transport": "http",
+      "address": "/pools/beef",
+      "filters": [
+        "poolsBeef"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/positions",
+      "filters": [
+        "positions"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/fees/validator",
+      "filters": [
+        "validatorFees"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/fees/commission",
+      "filters": [
+        "commissionFees"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/terms",
+      "filters": [
+        "readTerms"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/tx",
+      "filters": [
+        "tx"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/swaps",
+      "filters": [
+        "swaps"
+      ]
     }
   ],
-  "description": "An AMM over 1Color tokens, the Open Exchange (docs/AMM.md), as its TOKEN app (0.22.0, shruggr/skein-amm#5: the token comes as one event, {kind: \"deploy\", beef} in the box amm/deploy (event route, filter kernel.beef: the BEEF checked by the door against chain/state, the record carrying its envelope); amm-setup's step writes the head amm/token {tokenId, topic, lookup, ammLookup, sym, dec, icon?, txid, vout} (once: a second deploy event is refused, nothing written) and registers with the engine by in-VM call (skein-overlay 0.18.0) tm_color_<tokenId> (color-topic, seeded with the deploy), ls_color_<tokenId> (color-lookup) and ls_amm_<tokenId> (amm-lookup) over it, then submits the deploy to its own engine in amm/submit when the seed did not take it; the read /token answers the record. 0.17.0 to 0.21.1: the names came from the config instance's create (apps/config, still working, superseded by shruggr/open-exchange#1)). before that (0.17.0, shruggr/skein-amm#4: one token instance per token id, created by the config instance's enable \u2014 apps/config \u2014 with this app's topic, lookup and initial values in its config at birth): the overlay engine (shruggr/skein-overlay 0.20.0: announce, then fetch \u2014 the <topic> mesh carries only admit verdicts, the host fetches the BEEF; no wants; every proof published; the sync tail read; 0.18.0: 0.17.0: a topic and lookup service in config.overlay beat as registered ones; config.overlay.terms the beat's initial terms; required: chain/1; its filter sync answers the overlay sync protocol, libp2p /skein/overlay/sync/1.0.0, through the front door on that row: a read, nothing logged, shruggr/skein#154; its receive row, libp2p /skein/overlay/beef/1.0.0 (filter kernel.beef, handler overlay.submit), the host's own entry, not served to peers: each Atomic BEEF the host fetches, handed to it as from the peer it came from) with the 1Color components (shruggr/skein-1color 0.13.1, BRC-162 and BRC-207: the topic manager color-topic, one topic per token tm_color_<assetId> (BRC-207: tm_color_<txid>_0, tm_color_<txid>_<vout>) and the discovery topic tm_color; the lookup color-lookup under a name paired with the topic that feeds it, the same queries under every name: a token instance's ls_color_<assetId> over tm_color_<assetId> (BRC-207's color-spendability and color-admission), the discovery instance's ls_color over tm_color (BRC-207's queries with topic tm_color: a token's deploy); 0.20.0: ls_color_deploys gone, and a token instance serves no ls_color; the token list, the read route /color/tokens of color-lookup), the pool lookup ls_amm_<assetId> (amm-lookup, 0.21.0: one name per token, paired with tm_color_<assetId> as ls_color_<assetId> is, each query naming its token: a pool is listed only when it attests itself: its ValidatorPubKey the ValidatorIdentity's child keyed by the Nonce in its state, derived by the lookup, and the Affirmation in its state that key's signature of the pool's parameters; a Swap's continuation of a listed pool is listed when its ValidatorPubKey is the identity's child keyed by the spent pool outpoint; the LP's Close and the validator's Rescind end it; it beats on ls_amm_<assetId>-live, per token, this skein's per-validator totals of its listed pools: the prices), the validator (amm-validator: swap as a libp2p direct call, it signs last and submits to its own overlay by message, {fn: \"submit\"} in the box submit (<app>/submit); affirm, called in-VM by amm.pool.affirm: a proposed pool checked against the validator's terms (0.15.0: the record amm/terms {lpFeeBps, validatorFeeBps, commissionBps} root sets with {fn: \"terms\", args} in the box amm/validator, args null clearing them; none set, a market only: affirm and the swap signing refused \"no terms: this skein validates nothing\", amm.pool.terms \"no validator here\", the beat without terms; no fee numbers in the manifest), a random nonce picked, the validator's key derived from it and the pool signed by that key, answered {validatorPubKey, nonce, signature}; and root's {fn: \"rescind\", args: {pool}} in the box validator (<app>/validator): the contract's Rescind, the pool written back with its ValidatorPubKey cleared, the pool a caller input of the instance's wallet, which pays the fee) and amm-p2p: the marketplace relay (its box <app>/amm-p2p and the route /call; amm.swap/1: terms (the relay's commission pkh, hash160 of the instance's own key for the relay: BRC-43 level 1, protocol amm commission, key ID relay, counterparty anyone; no config since 0.16.0; and the market's minCommissionBps, the record amm/market {minCommissionBps} root sets with {fn: \"market\", args: {minCommissionBps}} in the box amm/amm-p2p, args null clearing it, unset 0: a listing preference of this market, the pools the Swap page lists, the relay refusing nothing by it), a taker's swap carried to the validator the caller names by identity key and libp2p peer ID, dialled, or handed in-VM to this instance's own amm-validator when that peer is this node; amm.pool/1: terms, and affirm, answered by this instance's own validator in-VM), and the chain state of an outpoint (the read route /spends). The pages are the config app's (0.17.0). The contract is Swap (the validator's), Close (the LP's alone, its outputs free) and Rescind (the validator's: the pool written back with its ValidatorPubKey cleared, no Swap after it). A deploy is the LP's wallet's (BRC-207), submitted to the token topic like any token transaction. Anyone submits to the engine by message in the box submit, answered by message, or by POST /submit, BRC-22: it waits and answers the STEAK. The manifest declares no per-token topic: a token instance's config at birth names it (config.overlay.topics {tm_color_<tokenId>: color-topic}, config.overlay.lookups ls_amm_<tokenId> {program: amm-lookup} and ls_color_<tokenId> {program: color-lookup, topics: [tm_color_<tokenId>]} (0.21.0: the manifest declares no lookup, no ls_amm; 0.21.1: its config.overlay is {}, kept because skein derives the engine's routes \u2014 the box amm (event, mailbox), /submit, /lookup \u2014 from the manifest's own config.overlay; 0.20.0: no ls_color, no ls_color_deploys), config.overlay.terms and config[\"amm-p2p\"].market the admin's defaults, each the INITIAL value: root's terms and market messages to /@<tokenId> write the heads, which win); the register box is gone (roles: {root: [rescind, terms, market]}); topics registered by an earlier version stay served. The validator signs for every topic the engine serves, configured or registered. Every skein is a market and a validator, always (skein-overlay 0.12): the configured topic and lookups beat on <name>-live (config.overlay.market {window} / .validator {every}, else 40 000 / 30 000 ms; this manifest sets neither)."
+  "description": "An AMM over 1Color tokens, the Open Exchange (docs/AMM.md), as its TOKEN app (0.22.0, shruggr/skein-amm#5: the token comes as one event, {kind: \"deploy\", beef} in the box amm/deploy (event route, filter kernel.beef: the BEEF checked by the door against chain/state, the record carrying its envelope); amm-setup's step writes the head amm/token {tokenId, topic, lookup, ammLookup, sym, dec, icon?, txid, vout} (once: a second deploy event is refused, nothing written) and registers with the engine by in-VM call (skein-overlay 0.18.0) tm_color_<tokenId> (color-topic, seeded with the deploy), ls_color_<tokenId> (color-lookup) and ls_amm_<tokenId> (amm-lookup) over it, then submits the deploy to its own engine in amm/submit when the seed did not take it; the read /token answers the record. 0.17.0 to 0.21.1: the names came from the config instance's create (apps/config, still working, superseded by shruggr/open-exchange#1)). before that (0.17.0, shruggr/skein-amm#4: one token instance per token id, created by the config instance's enable \u2014 apps/config \u2014 with this app's topic, lookup and initial values in its config at birth): the overlay engine (shruggr/skein-overlay 0.20.0: announce, then fetch \u2014 the <topic> mesh carries only admit verdicts, the host fetches the BEEF; no wants; every proof published; the sync tail read; 0.18.0: 0.17.0: a topic and lookup service in config.overlay beat as registered ones; config.overlay.terms the beat's initial terms; required: chain/1; its filter sync answers the overlay sync protocol, libp2p /skein/overlay/sync/1.0.0, through the front door on that row: a read, nothing logged, shruggr/skein#154; its receive row, libp2p /skein/overlay/beef/1.0.0 (filter kernel.beef, handler overlay.submit), the host's own entry, not served to peers: each Atomic BEEF the host fetches, handed to it as from the peer it came from) with the 1Color components (shruggr/skein-1color 0.13.1, BRC-162 and BRC-207: the topic manager color-topic, one topic per token tm_color_<assetId> (BRC-207: tm_color_<txid>_0, tm_color_<txid>_<vout>) and the discovery topic tm_color; the lookup color-lookup under a name paired with the topic that feeds it, the same queries under every name: a token instance's ls_color_<assetId> over tm_color_<assetId> (BRC-207's color-spendability and color-admission), the discovery instance's ls_color over tm_color (BRC-207's queries with topic tm_color: a token's deploy); 0.20.0: ls_color_deploys gone, and a token instance serves no ls_color; the token list, the read route /color/tokens of color-lookup), the pool lookup ls_amm_<assetId> (amm-lookup, 0.21.0: one name per token, paired with tm_color_<assetId> as ls_color_<assetId> is, each query naming its token: a pool is listed only when it attests itself: its ValidatorPubKey the ValidatorIdentity's child keyed by the Nonce in its state, derived by the lookup, and the Affirmation in its state that key's signature of the pool's parameters; a Swap's continuation of a listed pool is listed when its ValidatorPubKey is the identity's child keyed by the spent pool outpoint; the LP's Close and the validator's Rescind end it; it beats on ls_amm_<assetId>-live, per token, this skein's per-validator totals of its listed pools: the prices), the validator (amm-validator: swap as a libp2p direct call, it signs last and submits to its own overlay by message, {fn: \"submit\"} in the box submit (<app>/submit); affirm, called in-VM by amm.pool.affirm: a proposed pool checked against the validator's terms (0.15.0: the record amm/terms {lpFeeBps, validatorFeeBps, commissionBps} root sets with {fn: \"terms\", args} in the box amm/validator, args null clearing them; none set, a market only: affirm and the swap signing refused \"no terms: this skein validates nothing\", amm.pool.terms \"no validator here\", the beat without terms; no fee numbers in the manifest), a random nonce picked, the validator's key derived from it and the pool signed by that key, answered {validatorPubKey, nonce, signature}; and root's {fn: \"rescind\", args: {pool}} in the box validator (<app>/validator): the contract's Rescind, the pool written back with its ValidatorPubKey cleared, the pool a caller input of the instance's wallet, which pays the fee) and amm-p2p: the marketplace relay (its box <app>/amm-p2p and the route /call; amm.swap/1: terms (the relay's commission pkh, hash160 of the instance's own key for the relay: BRC-43 level 1, protocol amm commission, key ID relay, counterparty anyone; no config since 0.16.0; and the market's minCommissionBps, the record amm/market {minCommissionBps} root sets with {fn: \"market\", args: {minCommissionBps}} in the box amm/amm-p2p, args null clearing it, unset 0: a listing preference of this market, the pools the Swap page lists, the relay refusing nothing by it), a taker's swap carried to the validator the caller names by identity key and libp2p peer ID, dialled, or handed in-VM to this instance's own amm-validator when that peer is this node; amm.pool/1: terms, and affirm, answered by this instance's own validator in-VM), and the chain state of an outpoint (the read route /spends). 0.34.0, the public read API (docs/AMM.md \"The public read API\"; plain GETs, JSON unless bytes, comma lists answered one record per key in query order, cache headers per class): /pools/beef?lp= (the LP keys' current pools and one BEEF of their transactions), /positions?lp=, /fees/validator?id=, /fees/commission?pkh= (the pool lookup's own list answers), /terms (the validator's terms and the market's in one, unsigned), /spends?outpoint=a,b, /tx?id= (a transaction's BEEF, immutable once proven), /swaps?id= (the relay record, unsigned); the pools route itself, /pools, is the host's (it joins its liveness and the market minimum). The pages are the config app's (0.17.0). The contract is Swap (the validator's), Close (the LP's alone, its outputs free) and Rescind (the validator's: the pool written back with its ValidatorPubKey cleared, no Swap after it). A deploy is the LP's wallet's (BRC-207), submitted to the token topic like any token transaction. Anyone submits to the engine by message in the box submit, answered by message, or by POST /submit, BRC-22: it waits and answers the STEAK. The manifest declares no per-token topic: a token instance's config at birth names it (config.overlay.topics {tm_color_<tokenId>: color-topic}, config.overlay.lookups ls_amm_<tokenId> {program: amm-lookup} and ls_color_<tokenId> {program: color-lookup, topics: [tm_color_<tokenId>]} (0.21.0: the manifest declares no lookup, no ls_amm; 0.21.1: its config.overlay is {}, kept because skein derives the engine's routes \u2014 the box amm (event, mailbox), /submit, /lookup \u2014 from the manifest's own config.overlay; 0.20.0: no ls_color, no ls_color_deploys), config.overlay.terms and config[\"amm-p2p\"].market the admin's defaults, each the INITIAL value: root's terms and market messages to /@<tokenId> write the heads, which win); the register box is gone (roles: {root: [rescind, terms, market]}); topics registered by an earlier version stay served. The validator signs for every topic the engine serves, configured or registered. Every skein is a market and a validator, always (skein-overlay 0.12): the configured topic and lookups beat on <name>-live (config.overlay.market {window} / .validator {every}, else 40 000 / 30 000 ms; this manifest sets neither)."
 }

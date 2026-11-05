@@ -3,55 +3,32 @@
  * module (shruggr/skein#147; wired in skein-amm 0.9.0). The pages import from
  * here and nowhere else in the data layer.
  *
- * Where each comes from (0.17.0, shruggr/skein-amm#4): the pages are served by
- * the CONFIG instance (`context.base`): its token list (`GET <config>/tokens`:
- * each enabled token with its own instance's url), its defaults and root's
- * enable / disable / defaults messages. Everything per
- * token — pools, prices, liveness, `/call`, `/submit`, `/spends` — goes to
- * that token's own instance (`tokenBaseOf`: `<url>/amm`). No read crosses
- * instances.
+ * 0.34.0 (agent-env plans/exchange-api-2026-11-04.md §0, D1–D25; docs/AMM.md "The public read
+ * API"): every read is a plain GET of the exchange's public read API (src/lib/overlay.ts), and the
+ * pages send `/lookup` nowhere. Where each comes from:
  *
- * - **Prices** (`hostedTokens`, `subscribePrices`): the AMM lookup's beats
- *   (skein-overlay 0.12.0, David Case 2026-10-09: "Pricing lives in the AMM
- *   LOOKUP's own beacon"): `GET <base>/.live/ls_amm_<assetId>-live`, each live skin's
- *   per-token, per-validator totals of its listed pools, combined here over
- *   the live validators (src/market/prices.ts); a token no beat reports
- *   falls back to this skein's own listing (`ls_amm_<assetId>`) and liveness. Polled
- *   every `REFRESH_MS` (the beats live in the host's liveness, not in the
- *   log: no event stream carries them).
- * - **Swap** (`quoteSwap`, `executeSwap`): the matching engine's plan over
- *   this skein's listed pools whose validator is live (src/market/plan.ts)
- *   and (0.16.0) whose commission is at or above this market's minimum
- *   (`amm.swap.terms` `minCommissionBps`, the record root sets; `swapPools`
- *   counts the ones it hides),
- *   each leg built, relayed and settled as before (src/market/swapAction.ts,
- *   swapFlow.ts; `amm.swap.submit` on `/call`). A tokens-in swap first
- *   tops up the active swap basket `amm-swap` with one module send
- *   (src/market/activeSwap.ts, 0.12.0); its legs spend from there.
- * - **Liquidity**: `myPositions` from the wallet's pool rows (`amm-pools`)
- *   and the chain state by outpoint (src/lp/positions.ts: the pool followed
- *   to its current output); `deployPosition` asks this skein's validator to
- *   affirm the pool (`amm.pool.terms`, `amm.pool.affirm`) and has the
- *   wallet's BRC-207 module build, sign and broadcast the deploy in one
- *   createAction (src/lp/poolDeploy.ts, 0.12.0); `closePosition` closes it
- *   (src/lp/close.ts, `POST /submit`).
- * - **Your tokens**: the wallet's BRC-207 module (`p color assets`, the
- *   balance summed from its outputs; src/wallet/color.ts) and the active swap basket
- *   (`moveBackTokens`).
- * - **Settings** (root of the config instance, 0.17.0): the enable list
- *   (`GET <config>/tokens`) with Disable / Enable again; Enable a token —
- *   root's `{fn: "enable", args: {tokenId, beef}}` to `<app>/admin`, the
- *   deploy's BEEF from the wallet's module basket or pasted; the defaults a
- *   new token instance is
- *   created with (`GET <config>/defaults`; root's `{fn: "defaults"}`): its
- *   initial validator terms and market minimum (a token's own terms are root's
- *   message to `/@<tokenId>`: not on this page). `isRoot` (0.26.0): the host's
- *   `/skeins?key=` names swap; while nobody holds root, Settings offers the
- *   claim (`claimStatus`, `claimExchange`).
- * - **The instance's identity** (0.15.0, `instanceIdentity`): the key its
- *   signed answers carry, the recipient of root's messages (a market-only
- *   skein refuses `amm.pool.terms`, which named it
- *   before).
+ * - **The token list** (`GET <swap>/tokens`): read ONCE per page load (D4; `enabledList`), again
+ *   only after Settings' own enable or disable changed it.
+ * - **Prices** (`useHostedTokens`, D6, D22): the host-wide pools route `GET <origin>/amm/pools`
+ *   held as an event stream; a token's price is Σsats / Σtokens over its listed pools.
+ * - **Swap** (D11–D16): the token's pools route `GET /@<token>/amm/pools` held as an event stream
+ *   (`useTokenPools`): the pools whose validator is beating and whose commission meets the
+ *   market's minimum (the host's filter), the market's commission key hash; a quote is the
+ *   matching engine's plan over that list (no request); a swap reads ONE `GET
+ *   /@<token>/amm/pools/beef?lp=` for its legs (freshness, the pools' BEEF), then each leg's relay
+ *   request (`amm.swap.submit`, held by the host until the relay rests; 15 s expiry); a lost answer
+ *   is "no answer yet" with "Check again" (`GET /@<token>/amm/swaps?id=`, once).
+ * - **Liquidity** (D9, D23): the wallet's pool rows and deploy history, then ONE `GET
+ *   /@<token>/amm/positions?lp=` per token; a deploy the history has but the basket lacks is
+ *   filed then; Close reads its pool's BEEF by LP key (`/pools/beef?lp=`); the deploy form's terms
+ *   `GET /@<token>/amm/terms`.
+ * - **Your tokens** (D17, D18, D19, D24): the wallet's module and the swap basket; the token list
+ *   once and ONE discovery `GET /@discovery/1color/tokens?ids=` for held tokens the list lacks; a
+ *   silent pass over the swap basket's staged legs (src/wallet/swapPayouts.ts); Move back submits
+ *   at the host root.
+ * - **Settings** (D20, D21): the claim card (`claimStatus`: swap's identity, the recipient of
+ *   root's messages), the token list once, discovery's list and ONE `?ids=` read; Enable's deploy
+ *   BEEF from the wallet's basket else `GET /@discovery/1color/<token>/deploy`.
  *
  * Ids (David, 2026-10-09): every token id is the BRC-207 assetId
  * `<txid>_<vout>`, `_0` included for a 1Color token (src/lib/tokenId.ts);
@@ -63,29 +40,51 @@
  * themselves.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Beef, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import { Beef, Transaction, type WalletInterface } from "@bsv/sdk";
 import { send1Color, type Send1ColorResult } from "@1sat/actions";
 import { computeSwap, type PoolState, type Plan } from "@amm-poc/matching-engine";
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
-import { deployQuery, outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
-import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB, REFRESH_MS, appName, tokenBase } from "../lib/config";
-import { ammLookupService, fetchLive, lookup, lookupPoolOutput, lpFeesOf, type LpPool, parseOutputList, parseTokenTopic, queryPools, type LiveAnswer, type SignedFetch, type TokenTopic } from "../lib/overlay";
-import { authFetchPerInstance, instanceBase, readBeats, readDefaults, readDiscovery, readSpend, readTokenList, readTokens, sendMessage, type Beat, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "../lib/skein";
-import { liveSenders, pricesFromBeats, depthOf, type TokenPrice } from "../market/prices";
+import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
+import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB, appName, tokenBase } from "../lib/config";
+import {
+  ammLookupService,
+  liveOfPools,
+  parseAllPools,
+  parsePools,
+  parseTokenTopic,
+  poolOutputOf,
+  poolsUrl,
+  readDiscoveryDeploy,
+  readDiscoveryIds,
+  readDiscoveryList,
+  readPoolsBeef,
+  readPositions,
+  readTerms,
+  readTx,
+  watchPools,
+  type DiscoveryRow,
+  type InstanceTerms,
+  type LiveAnswer,
+  type LpPool,
+  type PoolRow,
+  type PoolsAnswer,
+  type SignedFetch,
+} from "../lib/overlay";
+import { authFetchPerInstance, instanceBase, readDefaults, readDiscovery, readTokens, sendMessage, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "../lib/skein";
+import { depthOf } from "../market/prices";
 import { buildPlanRequest, goneFromLookup, quote as planQuote } from "../market/plan";
 import { validatorStatus } from "../market/view";
-import { RelayError, SWAP_TERMS_FN, callApp, callUrl, readBytes, swapTerms, type AuthFetchLike } from "../market/relay";
-import { pendingSwapPayouts, planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlanLegInput, type PlannedLeg, type SatsInput, type TokenInput } from "../market/swapAction";
+import type { AuthFetchLike } from "../market/relay";
+import { planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlanLegInput, type PlannedLeg, type PreparedSwap, type SatsInput, type TokenInput } from "../market/swapAction";
 import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapTotals } from "../market/activeSwap";
-import { relaySwap, type SwapOutcome } from "../market/swapFlow";
-import { PendingPayoutStore, internalizeNow, isLegacyPayout, onPendingPayoutsChange, type PendingPayout } from "../wallet/pendingPayouts";
+import { checkAgain, relaySwap, swapIdOf, type SwapOutcome } from "../market/swapFlow";
+import { settleStagedSwaps } from "../wallet/swapPayouts";
 import { formatAmount } from "../lp/amounts";
 import { basketRows } from "../lp/wallet";
 import { buildInventory, decodeTokenRow, deployIcon } from "../lp/inventory";
 import { imageDataUrl } from "../lp/images";
 import { deployPool } from "../lp/poolDeploy";
-import { colorOutput, historyPoolRows, mergePoolRows, positionRowsOf, type PositionRow } from "../lp/positions";
-import { recoverPosition as recoverPoolRow } from "../lp/recover";
+import { historyPoolRows, mergePoolRows, positionRowsOf, type PositionRow } from "../lp/positions";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "../wallet/color";
 import { prepareClose, submitToOverlay } from "../lp/close";
 
@@ -133,16 +132,6 @@ export interface PoolView {
 export interface ValidatorRef {
   identityKey: string;
   live: boolean;
-}
-
-/** A price push from the host's subscription (skein#148). */
-export interface PriceUpdate {
-  tokenId: TokenId;
-  marginalPrice: number | null;
-  depth: Depth | null;
-  pools: number;
-  reserves: { sats: bigint; tokens: bigint };
-  at: number;
 }
 
 /** "buy": pay sats, receive the token. "sell": pay the token, receive sats. */
@@ -193,6 +182,8 @@ export interface LegResult {
   error?: string;
   /** 0.31.1: the leg was refused `pool_spent`, repriced against the pool's newest state and sent again. */
   repriced?: true;
+  /** 0.34.0 (D15): no answer yet — the swap's id, for "Check again" (`checkSwapAgain`). */
+  checkId?: string;
 }
 
 export interface SwapResult {
@@ -270,14 +261,6 @@ export interface DeployResult {
   warnings?: string[];
 }
 
-export interface RecoverResult {
-  /** The pool filed, `<txid>.<vout>` (its current output). */
-  outpoint: string;
-  sym: string;
-  /** False when the wallet did not accept the filing. */
-  filed: boolean;
-}
-
 export interface CloseRequest {
   outpoint: string;
 }
@@ -325,7 +308,7 @@ export interface RegisteredToken {
   status: EnabledToken["status"];
 }
 
-export type { EnabledToken, Defaults, Discovery };
+export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer };
 
 export interface Session {
   status: "disconnected" | "connecting" | "connected";
@@ -355,35 +338,29 @@ export const SITE_HREF = "/site/";
 type Signed = SignedFetch & AuthFetchLike;
 
 interface ExchangeContext {
-  /** The config instance's AMM base URL (src/lib/config.ts): the pages' own. */
+  /** The swap instance's AMM base URL (src/lib/config.ts): the pages' own. */
   base: string;
   wallet: WalletInterface | null;
   /**
    * The wallet's BRC-104 client for an instance base (0.27.1: one session per instance — the swap
    * instance at `<origin>/amm` and each token instance at `<origin>/@<tokenId>/amm` hold their own
-   * sessions; src/lib/skein.ts `authFetchPerInstance`).
+   * sessions; src/lib/skein.ts `authFetchPerInstance`): the signed writes.
    */
   signedFor: ((base: string) => Signed) | null;
   identityKey: string | null;
-  /** The pending payouts' store (localStorage). */
-  payouts: PendingPayoutStore;
 }
 
-const context: ExchangeContext = { base: AMM_OVERLAY, wallet: null, signedFor: null, identityKey: null, payouts: new PendingPayoutStore() };
+const context: ExchangeContext = { base: AMM_OVERLAY, wallet: null, signedFor: null, identityKey: null };
 
-/** Set what the functions below reach (the wallet and its client: `useSession`; a test: anything). */
+/** Set what the functions below reach (the wallet and its client: `useSession`; a test: anything). A new `base` forgets what was read of the old one. */
 export function setExchangeContext(c: Partial<ExchangeContext>): void {
+  if (c.base !== undefined) forgetReads();
   Object.assign(context, c);
 }
 
 function needWallet(): { wallet: WalletInterface; signedFor: (base: string) => Signed } {
   if (!context.wallet || !context.signedFor) throw new Error("Connect a wallet first");
   return { wallet: context.wallet, signedFor: context.signedFor };
-}
-
-/** The connected wallet's client for `base`'s instance; null with no wallet (reads then go unsigned). */
-function signed(base: string): Signed | null {
-  return context.signedFor ? context.signedFor(base) : null;
 }
 
 const listeners = new Set<() => void>();
@@ -403,12 +380,32 @@ function app(): string {
   return appName(context.base) ?? "amm";
 }
 
-/** The config instance's enable list (0.17.0, `GET <config>/tokens`), every status. */
-async function enabledList(): Promise<EnabledToken[]> {
-  return (await readTokens(context.base)).map((t) => {
-    const id = parseOutpoint(t.tokenId.replace("_", "."));
-    return id ? { ...t, tokenId: tokenIdText(id) } : t;
-  });
+/** The token list read this page load (D4: once; again only after Settings' enable or disable). */
+let listRead: Promise<EnabledToken[]> | null = null;
+/** swap's claim card read this page load (D21: the identity of the recipient of root's messages). */
+let claimRead: ClaimStatus | null = null;
+
+/** Forget what was read this page load (a new base; tests). */
+export function forgetReads(): void {
+  listRead = null;
+  claimRead = null;
+}
+
+/** The swap instance's enable list (`GET <swap>/tokens`, P12), every status: read once per page load. */
+function enabledList(): Promise<EnabledToken[]> {
+  if (!listRead) {
+    const r = readTokens(context.base).then((ts) =>
+      ts.map((t) => {
+        const id = parseOutpoint(t.tokenId.replace("_", "."));
+        return id ? { ...t, tokenId: tokenIdText(id) } : t;
+      }),
+    );
+    listRead = r;
+    r.catch(() => {
+      if (listRead === r) listRead = null;
+    });
+  }
+  return listRead;
 }
 
 /** The tokens up on this exchange: enabled on the swap instance's list. */
@@ -426,7 +423,7 @@ export async function tokenBaseOf(tokenId: TokenId): Promise<string> {
   return tokenBase(t.tokenId, context.base);
 }
 
-/** The token list's metadata by token id (0.17.0: the config instance's list); empty when the read fails. */
+/** The token list's metadata by token id (every status); empty when the read fails. */
 async function tokenMeta(): Promise<Map<string, ListedToken>> {
   const m = new Map<string, ListedToken>();
   try {
@@ -437,10 +434,7 @@ async function tokenMeta(): Promise<Map<string, ListedToken>> {
   return m;
 }
 
-/**
- * The host root (0.20.0): the pages' origin, where the host routes a bare `/lookup` by its service to
- * the instance that declares it (skein#137) — `ls_color` to the discovery instance.
- */
+/** The host root: the pages' origin. */
 function hostRoot(): string {
   return new URL(context.base).origin;
 }
@@ -462,18 +456,17 @@ function deployMetaOf(beef: number[], vout: number): DeployMeta | null {
 }
 
 /**
- * A token's deploy from discovery (0.20.1: the discovery lookup `ls_color`, BRC-207's
- * `color-admission` of the deploy's outpoint over `tm_color` — the token id `<txid>_<vout>` IS it
- * (`deployQuery`) — POSTed to the HOST ROOT, plain `fetch`): the deploy output's Atomic BEEF and its
- * metadata; null when the lookup has none or fails (discovery off).
+ * A token's deploy from discovery (0.34.0, D21: `GET /@discovery/1color/<token>/deploy`, P16, the
+ * deploy's BEEF): its bytes and metadata; null when discovery does not hold it or the read fails
+ * (discovery off).
  */
 async function discoveryDeploy(tokenId: string): Promise<{ beef: number[]; meta: DeployMeta } | null> {
   try {
-    const { service, query } = deployQuery(tokenId);
-    const out = parseOutputList(await lookup(null, hostRoot(), service, query))[0];
-    if (!out) return null;
-    const meta = deployMetaOf(out.beef, out.outputIndex);
-    return meta ? { beef: out.beef, meta } : null;
+    const op = parseOutpoint(tokenId.replace("_", "."));
+    const beef = op ? await readDiscoveryDeploy(discoveryBase(), tokenId) : null;
+    if (!op || !beef) return null;
+    const meta = deployMetaOf(beef, op.vout);
+    return meta ? { beef, meta } : null;
   } catch {
     return null;
   }
@@ -487,10 +480,10 @@ export interface DeployFound {
 }
 
 /**
- * A token's deploy (Settings "Enable a token", 2026-10-31): with a wallet, the deploy output in its
- * module basket (`walletDeployBeef`) when it holds it; else the HOST ROOT discovery lookup
- * (`discoveryDeploy`). Refused when neither has it: "no deploy for <id>: not on discovery and not
- * in this wallet". With no wallet, discovery only (`deployMeta`).
+ * A token's deploy (Settings "Enable a token"): with a wallet, the deploy output in its module
+ * basket (`walletDeployBeef`) when it holds it; else discovery's (`GET
+ * /@discovery/1color/<token>/deploy`). Refused when neither has it: "no deploy for <id>: not on
+ * discovery and not in this wallet".
  */
 export async function deployBeef(tokenId: TokenId, wallet?: WalletInterface | null): Promise<DeployFound> {
   const op = parseOutpoint(sdkTokenId(tokenId).replace("_", "."));
@@ -505,19 +498,19 @@ export async function deployBeef(tokenId: TokenId, wallet?: WalletInterface | nu
   throw new Error(`no deploy for ${canonical}: not on discovery and not in this wallet`);
 }
 
-/**
- * A token's metadata from its deploy (`deployBeef` with no wallet: the discovery lookup at the
- * host root), for a token the list does not carry; null when the lookup has none. Until 0.19.0 it
- * asked `ls_color_deploys {tokenId}` at the token's own instance, which a token not enabled here
- * does not have.
- */
-async function deployMeta(tokenId: string): Promise<DeployMeta | null> {
-  if (!parseTokenId(tokenId)) return null;
+/** Discovery's rows for `ids` (P13 `?ids=`, ONE read), by token id; empty when the read fails. */
+async function discoveryRows(ids: string[]): Promise<Map<string, DiscoveryRow>> {
+  const m = new Map<string, DiscoveryRow>();
+  if (ids.length === 0) return m;
   try {
-    return (await deployBeef(tokenId)).meta;
+    for (const r of await readDiscoveryIds(discoveryBase(), ids)) {
+      const id = canonicalId(r.tokenId) ?? r.tokenId;
+      if (r.listed) m.set(id, r);
+    }
   } catch {
-    return null;
+    /* discovery off: none */
   }
+  return m;
 }
 
 function symOf(meta: Map<string, ListedToken>, tokenId: string): string {
@@ -582,10 +575,24 @@ export async function claimStatus(): Promise<ClaimStatus> {
   const identity = String(v.identity ?? "").toLowerCase();
   if (!/^0[23][0-9a-f]{64}$/.test(identity)) throw new Error(`GET ${url}: no identity`);
   const a = await fetch(`${context.base}/admin`, { headers: { accept: "application/json" } }).catch(() => undefined);
-  if (!a?.ok) return { claimed: v.claimed === true, identity };
-  const adm = (await a.json().catch(() => ({}))) as { claimant?: unknown };
-  const claimant = typeof adm.claimant === "string" && /^0[23][0-9a-f]{64}$/i.test(adm.claimant) ? adm.claimant.toLowerCase() : undefined;
-  return claimant ? { claimed: true, identity, claimant } : { claimed: false, identity };
+  let out: ClaimStatus;
+  if (!a?.ok) out = { claimed: v.claimed === true, identity };
+  else {
+    const adm = (await a.json().catch(() => ({}))) as { claimant?: unknown };
+    const claimant = typeof adm.claimant === "string" && /^0[23][0-9a-f]{64}$/i.test(adm.claimant) ? adm.claimant.toLowerCase() : undefined;
+    out = claimant ? { claimed: true, identity, claimant } : { claimed: false, identity };
+  }
+  claimRead = out;
+  return out;
+}
+
+/**
+ * swap's identity, the recipient of root's messages (0.34.0, D21: from the claim card already read
+ * on load, `claimStatus`; the signed token-list read for its `x-bsv-auth-identity-key`,
+ * `instanceIdentity`, is gone); read now when no card was read yet.
+ */
+async function swapIdentity(): Promise<string> {
+  return (claimRead ?? (await claimStatus())).identity;
 }
 
 /**
@@ -632,185 +639,105 @@ export async function claimExchange(): Promise<boolean> {
 // Landing: hosted tokens and live prices
 // ---------------------------------------------------------------------------
 
-/** A token topic with its own instance's AMM base (0.17.0). */
-type HostedTopic = TokenTopic & { base: string };
-
-/** The token topics up on this exchange (0.17.0: enabled on the config instance's list, each with its instance's base). */
-async function hostedTopics(): Promise<HostedTopic[]> {
-  const out: HostedTopic[] = [];
-  for (const t of await enabledTokens()) {
+/**
+ * The hosted tokens (the enabled 1Color tokens at output 0), each priced from its rows of the
+ * host-wide pools route (D6, D22: P1, the pools whose validator is beating): Σsats / Σtokens.
+ * `rows` null: not read yet (no prices). Pure.
+ */
+export function hostedFrom(list: EnabledToken[], rows: PoolRow[] | null): HostedToken[] {
+  const out: HostedToken[] = [];
+  for (const t of list) {
+    if (t.status !== "enabled") continue;
     const topic = parseTokenTopic(t.topic);
-    if (topic) out.push({ ...topic, base: tokenBase(t.tokenId, context.base) });
+    if (!topic || topic.kind !== "native") continue;
+    const mine = (rows ?? []).filter((r) => r.tokenId !== undefined && canonicalId(r.tokenId) === t.tokenId);
+    const sats = mine.reduce((a, p) => a + p.bsvReserve, 0n);
+    const tokens = mine.reduce((a, p) => a + p.tokenReserve, 0n);
+    out.push({
+      tokenId: t.tokenId,
+      sym: t.sym || t.tokenId.slice(0, 8),
+      dec: t.dec,
+      ...(t.icon ? { icon: t.icon } : {}),
+      marginalPrice: tokens > 0n ? Number(sats) / (Number(tokens) / 10 ** t.dec) : null,
+      depth: depthOf(sats),
+      pools: mine.length,
+      reserves: { sats, tokens },
+    });
   }
   return out;
 }
 
-/** One token instance's `ls_amm_<assetId>` beats and its token topic's: their live senders (0.17.0: one read per token instance; 0.21.0: the per-asset name). */
-async function liveFor(t: HostedTopic): Promise<{ beats: Beat[]; live: Set<string> }> {
-  const [beats, tokenBeats] = await Promise.all([
-    readBeats(t.base, `${ammLookupOf(t.tokenId)}-live`).catch(() => [] as Beat[]),
-    readBeats(t.base, `${t.topic}-live`).catch(() => [] as Beat[]),
-  ]);
-  return { beats, live: liveSenders(beats, tokenBeats) };
-}
-
-/** This skein's own listing of a token, its live pools summed: the fallback when no beat reports the token. */
-async function localPrice(t: HostedTopic, dec: number): Promise<TokenPrice> {
-  const [pools, live] = await Promise.all([queryPools(signed(t.base), t.base, t.tokenId), fetchLive(t.base, t.topic)]);
-  const usable = pools.filter((p) => validatorStatus(p.validatorIdentityKey, live).live);
-  const sats = usable.reduce((a, p) => a + p.bsvReserve, 0n);
-  const tokens = usable.reduce((a, p) => a + p.tokenReserve, 0n);
-  return {
-    tokenId: t.tokenId,
-    marginalPrice: tokens > 0n ? Number(sats) / (Number(tokens) / 10 ** dec) : null,
-    depth: depthOf(sats),
-    pools: usable.length,
-    reserves: { sats, tokens },
-    validators: [...new Set(usable.map((p) => p.validatorIdentityKey))],
-  };
-}
-
-/** Every hosted token's price: its instance's beats first, its instance's listing when no beat reports it. */
-async function pricesNow(topics: HostedTopic[], meta: Map<string, ListedToken>): Promise<Map<string, TokenPrice>> {
-  const out = new Map<string, TokenPrice>();
-  await Promise.all(
-    topics.map(async (t) => {
-      const { beats, live } = await liveFor(t);
-      const b = pricesFromBeats(beats, live, (id) => meta.get(id)?.dec ?? 0).get(t.tokenId);
-      if (b && b.validators.length > 0) return out.set(t.tokenId, b);
-      try {
-        out.set(t.tokenId, await localPrice(t, meta.get(t.tokenId)?.dec ?? 0));
-      } catch {
-        out.set(t.tokenId, { tokenId: t.tokenId, marginalPrice: null, depth: null, pools: 0, reserves: { sats: 0n, tokens: 0n }, validators: [] });
-      }
-    }),
-  );
-  return out;
-}
-
-/** The tokens this overlay hosts (registered here: 1Color tokens at output 0), each priced. No wallet needed. */
+/** The tokens this exchange hosts, priced: the token list (once) and ONE read of the host-wide pools route. No wallet needed. */
 export async function hostedTokens(): Promise<HostedToken[]> {
-  const [topics, meta] = await Promise.all([hostedTopics(), tokenMeta()]);
-  const native = topics.filter((t) => t.kind === "native");
-  const prices = await pricesNow(native, meta);
-  return native.map((t) => {
-    const m = meta.get(t.tokenId);
-    const p = prices.get(t.tokenId)!;
-    return {
-      tokenId: t.tokenId,
-      sym: m?.sym ?? t.tokenId.slice(0, 8),
-      dec: m?.dec ?? 0,
-      ...(m?.icon ? { icon: m.icon } : {}),
-      marginalPrice: p.marginalPrice,
-      depth: p.depth,
-      pools: p.pools,
-      reserves: p.reserves,
-    };
-  });
+  const [list, rows] = await Promise.all([enabledList(), readAllPools().catch(() => null)]);
+  return hostedFrom(list, rows);
 }
 
-/** Live prices: polls the beats every `REFRESH_MS` and calls `onUpdate` per registered token. Returns the unsubscribe. */
-export function subscribePrices(onUpdate: (u: PriceUpdate) => void): () => void {
-  let stopped = false;
-  const tick = async () => {
-    try {
-      const [topics, meta] = await Promise.all([hostedTopics(), tokenMeta()]);
-      const prices = await pricesNow(topics.filter((t) => t.kind === "native"), meta);
-      if (stopped) return;
-      for (const p of prices.values()) onUpdate({ tokenId: p.tokenId, marginalPrice: p.marginalPrice, depth: p.depth, pools: p.pools, reserves: p.reserves, at: Date.now() });
-    } catch {
-      /* the next tick */
-    }
-  };
-  const timer = setInterval(() => void tick(), REFRESH_MS);
-  const off = onDataChange(() => void tick());
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-    off();
-  };
+async function readAllPools(): Promise<PoolRow[]> {
+  const res = await fetch(poolsUrl(context.base), { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`GET ${poolsUrl(context.base)}: ${res.status}`);
+  return parseAllPools(await res.json());
 }
 
-/** The hosted tokens with live prices merged in: `hostedTokens()` once, then `subscribePrices()`. */
-export function useHostedTokens(): { tokens: HostedToken[] | null; error: string | null; live: boolean; reload: () => void } {
-  const r = useData(hostedTokens, []);
-  const [prices, setPrices] = useState<Map<TokenId, PriceUpdate>>(new Map());
+/** The host-wide pools route held as an event stream (D22: one connection): each answer's rows to `onRows`; `onLive` the connection's state. → the unsubscribe. */
+export function watchHostedPools(onRows: (rows: PoolRow[]) => void, onLive?: (live: boolean) => void): () => void {
+  return watchPools(poolsUrl(context.base), parseAllPools, onRows, { onError: () => onLive?.(false), onOpen: () => onLive?.(true) });
+}
+
+/** A token's pools route held as an event stream (D16): each answer to `onAnswer`. → the unsubscribe. */
+export function watchTokenPools(tokenId: TokenId, onAnswer: (a: PoolsAnswer) => void, onError?: (e: unknown) => void): () => void {
+  return watchPools(poolsUrl(tokenBase(tokenId, context.base)), parsePools, onAnswer, { ...(onError ? { onError } : {}) });
+}
+
+/**
+ * The hosted tokens with live prices (D16, D22): the token list once, and the host-wide pools route
+ * held as an event stream (one connection), each answer repricing the tokens. `rows`: the pools
+ * the host lists now (every validator live). `live`: the stream is connected.
+ */
+export function useHostedTokens(): { tokens: HostedToken[] | null; error: string | null; live: boolean; reload: () => void; rows: PoolRow[] | null } {
+  const r = useData(enabledList, []);
+  const [rows, setRows] = useState<PoolRow[] | null>(null);
   const [live, setLive] = useState(false);
-  useEffect(() => {
-    setLive(true);
-    const off = subscribePrices((u) => setPrices((m) => new Map(m).set(u.tokenId, u)));
-    return () => {
-      setLive(false);
-      off();
-    };
-  }, []);
-  const tokens = r.data?.map((t) => {
-    const u = prices.get(t.tokenId);
-    return u ? { ...t, marginalPrice: u.marginalPrice, depth: u.depth, pools: u.pools, reserves: u.reserves } : t;
-  }) ?? null;
-  return { tokens, error: r.error, live, reload: r.reload };
+  useEffect(
+    () =>
+      watchHostedPools((x) => {
+        setRows(x);
+        setLive(true);
+      }, setLive),
+    [],
+  );
+  return { tokens: r.data ? hostedFrom(r.data, rows) : null, error: r.error, live, reload: r.reload, rows };
 }
 
-/** A token's listed pools on this skein, each with its validator's liveness. */
-export async function tokenPools(tokenId: TokenId): Promise<PoolView[]> {
-  const topic = `tm_color_${sdkTokenId(tokenId)}`;
-  const base = await tokenBaseOf(tokenId);
-  const [pools, live] = await Promise.all([queryPools(signed(base), base, tokenId), fetchLive(base, topic)]);
-  return pools.map((p) => ({
+/** The pools the Swap page lists (D11, D13): the token's pools route's rows, every validator live (the host lists no other). */
+export function poolViews(answer: PoolsAnswer | null, tokenId: TokenId): PoolView[] {
+  return (answer?.pools ?? []).map((p) => ({
     outpoint: outpointText(p.outpoint),
     tokenId,
     sats: p.bsvReserve,
     tokens: p.tokenReserve,
-    validator: { identityKey: p.validatorIdentityKey, live: validatorStatus(p.validatorIdentityKey, live).live },
+    validator: { identityKey: p.validatorIdentityKey, live: true },
   }));
 }
 
 /**
- * A token's market minimum commission (0.16.0, bps; 0.17.0: the token instance's own): `amm.swap.terms`'s
- * `minCommissionBps`, the record root sets there (`amm/market`; else its initial value, the
- * config's default at its create; unset, 0). Null
- * when it cannot be read here: no wallet is connected (`amm.swap.terms` is a
- * signed call), and then no pool is hidden.
+ * The Swap page's pools (D11, D16): the token's pools route `GET /@<token>/amm/pools` held as an
+ * event stream (an EventSource; without one, ONE GET and no poll): the market and the pools a swap
+ * may use, renewed whenever the host's answer changes. Null until the first answer.
  */
-export async function marketMinimum(tokenId: TokenId): Promise<number | null> {
-  if (!context.signedFor) return null;
-  const base = await tokenBaseOf(tokenId);
-  return (await swapTerms(context.signedFor(base), base)).minCommissionBps;
-}
-
-/**
- * The pools this market lists (0.16.0, David Case 2026-10-24): those whose
- * commission is at or above `min` (null: unknown, every pool), and how many
- * it hides. A listing preference of this market, not a rule: the relay
- * refuses nothing by it.
- */
-export function atMarketMinimum<T extends Pick<PoolState, "commissionBps">>(pools: T[], min: number | null): { listed: T[]; hidden: number } {
-  if (min === null || min <= 0) return { listed: pools, hidden: 0 };
-  const listed = pools.filter((p) => p.commissionBps >= BigInt(min));
-  return { listed, hidden: pools.length - listed.length };
-}
-
-/** "N pools below this market's minimum commission" (0.16.0). */
-export function belowMinimumText(n: number): string {
-  return `${n} ${n === 1 ? "pool" : "pools"} below this market's minimum commission`;
-}
-
-/** The pools the Swap page lists for a token (0.16.0): `tokenPools` at or above this market's minimum commission, and how many are hidden. */
-export async function swapPools(tokenId: TokenId): Promise<{ pools: PoolView[]; hidden: number }> {
-  const topic = `tm_color_${sdkTokenId(tokenId)}`;
-  const base = await tokenBaseOf(tokenId);
-  const [pools, live, min] = await Promise.all([queryPools(signed(base), base, tokenId), fetchLive(base, topic), marketMinimum(tokenId)]);
-  const { listed, hidden } = atMarketMinimum(pools, min);
-  return {
-    pools: listed.map((p) => ({
-      outpoint: outpointText(p.outpoint),
-      tokenId,
-      sats: p.bsvReserve,
-      tokens: p.tokenReserve,
-      validator: { identityKey: p.validatorIdentityKey, live: validatorStatus(p.validatorIdentityKey, live).live },
-    })),
-    hidden,
-  };
+export function useTokenPools(tokenId: TokenId | undefined): { data: PoolsAnswer | null; error: string | null } {
+  const [data, setData] = useState<PoolsAnswer | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setData(null);
+    setError(null);
+    if (!tokenId) return;
+    return watchTokenPools(tokenId, (a) => {
+      setData(a);
+      setError(null);
+    }, (e) => setError(e instanceof Error ? e.message : "the pools stream is interrupted"));
+  }, [tokenId]);
+  return { data, error };
 }
 
 // ---------------------------------------------------------------------------
@@ -820,22 +747,26 @@ export async function swapPools(tokenId: TokenId): Promise<{ pools: PoolView[]; 
 /** What a quote was planned from: kept for its execution. */
 interface Planned {
   plan: Plan;
-  pools: PoolState[];
+  pools: PoolRow[];
   live: LiveAnswer;
+  market: PoolsAnswer["market"];
   dec: number;
   sym: string;
 }
 const planned = new WeakMap<Quote, Planned>();
 
-/** A quote for one token: the matching engine's plan over this skein's listed pools whose validator is live and (0.16.0) whose commission is at or above this market's minimum. */
-export async function quoteSwap(req: QuoteRequest): Promise<Quote> {
+/**
+ * A quote for one token (D12): the matching engine's plan over the pools the Swap page holds
+ * (`held`: the token's pools route's answer — the host listed only pools whose validator is beating
+ * and whose commission meets the market's minimum); no request. `meta`: the token's symbol and
+ * decimals.
+ */
+export function quoteSwap(req: QuoteRequest, held: PoolsAnswer | null, meta: { sym: string; dec: number }): Quote {
   if (req.amountIn <= 0n) throw new Error("Enter an amount");
-  const topic = `tm_color_${sdkTokenId(req.tokenId)}`;
-  const base = await tokenBaseOf(req.tokenId);
-  const [all, live, meta, min] = await Promise.all([queryPools(signed(base), base, req.tokenId), fetchLive(base, topic), tokenMeta(), marketMinimum(req.tokenId)]);
-  const { listed: pools, hidden } = atMarketMinimum(all, min);
-  if (pools.length === 0 && hidden > 0) throw new Error(`No pool to swap against: ${belowMinimumText(hidden)}`);
-  const dec = meta.get(req.tokenId)?.dec ?? 0;
+  const pools = held?.pools ?? [];
+  if (pools.length === 0) throw new Error("No pool to swap against");
+  const live = liveOfPools(pools);
+  const dec = meta.dec;
   const buy = req.side === "buy";
   const r = buildPlanRequest(
     req.tokenId,
@@ -848,9 +779,8 @@ export async function quoteSwap(req: QuoteRequest): Promise<Quote> {
   const { plan, view } = planQuote(r.request, live, dec);
   const used = view.legs.filter((l) => l.amountIn > 0n);
   if (used.length === 0 || view.totalOut === 0n) throw new Error("The amount is too small to receive anything");
-  const usable = pools.filter((p) => validatorStatus(p.validatorIdentityKey, live).live);
-  const sumSats = usable.reduce((a, p) => a + p.bsvReserve, 0n);
-  const sumTokens = usable.reduce((a, p) => a + p.tokenReserve, 0n);
+  const sumSats = pools.reduce((a, p) => a + p.bsvReserve, 0n);
+  const sumTokens = pools.reduce((a, p) => a + p.tokenReserve, 0n);
   const marginal = sumTokens > 0n ? Number(sumSats) / (Number(sumTokens) / 10 ** dec) : 0;
   const totalIn = used.reduce((a, l) => a + l.amountIn, 0n);
   const sats = buy ? totalIn : view.totalOut;
@@ -874,32 +804,63 @@ export async function quoteSwap(req: QuoteRequest): Promise<Quote> {
     impactBps: marginal ? Math.round((Math.abs(effective - marginal) / marginal) * 10_000) : 0,
     fees: { lpBps: Number(first.liquidityFeeBps), validatorBps: Number(first.validationFeeBps), commissionBps: Number(first.commissionBps ?? 0n) },
   };
-  planned.set(q, { plan, pools, live, dec, sym: meta.get(req.tokenId)?.sym ?? "token" });
+  planned.set(q, { plan, pools, live, market: held!.market, dec, sym: meta.sym });
   return q;
 }
 
+/** The fees a pool's own record names (D13: the Swap page's fee line), basis points. */
+export function poolFees(p: Pick<PoolState, "liquidityFeeBps" | "validationFeeBps" | "commissionBps">): Fees {
+  return { lpBps: Number(p.liquidityFeeBps), validatorBps: Number(p.validationFeeBps), commissionBps: Number(p.commissionBps ?? 0n) };
+}
+
+/** The legs whose answer did not come: their prepared swap, for "Check again" (D15). */
+const checks = new Map<string, { prepared: PreparedSwap; base: string; af: Signed }>();
+
+/** A relay outcome on a leg's result (0.31.1's mapping; 0.34.0: no answer carries its id for "Check again"). */
+function onLeg(result: LegResult, o: SwapOutcome, prepared: PreparedSwap, base: string, af: Signed): void {
+  delete result.checkId;
+  if (o.status === "accepted") {
+    result.status = "filled";
+    result.txid = o.txid;
+    delete result.error;
+    checks.delete(o.id);
+    return;
+  }
+  result.status = "failed";
+  const rest = o.status === "unknown" ? o.reason.replace(/^no answer yet:? ?/, "") : "";
+  result.error = o.status === "refused" ? `refused: ${o.reason}` : o.status === "unknown" ? `no answer yet${rest ? `: ${rest}` : ""}` : o.status;
+  if (o.status === "unknown") {
+    result.checkId = o.id;
+    checks.set(o.id, { prepared, base, af });
+  } else if ("id" in o) checks.delete(o.id);
+}
+
 /**
- * Runs a quoted swap with the connected wallet: one transaction per leg,
- * relayed to the leg's validator (`amm.swap.submit`), each payout kept as a
- * pending payout until the wallet takes it in. A planned pool gone from a
- * fresh lookup stops the swap unless partial fills are allowed.
+ * Runs a quoted swap with the connected wallet (D14, D15): ONE `GET /@<token>/amm/pools/beef?lp=`
+ * for the legs' LP keys — a leg whose key is missing or whose outpoint moved is gone since the
+ * quote (as before 0.34.0) — the commission key hash and each validator's peer ID from the pools
+ * the page holds; then one transaction per leg, relayed to the leg's validator (`amm.swap.submit`,
+ * its answer the settled record), the payout taken in on acceptance. A planned pool gone stops the
+ * swap unless partial fills are allowed.
  */
 export async function executeSwap(quote: Quote): Promise<SwapResult> {
   const { wallet, signedFor } = needWallet();
   const p = planned.get(quote);
   if (!p) throw new Error("Quote again: this quote was not planned here");
   const tokenId = quote.request.tokenId;
-  const base = await tokenBaseOf(tokenId);
+  const base = tokenBase(tokenId, context.base);
   const af = signedFor(base);
-  const fresh = await queryPools(af, base, tokenId);
-  const gone = goneFromLookup(p.plan, fresh);
+  const lpOf = (outpoint: string) => p.pools.find((x) => x.outpoint === outpoint)?.lpPubKey ?? "";
+  const keys = [...new Set(p.plan.legs.map((l) => lpOf(l.outpoint)).filter((k) => k !== ""))];
+  const fresh = await readPoolsBeef(base, keys, freshFetch);
+  const gone = goneFromLookup(p.plan, fresh.pools);
   if (gone.length > 0 && !quote.request.allowPartial) throw new Error(`${gone.map(outpointText).join(", ")} ${gone.length === 1 ? "was" : "were"} spent since the quote: quote again`);
-  const terms = await swapTerms(af, base);
+  const commissionPkh = p.market.commissionPkh;
   const direction = quote.request.side === "buy" ? "bsvToToken" : "tokenToBsv";
   const legs: LegResult[] = [];
   const running: Promise<void>[] = [];
   // The legs that can run: not spent since the quote, their validator live.
-  const runnable: { leg: Plan["legs"][number]; result: LegResult; pool: PoolState; peerId: string }[] = [];
+  const runnable: { leg: Plan["legs"][number]; result: LegResult; pool: PoolRow; peerId: string }[] = [];
   for (const leg of p.plan.legs) {
     const poolOutpoint = outpointText(leg.outpoint);
     if (gone.includes(leg.outpoint)) {
@@ -923,17 +884,18 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
   const tokensIn = direction === "tokenToBsv";
   let tokenCandidates = tokensIn && runnable.length > 0 ? await swapHoldings(wallet, tokenId) : [];
   let satsCandidates = runnable.length > 0 ? await swapSatsHoldings(wallet) : [];
-  const staged: { r: (typeof runnable)[number]; poolOutput: Awaited<ReturnType<typeof lookupPoolOutput>>; planned: PlannedLeg; tokens: TokenInput[] | null; sats: SatsInput | null }[] = [];
+  const staged: { r: (typeof runnable)[number]; poolOutput: NonNullable<ReturnType<typeof poolOutputOf>>; planned: PlannedLeg; tokens: TokenInput[] | null; sats: SatsInput | null }[] = [];
   for (const r of runnable) {
     try {
-      const poolOutput = await lookupPoolOutput(af, base, tokenId, r.leg.outpoint);
+      const poolOutput = poolOutputOf(fresh, r.leg.outpoint);
+      if (!poolOutput) throw new Error("the pools read has no transaction for this pool");
       let tokens: TokenInput[] | null = null;
       if (tokensIn) {
         tokens = selectExactTokenInputs(tokenCandidates, r.leg.amountIn);
         if (tokens) tokenCandidates = tokenCandidates.filter((c) => !tokens!.includes(c));
       }
       // A leg whose tokens are still to be staged gets one output of 1 sat (sendToSwapBasket).
-      const planned = await planSwapLeg({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg: r.leg, pool: r.pool, poolOutput, commissionPkh: terms.commissionPkh, ...(tokensIn ? { tokenInputs: tokens ?? [{ satoshis: 1, amount: r.leg.amountIn }] } : {}), satsPerKb: FEE_RATE_SATS_PER_KB });
+      const planned = await planSwapLeg({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg: r.leg, pool: r.pool, poolOutput, commissionPkh, ...(tokensIn ? { tokenInputs: tokens ?? [{ satoshis: 1, amount: r.leg.amountIn }] } : {}), satsPerKb: FEE_RATE_SATS_PER_KB });
       const sats = selectExactSatsInput(satsCandidates, planned.funding.satoshis);
       if (sats) satsCandidates = satsCandidates.filter((c) => c !== sats);
       staged.push({ r, poolOutput, planned, tokens, sats });
@@ -971,27 +933,18 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
   const holdingBeef = staged.length > 0 ? await swapHoldingBeef(wallet, sent) : undefined;
   // The legs sent to the relay: their expected amountOut, and whether their outcome is known.
   const tracks: { result: LegResult; amountOut: bigint; done: boolean }[] = [];
-  /** Saves the leg's pending payouts, relays it, and keeps or drops the payouts by the outcome (as before 0.31.1). */
-  const relayLeg = async (prepared: Awaited<ReturnType<typeof prepareSwap>>, peerId: string): Promise<SwapOutcome> => {
-    const pending = pendingSwapPayouts(prepared, tokenId, base);
-    for (const x of pending) context.payouts.save(x);
-    const o = await relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", reason: errText(e) }));
-    for (const x of pending) {
-      if (o.status === "accepted") {
-        if (o.completed.internalized) context.payouts.remove(x.id);
-        else context.payouts.finalize(x.id, o.txid);
-      } else if (o.status !== "unknown") context.payouts.remove(x.id);
-    }
-    return o;
-  };
+  /** Relays the leg (0.34.0: no browser note; the staged rows are the leg's record, D24). */
+  const relayLeg = (prepared: PreparedSwap, peerId: string): Promise<SwapOutcome> =>
+    relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", id: swapIdOf(prepared), reason: errText(e) }));
   /**
    * 0.31.1: one retry of a leg refused `pool_spent` — re-quoted alone against the validator's
    * newest pool state (the engine's single-pool math, same side and amountIn), sent only while
    * the order's bound holds (filled legs + this one + the legs still out ≥ the plan's
-   * resolvedMinAmountOut), rebuilt on the new pool output with the same staged rows. Null: the
-   * leg failed here (its error set); else the second relay's outcome.
+   * resolvedMinAmountOut), rebuilt on the new pool output with the same staged rows (0.34.0: its
+   * BEEF from `GET /pools/beef?lp=<the pool's LP key>`, constant along its continuations). Null:
+   * the leg failed here (its error set); else the second relay's outcome.
    */
-  const retryLeg = async (x: { leg: Plan["legs"][number]; track: (typeof tracks)[number]; was: PoolState; pool: PoolState; peerId: string; tokens: TokenInput[] | null; sats: SatsInput }): Promise<SwapOutcome | null> => {
+  const retryLeg = async (x: { leg: Plan["legs"][number]; track: (typeof tracks)[number]; was: PoolRow; pool: PoolState; peerId: string; tokens: TokenInput[] | null; sats: SatsInput }): Promise<{ o: SwapOutcome; prepared: PreparedSwap } | null> => {
     const { track, pool } = x;
     const result = track.result;
     const priced = computeSwap(pool, direction, x.leg.amountIn);
@@ -1012,13 +965,14 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
     }
     const leg: Plan["legs"][number] = { outpoint: pool.outpoint, amountIn: x.leg.amountIn, ...priced };
     try {
-      const poolOutput = await lookupPoolOutput(af, base, tokenId, pool.outpoint);
-      const common: PlanLegInput & { tokenInputs?: TokenInput[] } = { wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, ...(x.tokens ? { tokenInputs: x.tokens } : {}), satsPerKb: FEE_RATE_SATS_PER_KB };
+      const poolOutput = poolOutputOf(await readPoolsBeef(base, [x.was.lpPubKey], freshFetch), pool.outpoint);
+      if (!poolOutput) throw new Error("the pool moved again: quote again");
+      const common: PlanLegInput & { tokenInputs?: TokenInput[] } = { wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh, ...(x.tokens ? { tokenInputs: x.tokens } : {}), satsPerKb: FEE_RATE_SATS_PER_KB };
       const planned = await planSwapLeg(common);
       const prepared = await prepareSwap({ ...common, satsInput: x.sats, ...(holdingBeef ? { holdingBeef } : {}), planned });
       track.amountOut = amountOut;
       result.repriced = true;
-      return await relayLeg(prepared, peerId);
+      return { o: await relayLeg(prepared, peerId), prepared };
     } catch (e) {
       result.error = errText(e);
       return null;
@@ -1035,12 +989,13 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
       continue;
     }
     try {
-      const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh: terms.commissionPkh, ...(tokens ? { tokenInputs: tokens } : {}), satsInput: sats, ...(holdingBeef ? { holdingBeef } : {}), planned, satsPerKb: FEE_RATE_SATS_PER_KB });
+      const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh, ...(tokens ? { tokenInputs: tokens } : {}), satsInput: sats, ...(holdingBeef ? { holdingBeef } : {}), planned, satsPerKb: FEE_RATE_SATS_PER_KB });
       const track = { result, amountOut: leg.amountOut, done: false };
       tracks.push(track);
       running.push(
         (async () => {
           let o = await relayLeg(prepared, peerId);
+          let sentAs = prepared;
           // 0.31.1: refused `pool_spent` with the pool's newest state attached → repriced against
           // that state and sent once more (the staged `amm-swap` rows are still there).
           if (o.status === "refused" && o.reason.startsWith("pool_spent") && o.pool) {
@@ -1049,13 +1004,11 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
               track.done = true;
               return;
             }
-            o = again;
+            o = again.o;
+            sentAs = again.prepared;
           }
           track.done = true;
-          if (o.status === "accepted") {
-            result.status = "filled";
-            result.txid = o.txid;
-          } else result.error = o.status === "refused" ? `refused: ${o.reason}` : o.status === "unknown" ? `no answer yet: ${o.reason}` : o.status;
+          onLeg(result, o, sentAs, base, af);
         })(),
       );
     } catch (e) {
@@ -1064,8 +1017,37 @@ export async function executeSwap(quote: Quote): Promise<SwapResult> {
   }
   await Promise.all(running);
   emit();
+  return swapResultOf(legs);
+}
+
+function swapResultOf(legs: LegResult[]): SwapResult {
   const filled = legs.filter((l) => l.status === "filled").length;
   return { status: filled === legs.length && legs.length > 0 ? "filled" : filled === 0 ? "failed" : "partial", legs };
+}
+
+/** A plain GET past the browser's short cache (`state` class: max-age 5): what a swap is about to spend must be read now. */
+const freshFetch = (url: string, init?: RequestInit) => fetch(url, { ...init, cache: "no-cache" });
+
+/**
+ * "Check again" (D15) for a leg with no answer yet: its record read ONCE (`GET
+ * /@<token>/amm/swaps?id=`, plain), acted on (accepted: the payout taken in). → the leg's result
+ * now (`poolOutpoint` as given).
+ */
+export async function checkSwapAgain(leg: LegResult): Promise<LegResult> {
+  const { wallet } = needWallet();
+  const id = leg.checkId;
+  const c = id ? checks.get(id) : undefined;
+  if (!id || !c) throw new Error("Nothing to check: this leg is not waiting on an answer here");
+  const o = await checkAgain({ wallet, authFetch: c.af, base: c.base, fetch: freshFetch }, c.prepared, id);
+  const next: LegResult = { poolOutpoint: leg.poolOutpoint, status: "failed", ...(leg.repriced ? { repriced: true as const } : {}) };
+  onLeg(next, o, c.prepared, c.base, c.af);
+  if (next.status === "filled") emit();
+  return next;
+}
+
+/** A swap's result with one leg replaced (after "Check again"). */
+export function withLeg(r: SwapResult, leg: LegResult): SwapResult {
+  return swapResultOf(r.legs.map((l) => (l.poolOutpoint === leg.poolOutpoint ? leg : l)));
 }
 
 /**
@@ -1089,17 +1071,35 @@ export async function walletSats(): Promise<bigint> {
 /** The positions last loaded, by the output a Close acts on (`<txid>.<vout>`): the wallet's row (its LP key) and the token. */
 const loaded = new Map<string, PositionRow>();
 
+/** A filed row's customInstructions with the token's symbol and decimals in (as a deploy files them), unless they are there. */
+function withMeta(customInstructions: string | undefined, sym: string | undefined, dec: number | undefined): string | undefined {
+  if (!customInstructions) return customInstructions;
+  try {
+    const ci = JSON.parse(customInstructions) as Record<string, unknown>;
+    if (ci.sym !== undefined || (sym === undefined && dec === undefined)) return customInstructions;
+    const { id, op, ...rest } = ci;
+    return JSON.stringify({ id, op, ...(sym ? { sym } : {}), ...(dec !== undefined ? { dec: String(dec) } : {}), ...rest });
+  } catch {
+    return customInstructions;
+  }
+}
+
 /**
- * The connected wallet's positions (0.33.0): its pool rows (`amm-pools`, and 0.28.0 its deploy history's, spent ones
- * too), grouped by token, each token's LP keys asked in ONE `ls_amm_<assetId>` `{tokenId, lpPubKeys}` query: each
- * pool's state (live, rescinded, closed) and the LP fees its swaps paid (`feesEarnedSats`, `feesEarnedTokens`). The
- * token list is read once; nothing is read per position (the pool output's BEEF is read when the LP acts on it:
- * Close, Recover). Closed ones are marked `closed`, kept for their fees.
+ * The connected wallet's positions (0.34.0, D9): its pool rows (`amm-pools`, and its deploy
+ * history's, spent ones too), grouped by token, each token's LP keys asked in ONE `GET
+ * /@<token>/amm/positions?lp=k1,k2` (P4): each pool's state (live, rescinded, closed) and the LP fees
+ * its swaps paid (`feesEarnedSats`, `feesEarnedTokens`). The token list is read once. D23: a
+ * deploy in the history whose pool output has no `amm-pools` row, its pool still at that output,
+ * is filed then (`internalizeAction` basket insertion, as the deploy files it; its BEEF `GET
+ * /@<token>/amm/tx?id=`). Closed ones are marked `closed`, kept for their fees. `validator.live`
+ * is not read here (no liveness read on this page: the page marks a pool live when the host's
+ * pools route lists it).
  */
 export async function myPositions(): Promise<Position[]> {
-  const { wallet, signedFor } = needWallet();
+  const { wallet } = needWallet();
   const [poolRows, history, list] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), enabledList().catch(() => [] as EnabledToken[])]);
   const enabled = new Map(list.filter((t) => t.status === "enabled").map((t) => [t.tokenId, t]));
+  const filed = new Set(poolRows.map((r) => r.outpoint.replace("_", ".")));
   // The rows by token, one per LP key (the pool's key for its life: a filed row and a history row of one pool are one).
   const byToken = new Map<string, Map<string, PositionRow>>();
   for (const row of positionRowsOf(mergePoolRows(history, poolRows))) {
@@ -1115,13 +1115,12 @@ export async function myPositions(): Promise<Position[]> {
     const base = tokenBase(tokenId, context.base);
     let pools: LpPool[];
     try {
-      pools = await lpFeesOf(signedFor(base), base, tokenId, [...keys.keys()]);
+      pools = await readPositions(base, [...keys.keys()]);
     } catch {
       continue;
     }
     const t = enabled.get(tokenId);
     const meta = { sym: t?.sym ?? tokenId.slice(0, 8), dec: t?.dec ?? 0, ...(t?.icon ? { icon: t.icon } : {}) };
-    const live = pools.some((p) => p.current) ? await fetchLive(base, `tm_color_${sdkTokenId(tokenId)}`).catch(() => null) : null;
     for (const p of pools) {
       const row = keys.get(p.lpPubKey)!;
       const fees = { feesEarnedSats: p.sats, feesEarnedTokens: p.tokens };
@@ -1131,14 +1130,15 @@ export async function myPositions(): Promise<Position[]> {
       }
       const outpoint = p.outpoint.replace("_", ".");
       loaded.set(outpoint, row);
-      const identity = p.current.validatorIdentityKey;
+      // D23: the deploy's row, filed from the wallet's record while the pool is still at the deploy's output.
+      if (p.status === "live" && outpoint === row.deployOutpoint && !filed.has(outpoint)) await fileDeployRow(wallet, base, history, outpoint, meta);
       out.push({
         outpoint,
         tokenId,
         ...meta,
         sats: p.current.bsvReserve,
         tokens: p.current.tokenReserve,
-        validator: { identityKey: identity, live: live ? validatorStatus(identity, live).live : false },
+        validator: { identityKey: p.current.validatorIdentityKey, live: false },
         ...(p.status === "rescinded" ? { rescinded: true } : {}),
         ...fees,
       });
@@ -1147,71 +1147,40 @@ export async function myPositions(): Promise<Position[]> {
   return [...out, ...closed];
 }
 
-interface RawTerms {
-  validator: string;
-  peerId?: string;
-  fees: Fees;
+/** D23: the history's row of the deploy output `outpoint` into `amm-pools` (basket insertion over the deploy's BEEF, `GET /tx?id=`). A failure: nothing, the next load. */
+async function fileDeployRow(wallet: WalletInterface, base: string, history: Awaited<ReturnType<typeof historyPoolRows>>, outpoint: string, meta: { sym: string; dec: number }): Promise<void> {
+  const h = history.find((r) => r.outpoint.replace("_", ".") === outpoint);
+  const op = parseOutpoint(outpoint);
+  if (!h || !op) return;
+  try {
+    const beef = await readTx(base, op.txid);
+    if (!beef) return;
+    const customInstructions = withMeta(h.customInstructions, meta.sym, meta.dec);
+    await wallet.internalizeAction({
+      tx: beef,
+      outputs: [{ outputIndex: op.vout, protocol: "basket insertion", insertionRemittance: { basket: POOLS_BASKET, ...(h.tags ? { tags: h.tags } : {}), ...(customInstructions ? { customInstructions } : {}) } }],
+      description: `AMM pool deploy: ${meta.sym}`.slice(0, 50),
+      labels: ["amm-pool-deploy"],
+    });
+  } catch {
+    /* the next load */
+  }
 }
 
-/** A fee `amm.pool.terms` answered (0.15.0: no defaults; the record carries all three). */
-function fee(x: unknown, name: string): number {
-  const n = Number(x);
-  if (x === undefined || x === null || !Number.isInteger(n)) throw new Error(`amm.pool.terms: no ${name}`);
-  return n;
-}
-
-/** `amm.pool.terms` of a token's instance (0.17.0): its validator, its peer ID and its terms (an error "no validator here" when none are set). */
-async function rawTerms(tokenId: TokenId): Promise<RawTerms> {
-  const { signedFor } = needWallet();
-  const base = await tokenBaseOf(tokenId);
-  const t = (await callApp(signedFor(base), base, "amm.pool.terms", {})) as Record<string, unknown>;
-  const bytes = readBytes(t.validator);
-  const hex = bytes ? Utils.toHex(bytes) : "";
-  if (!/^[0-9a-f]{66}$/.test(hex)) throw new Error("amm.pool.terms: no validator identity");
-  return {
-    validator: hex,
-    ...(typeof t.peerId === "string" ? { peerId: t.peerId } : {}),
-    fees: { lpBps: fee(t.lpFeeBps, "lpFeeBps"), validatorBps: fee(t.validatorFeeBps, "validatorFeeBps"), commissionBps: fee(t.commissionBps, "commissionBps") },
-  };
+/** A token instance's terms (P7: `GET /@<token>/amm/terms`, unsigned). */
+async function instanceTerms(tokenId: TokenId): Promise<InstanceTerms> {
+  return readTerms(await tokenBaseOf(tokenId));
 }
 
 /**
  * The validator a new position is deployed with (this skein), and its fees (read-only: the LP
- * accepts them); `{none: true}` when no terms are set (0.15.0: `amm.pool.terms` answers "no
- * validator here").
+ * accepts them); `{none: true}` when no terms are set. 0.34.0 (D21): `GET /@<token>/amm/terms`
+ * (P7), plain.
  */
 export async function validatorTerms(tokenId: TokenId): Promise<ValidatorTerms | NoTerms> {
-  let t: RawTerms;
-  try {
-    t = await rawTerms(tokenId);
-  } catch (e) {
-    if (e instanceof RelayError && e.message.endsWith(NO_VALIDATOR)) return { none: true };
-    throw e;
-  }
-  return { validator: { identityKey: t.validator, live: Boolean(t.peerId) }, isThisExchange: true, fees: t.fees };
-}
-
-/**
- * An instance's identity (hex, 0.15.0): the key its signed answers carry
- * (`x-bsv-auth-identity-key`), as skein-1color's tokens page reads it
- * (web/src/tokens/instance.ts `identity`). A token instance's (`base` a token
- * base) off a signed `amm.swap.terms`, which every token instance answers,
- * validator or market only; the config instance's (0.17.0, no `base`) off a
- * signed read of its token list. The recipient of root's messages.
- */
-export async function instanceIdentity(base?: string): Promise<string> {
-  const { signedFor } = needWallet();
-  const af = signedFor(base ?? context.base);
-  const res = base
-    ? await af.fetch(callUrl(base), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fn: SWAP_TERMS_FN, args: {} }),
-      })
-    : await af.fetch(`${context.base}/tokens`, { method: "GET" });
-  const key = (res.headers.get("x-bsv-auth-identity-key") ?? "").toLowerCase();
-  if (!/^[0-9a-f]{66}$/.test(key)) throw new Error("the skein's answer carries no identity key (x-bsv-auth-identity-key)");
-  return key;
+  const t = (await instanceTerms(tokenId)).validator;
+  if (!t) return { none: true };
+  return { validator: { identityKey: t.identity, live: Boolean(t.peerId) }, isThisExchange: true, fees: { lpBps: t.lpFeeBps, validatorBps: t.validatorFeeBps, commissionBps: t.commissionBps } };
 }
 
 /**
@@ -1220,13 +1189,15 @@ export async function instanceIdentity(base?: string): Promise<string> {
  * key, its nonce, its signature, written into the pool's state), then the
  * wallet's BRC-207 module selects the token inputs, builds, signs and
  * broadcasts the deploy in one createAction; the pool output is filed as a
- * position row (`amm-pools`).
+ * position row (`amm-pools`); the page's own submit at the host root (D19).
  */
 export async function deployPosition(req: DeployRequest): Promise<DeployResult> {
   const { wallet, signedFor } = needWallet();
   if (req.tokens <= 0n || req.sats <= 0n) throw new Error("Both amounts must be more than 0");
-  const [terms, held, meta, base] = await Promise.all([rawTerms(req.tokenId), heldOutputs(wallet), tokenMeta(), tokenBaseOf(req.tokenId)]);
-  const m = meta.get(req.tokenId) ?? (await deployMeta(req.tokenId));
+  const [terms, held, meta, base] = await Promise.all([instanceTerms(req.tokenId), heldOutputs(wallet), tokenMeta(), tokenBaseOf(req.tokenId)]);
+  const v = terms.validator;
+  if (!v) throw new Error(NO_VALIDATOR);
+  const m = meta.get(req.tokenId);
   const d = await deployPool({
     wallet,
     af: signedFor(base),
@@ -1234,8 +1205,8 @@ export async function deployPosition(req: DeployRequest): Promise<DeployResult> 
     tokenId: req.tokenId,
     tokens: req.tokens,
     sats: req.sats,
-    fees: { lpFeeBps: BigInt(terms.fees.lpBps), validatorFeeBps: BigInt(terms.fees.validatorBps), commissionBps: BigInt(terms.fees.commissionBps) },
-    validator: { identityKey: terms.validator },
+    fees: { lpFeeBps: BigInt(v.lpFeeBps), validatorFeeBps: BigInt(v.validatorFeeBps), commissionBps: BigInt(v.commissionBps) },
+    validator: { identityKey: v.identity },
     held,
     meta: { ...(m?.sym ? { sym: m.sym } : {}), ...(m?.dec !== undefined ? { dec: m.dec } : {}) },
   });
@@ -1244,8 +1215,9 @@ export async function deployPosition(req: DeployRequest): Promise<DeployResult> 
 }
 
 /**
- * Closes a position (src/lp/close.ts): everything in the pool returns to the
- * wallet (its own action pays the miner fee); submitted to this skein's overlay.
+ * Closes a position (src/lp/close.ts): everything in the pool returns to the wallet (its own action
+ * pays the miner fee). 0.34.0: the pool's current output and its BEEF by its LP key (`GET
+ * /@<token>/amm/pools/beef?lp=<key>`, D2: the pool's id); the page's submit at the host root (D19).
  */
 export async function closePosition(req: CloseRequest): Promise<CloseResult> {
   const { wallet } = needWallet();
@@ -1254,12 +1226,11 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
     await myPositions();
     row = loaded.get(req.outpoint);
   }
-  if (!row) throw new Error("No such position");
-  const { signedFor } = needWallet();
+  if (!row || !row.lpPubKey) throw new Error("No such position");
   const [meta, base] = await Promise.all([tokenMeta(), tokenBaseOf(row.tokenId)]);
   const m = meta.get(row.tokenId);
-  // 0.33.0: the pool output's BEEF read now, when the LP acts (BRC-207 color-spendability at the token's instance).
-  const poolOutput = await colorOutput(signedFor(base), base, row.tokenId, req.outpoint);
+  const poolOutput = poolOutputOf(await readPoolsBeef(base, [row.lpPubKey], freshFetch), req.outpoint);
+  if (!poolOutput) throw new Error(`the pool is no longer at ${req.outpoint}: reload your positions`);
   const prepared = await prepareClose({
     wallet,
     tokenId: row.tokenId,
@@ -1268,47 +1239,10 @@ export async function closePosition(req: CloseRequest): Promise<CloseResult> {
     lpKey: row.lpKey,
   });
   // The page's own submit (the wallet's module submitted at its overlay too; its failure does not undo the close).
-  await submitToOverlay(base, prepared.topic, prepared.beef).catch(() => undefined);
+  await submitToOverlay(context.base, prepared.topic, prepared.beef).catch(() => undefined);
   loaded.delete(req.outpoint);
   emit();
   return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount };
-}
-
-/**
- * Recovers a position whose deploy filed no row (src/lp/recover.ts, 0.12.1):
- * the pool at `outpoint` (the deploy's or a later one), checked to be this
- * wallet's by its LP key, filed in `amm-pools` as a deploy files it. Close
- * then works as for any position.
- */
-export async function recoverPosition(outpoint: string): Promise<RecoverResult> {
-  const { wallet, signedFor } = needWallet();
-  const [rows, history, meta] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), tokenMeta()]);
-  const { base, tokenId } = await baseHolding(outpoint);
-  const r = await recoverPoolRow({
-    wallet,
-    outpoint,
-    rows,
-    history,
-    spendOf: (o) => readSpend(base, o),
-    outputOf: (o) => colorOutput(signedFor(base), base, tokenId, o),
-    metaOf: async (tokenId) => meta.get(tokenId) ?? (await deployMeta(tokenId)),
-  });
-  emit();
-  return { outpoint: r.outpoint, sym: r.sym ?? r.tokenId.slice(0, 8), filed: r.filed };
-}
-
-/**
- * The token instance that knows a pool outpoint (0.17.0: a pasted outpoint names no token): the first
- * enabled token's instance whose chain state follows it as a pool (`/spends`: a current output, a
- * spender or a close); refused when none does.
- */
-async function baseHolding(outpoint: string): Promise<{ base: string; tokenId: string }> {
-  for (const t of await enabledTokens()) {
-    const base = tokenBase(t.tokenId, context.base);
-    const s = await readSpend(base, outpoint).catch(() => null);
-    if (s && (s.current || s.spentBy || s.closed)) return { base, tokenId: t.tokenId };
-  }
-  throw new Error(`no token instance on this exchange knows ${outpoint}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,61 +1250,77 @@ async function baseHolding(outpoint: string): Promise<{ base: string; tokenId: s
 // ---------------------------------------------------------------------------
 
 /**
- * The connected wallet's 1Color tokens (0.12.0: the BRC-207 module's): the
- * assets `p color assets` lists, each balance the sum of its held value
- * outputs there (0.27.0: one read for the whole list, granted once by the
- * pages' group permissions; no per-token `p color balance` here), and what the active swap basket (`amm-swap`) holds of each
- * (its tokens and, 0.29.6, the sats staged for its legs: a token with only sats staged is listed too); symbol,
- * decimals and icon from the token list, else the token's deploy
- * (the discovery lookup `ls_color`, BRC-207 `color-admission`, at the host root, 0.20.1), else a deploy the wallet holds. Each marked on this
- * exchange (registered) or not.
+ * The connected wallet's 1Color tokens (0.12.0: the BRC-207 module's): the assets `p color assets`
+ * lists, each balance the sum of its held value outputs there (0.27.0), and what the active swap
+ * basket (`amm-swap`) holds of each (its tokens and, 0.29.6, the sats staged for its legs).
+ * 0.34.0 (D17): symbol, decimals and icon from the exchange's token list (read once), else ONE
+ * discovery read for every held token the list lacks (`GET /@discovery/1color/tokens?ids=a,b`),
+ * else the wallet's own deploy output. Each marked on this exchange (registered) or not.
  */
 export async function myTokens(): Promise<WalletToken[]> {
   const { wallet } = needWallet();
-  const [held, swaps, topics, meta] = await Promise.all([
+  const [held, swaps, meta] = await Promise.all([
     heldOutputs(wallet),
     swapTotals(wallet).catch(() => new Map<string, { amount: bigint; outputs: number; sats: number }>()),
-    enabledTokens().catch(() => [] as EnabledToken[]),
     tokenMeta(),
   ]);
+  const registered = new Set((await enabledTokens().catch(() => [] as EnabledToken[])).map((t) => t.tokenId));
   const inv = buildInventory(held.filter((h) => h.available));
   const ids = [...new Set([...inv.tokens.filter((t) => t.valueOutputs > 0).map((t) => t.tokenId), ...swaps.keys()])];
-  const registered = new Set(topics.map((t) => t.tokenId));
-  const out = await Promise.all(
-    ids.map(async (tokenId): Promise<WalletToken> => {
-      const t = inv.tokens.find((x) => x.tokenId === tokenId);
-      const balance = t && t.valueOutputs > 0 ? t.balance : 0n;
-      const fromDeploy = meta.has(tokenId) ? null : await deployMeta(tokenId);
-      const m = meta.get(tokenId) ?? fromDeploy ?? {};
-      const icon = m.icon ?? (t?.icon?.image ? imageDataUrl(t.icon.image) : undefined);
-      return {
-        tokenId,
-        sym: m.sym ?? t?.sym ?? tokenId.slice(0, 8),
-        dec: m.dec ?? t?.dec ?? 0,
-        ...(icon ? { icon } : {}),
-        balance,
-        outputs: t?.valueOutputs ?? 0,
-        inSwaps: swaps.get(tokenId)?.amount ?? 0n,
-        swapSats: swaps.get(tokenId)?.sats ?? 0,
-        onExchange: registered.has(tokenId),
-      };
-    }),
-  );
+  const disc = await discoveryRows(ids.filter((id) => !meta.has(id)));
+  const out = ids.map((tokenId): WalletToken => {
+    const t = inv.tokens.find((x) => x.tokenId === tokenId);
+    const balance = t && t.valueOutputs > 0 ? t.balance : 0n;
+    const d = disc.get(tokenId);
+    const m: DeployMeta = meta.get(tokenId) ?? (d ? { ...(d.sym !== undefined ? { sym: d.sym } : {}), ...(d.dec !== undefined ? { dec: d.dec } : {}), ...(d.iconUrl ? { icon: d.iconUrl } : {}) } : {});
+    const icon = m.icon ?? (t?.icon?.image ? imageDataUrl(t.icon.image) : undefined);
+    return {
+      tokenId,
+      sym: m.sym ?? t?.sym ?? tokenId.slice(0, 8),
+      dec: m.dec ?? t?.dec ?? 0,
+      ...(icon ? { icon } : {}),
+      balance,
+      outputs: t?.valueOutputs ?? 0,
+      inSwaps: swaps.get(tokenId)?.amount ?? 0n,
+      swapSats: swaps.get(tokenId)?.sats ?? 0,
+      onExchange: registered.has(tokenId),
+    };
+  });
   return out.filter((t) => t.balance > 0n || t.inSwaps > 0n || t.swapSats > 0).sort((a, b) => a.sym.localeCompare(b.sym) || a.tokenId.localeCompare(b.tokenId));
+}
+
+/**
+ * The silent pass over the swap basket's staged legs (0.34.0, D18, D24; src/wallet/swapPayouts.ts):
+ * per token ONE `GET /spends?outpoint=` over the pools its rows were staged for, the spenders'
+ * transactions, this wallet's payouts taken in. Nothing shown; a payout taken in reloads the
+ * pages' data. Never throws.
+ */
+export async function settleSwaps(): Promise<string[]> {
+  if (!context.wallet) return [];
+  const taken = await settleStagedSwaps(context.wallet, (t) => tokenBase(t, context.base));
+  if (taken.length > 0) emit();
+  return taken;
+}
+
+/** Your tokens' load (D18): the silent pass, once per connected wallet. */
+export function useSettleSwaps(connected: boolean): void {
+  useEffect(() => {
+    if (connected) void settleSwaps();
+  }, [connected]);
 }
 
 /**
  * "Move back" (src/market/activeSwap.ts; 0.29.3: a module plan): every `amm-swap` row of the
  * token (and its staged sats) spent in one action whose one output the wallet's module files
- * into the token's balance in the same call; submitted to this skein's token topic too. The
- * recovery path for a swap that got stuck. 0.29.6: with only sats staged for the token, one plain
- * createAction over them with no outputs (the wallet's change takes them).
+ * into the token's balance in the same call; 0.34.0 (D19): submitted at the host root (`POST
+ * <origin>/submit` + `X-Topics`), no token-list read for an instance base. The recovery path
+ * for a swap that got stuck. 0.29.6: with only sats staged for the token, one plain createAction
+ * over them with no outputs (the wallet's change takes them).
  */
 export async function moveBackTokens(tokenId: TokenId): Promise<{ txid: string; amount: bigint; errors: string[] }> {
   const { wallet } = needWallet();
   const meta = await tokenMeta();
-  const base = await tokenBaseOf(tokenId);
-  const r = await moveBack({ wallet, base, tokenId, meta: { sym: symOf(meta, tokenId) } });
+  const r = await moveBack({ wallet, base: context.base, tokenId, meta: { sym: symOf(meta, tokenId) } });
   emit();
   return { txid: r.txid, amount: r.amount, errors: r.errors };
 }
@@ -1471,8 +1421,9 @@ export async function enableToken(tokenId: TokenId): Promise<EnableSent> {
     beef = d.beef;
     from = d.from;
   }
-  const me = await instanceIdentity();
+  const me = await swapIdentity();
   await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "enable", args: { tokenId: canonical, ...(beef ? { beef: Uint8Array.from(beef) } : {}) } });
+  listRead = null; // the list changed: read again
   emit();
   return { beefFrom: from };
 }
@@ -1522,25 +1473,28 @@ export function enableCandidates(listed: ListedToken[], walletIds: string[], onL
 }
 
 /**
- * What Settings' "Enable a token" lists (2026-10-31): discovery's token list (`GET
- * <discoveryBase>/color/tokens`; a failed read — discovery off — is an empty list) ∪ the asset ids
- * of the connected wallet's held token outputs (`p color assets`, each locking script decoded),
- * minus the tokens on the swap instance's list. A wallet-only token's metadata from its deploy:
- * the one in the wallet's module basket (`deployBeef` with the wallet), else discovery's
- * (`deployMeta`), else none (the page shows its short id).
+ * What Settings' "Enable a token" lists (2026-10-31; 0.34.0, D20): discovery's token list (`GET
+ * /@discovery/1color/tokens`, paged; a failed read — discovery off — is an empty list) ∪ the asset
+ * ids of the connected wallet's held token outputs (`p color assets`), minus the tokens on the
+ * swap instance's list (read once). The wallet-only tokens' metadata: ONE `GET
+ * /@discovery/1color/tokens?ids=` for them, else the deploy in the wallet's module basket, else
+ * none (the page shows its short id).
  */
 export async function tokensToEnable(): Promise<EnableCandidate[]> {
   const { wallet } = needWallet();
-  const [listed, held, list] = await Promise.all([readTokenList(discoveryBase()).catch(() => [] as ListedToken[]), heldOutputs(wallet), enabledList()]);
+  const [listed, held, list] = await Promise.all([readDiscoveryList(discoveryBase()).catch(() => [] as DiscoveryRow[]), heldOutputs(wallet), enabledList()]);
   const walletIds = [...new Set(held.map((h) => decodeTokenRow(h)?.tokenId).filter((t): t is string => typeof t === "string"))];
-  const rows = enableCandidates(listed, walletIds, list.map((t) => t.tokenId));
+  const asListed: ListedToken[] = listed.map((r) => ({ tokenId: r.tokenId, topic: r.topic ?? `tm_color_${r.tokenId}`, ...(r.sym !== undefined ? { sym: r.sym } : {}), ...(r.dec !== undefined ? { dec: r.dec } : {}), ...(r.iconUrl ? { icon: r.iconUrl } : {}) }));
+  const rows = enableCandidates(asListed, walletIds, list.map((t) => t.tokenId));
+  const disc = await discoveryRows(rows.filter((r) => !r.onDiscovery).map((r) => r.tokenId));
   return Promise.all(
     rows.map(async (r) => {
       if (r.onDiscovery) return r;
-      const d = await deployBeef(r.tokenId, wallet).catch(() => null);
-      const fromWallet = d?.from === "wallet" && (d.meta.sym !== undefined || d.meta.icon !== undefined) ? d.meta : null;
-      // d null: neither had it (deployBeef asked discovery already). A wallet deploy with no display fields: discovery's.
-      const m = !d ? null : fromWallet ?? (d.from === "discovery" ? d.meta : await deployMeta(r.tokenId));
+      const d = disc.get(r.tokenId);
+      if (d) return { ...r, ...(d.sym !== undefined ? { sym: d.sym } : {}), ...(d.iconUrl ? { icon: d.iconUrl } : {}) };
+      const beef = await walletDeployBeef(wallet, r.tokenId).catch(() => undefined);
+      const op = parseOutpoint(r.tokenId.replace("_", "."));
+      const m = beef && op ? deployMetaOf(beef, op.vout) : null;
       return { ...r, ...(m?.sym !== undefined ? { sym: m.sym } : {}), ...(m?.icon ? { icon: m.icon } : {}) };
     }),
   );
@@ -1549,8 +1503,9 @@ export async function tokensToEnable(): Promise<EnableCandidate[]> {
 /** Disables a token (0.17.0): root's `{fn: "disable", args: {tokenId}}` to `<app>/admin`; its instance stopped. */
 export async function disableToken(tokenId: TokenId): Promise<void> {
   const { signedFor } = needWallet();
-  const me = await instanceIdentity();
+  const me = await swapIdentity();
   await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "disable", args: { tokenId: sdkTokenId(tokenId) } });
+  listRead = null; // the list changed: read again
   emit();
 }
 
@@ -1568,7 +1523,7 @@ export async function defaults(): Promise<Defaults> {
 
 async function sendDefaults(args: Record<string, unknown>): Promise<void> {
   const { signedFor } = needWallet();
-  const me = await instanceIdentity();
+  const me = await swapIdentity();
   await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "defaults", args });
   emit();
 }
@@ -1614,7 +1569,7 @@ export async function discoveryState(): Promise<Discovery> {
  */
 export async function setDiscovery(on: boolean): Promise<void> {
   const { signedFor } = needWallet();
-  const me = await instanceIdentity();
+  const me = await swapIdentity();
   await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "discovery", args: { on } });
   emit();
 }
@@ -1670,67 +1625,6 @@ export function useData<T>(load: () => Promise<T>, deps: unknown[], enabled = tr
 export const useMyPositions = (enabled: boolean) => useData(myPositions, [], enabled);
 export const useMyTokens = (enabled: boolean) => useData(myTokens, [], enabled);
 
-// ---------------------------------------------------------------------------
-// Unfinished steps (0.29.3)
-// ---------------------------------------------------------------------------
-
-/** One unfinished step as the Your tokens page lists it. */
-export interface Unfinished {
-  id: string;
-  kind: PendingPayout["kind"];
-  tokenId: TokenId;
-  txid: string;
-  /** false while the swap's txid is provisional. */
-  final: boolean;
-  /** 0.29.6: whether Dismiss may drop it — a swap never signed (not final), not an entry with its own bytes (pre-0.29.3). */
-  dismissable: boolean;
-  createdAt: number;
-}
-
-/** Whether an entry may be dismissed (0.29.6): not final and carrying no key bytes of its own. A final entry or an old-shape one is the only pointer to money. */
-function dismissable(p: PendingPayout): boolean {
-  return p.final === false && !isLegacyPayout(p);
-}
-
-/** The browser's unfinished steps (src/wallet/pendingPayouts.ts), oldest first. */
-export function unfinished(): Unfinished[] {
-  return context.payouts.list().map((p) => ({ id: p.id, kind: p.kind, tokenId: p.tokenId, txid: p.txid, final: p.final, dismissable: dismissable(p), createdAt: p.createdAt }));
-}
-
-/** The unfinished steps, kept current as entries are written and cleared (this tab and others). */
-export function useUnfinished(): Unfinished[] {
-  const [list, setList] = useState<Unfinished[]>(() => unfinished());
-  useEffect(() => onPendingPayoutsChange(() => setList(unfinished())), []);
-  return list;
-}
-
-/**
- * "Finish" one step: the final transaction from the token's instance, the key re-derived (or, for an
- * entry from before 0.29.3, its own bytes), the wallet's take-in; the entry cleared only when the
- * wallet accepted. Throws the reason otherwise (the entry stays).
- */
-/**
- * "Dismiss" (0.29.6, David Case 2026-11-03): forget an unsigned swap's entry — a leg the validator
- * never signed (timed out or refused) paid nothing to the user. Removes the entry and nothing else;
- * refuses a final entry and an old-shape one (the only pointer to money).
- */
-export function dismissUnfinished(id: string): void {
-  const p = context.payouts.get(id);
-  if (!p) return;
-  if (!dismissable(p)) throw new Error("This step cannot be dismissed: it points to an output paid to you");
-  context.payouts.remove(id);
-}
-
-export async function finishUnfinished(id: string): Promise<{ accepted: boolean; txid: string }> {
-  const { wallet, signedFor } = needWallet();
-  const p = context.payouts.get(id);
-  if (!p) throw new Error("Already finished");
-  const base = p.base ?? (await tokenBaseOf(p.tokenId));
-  const r = await internalizeNow(wallet, context.payouts, signedFor(base), base, p);
-  if (!r.accepted) throw new Error("The wallet did not accept the output");
-  emit();
-  return r;
-}
 /** A token's validator terms (0.17.0: its own instance's), none while no token is picked. */
 export const useValidatorTerms = (tokenId: TokenId | undefined) =>
   useData(() => (tokenId ? validatorTerms(tokenId) : Promise.resolve(null)), [tokenId]);
@@ -1740,9 +1634,6 @@ export const useDefaults = (enabled: boolean) => useData(defaults, [], enabled);
 export const useDiscovery = (enabled: boolean) => useData(discoveryState, [], enabled);
 export const useClaimStatus = (enabled: boolean) => useData(claimStatus, [], enabled);
 export const useTokensToEnable = (enabled: boolean) => useData(tokensToEnable, [], enabled);
-/** The pools the Swap page lists (0.16.0: `swapPools`), read again when the wallet connects (the market's minimum is a signed read). */
-export const useTokenPools = (tokenId: TokenId | undefined, connected: boolean) =>
-  useData(() => (tokenId ? swapPools(tokenId) : Promise.resolve({ pools: [], hidden: 0 })), [tokenId, connected]);
 
 /** Whether the session's key is root (`isRoot`), false while disconnected. */
 export function useIsRoot(session: Session): boolean {

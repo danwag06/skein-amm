@@ -5,7 +5,8 @@
 //
 //   amm-lookup      ls_amm_<assetId>: the listed pools of a token instance; the prices beat programs/amm-lookup
 //   amm-validator   the validator: swap (a libp2p direct call), affirm; root's close         programs/amm-validator
-//   amm-p2p         the relay (amm.swap/1; amm.pool/1: terms, affirm), the read /spends      programs/amm-p2p
+//   amm-p2p         the relay (amm.swap/1; amm.pool/1: terms, affirm), the read routes       programs/amm-p2p
+//                   (0.34.0: /pools/beef, /positions, /fees/*, /terms, /spends, /tx, /swaps)
 //   amm-setup       the token's setup (0.22.0, shruggr/skein-amm#5): the deploy event       programs/amm-setup
 //                   (box amm/deploy) → the head amm/token and the token's topic and lookups
 //                   registered with the engine by call; the read /token
@@ -41,6 +42,9 @@ const Mods = struct {
     terms: *std.Build.Module,
     /// A 1Color deploy read from a BEEF (0.22.0, src/deploy.zig): amm-setup's deploy event (and open-exchange's swap app).
     deploy: *std.Build.Module,
+    /// amm-lookup's index (0.34.0, programs/amm-lookup/src/index.zig): amm-p2p's read routes answer
+    /// from the lookup's own answers (P3-P6), the same code, over the same index.
+    amm_lookup: *std.Build.Module,
     /// skein-overlay's engine sources (src/state.zig, src/submit.zig, src/engine_vm.zig, …), which
     /// it does not export as modules: the validator submits through the engine's own
     /// `submit.route` and reads its state, as amm-poc did with skein-overlay 0.2.0.
@@ -91,6 +95,17 @@ fn mods(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
         .optimize = optimize,
         .imports = &.{ .{ .name = "chain", .module = chain }, .{ .name = "1color", .module = color } },
     });
+    const amm_lookup = b.createModule(.{
+        .root_source_file = b.path("programs/amm-lookup/src/index.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "chain", .module = chain },
+            .{ .name = "lookup", .module = ov.module("lookup") },
+            .{ .name = "pool", .module = pool_mod },
+            .{ .name = "1color", .module = color },
+        },
+    });
     return .{
         .chain = chain,
         .wallet = sdk.module("wallet"),
@@ -107,6 +122,7 @@ fn mods(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
         .pool = pool_mod,
         .terms = terms_mod,
         .deploy = deploy_mod,
+        .amm_lookup = amm_lookup,
         .engine = engine,
     };
 }
@@ -141,6 +157,8 @@ fn imports(b: *std.Build, m: Mods, program: []const u8) []const std.Build.Module
         .{ .name = "dagjson", .module = m.dagjson },
         .{ .name = "overlay_sk", .module = m.overlay_sk },
         .{ .name = "skein_overlay", .module = m.engine },
+        .{ .name = "lookup", .module = m.lookup },
+        .{ .name = "amm_lookup", .module = m.amm_lookup },
     };
     return std.mem.concat(b.allocator, std.Build.Module.Import, &.{ &common, more }) catch @panic("OOM");
 }

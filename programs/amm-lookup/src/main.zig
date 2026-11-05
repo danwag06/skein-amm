@@ -36,8 +36,8 @@ pub fn documentation(_: std.mem.Allocator, _: []const u8) anyerror![]const u8 {
     \\the deploy outpoint):
     \\
     \\- `{tokenId}`: every live pool of the token, as
-    \\  `{outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps,
-    \\  commissionBps, validatorIdentityKey, lastSeen?}` (freeform);
+    \\  `{lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps,
+    \\  commissionBps, validatorIdentityKey}` (freeform);
     \\- `{tokenId, outpoint}`: that pool, or its newest continuation,
     \\  `{current, hops}` (freeform); with `beef: true`, the pool output and its
     \\  transaction's BEEF (output-list);

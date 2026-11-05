@@ -13,14 +13,11 @@
  *   <config>/tokens`, the config instance's enable list — each token's id,
  *   topic, metadata, status and its own instance's `url`; and the defaults a
  *   new token instance is created with (`readDefaults`, `GET <config>/defaults`).
- * - **The reads** (no signature; nothing logged): `GET <base>/spends?outpoint=` (the chain
- *   state of an outpoint), `GET <base>/color/tokens` (the token list), and
- *   the liveness read `GET <base>/.live/<topic>` (each sender's latest beat:
- *   a lookup service's beat body is its own, skein-overlay 0.12.0).
+ * - The public read API (0.34.0: the pools, positions, terms, spends, transactions, swaps, and
+ *   discovery's token reads) is src/lib/overlay.ts.
  */
 import { encode, decode } from "cbor2";
 import { AuthFetch, Utils, type WalletInterface } from "@bsv/sdk";
-import { liveUrl } from "./overlay";
 import { appName } from "./config";
 
 export interface SignedPost {
@@ -111,81 +108,13 @@ async function getJson(url: string, fetchFn: typeof fetch = fetch): Promise<unkn
   return res.json();
 }
 
-/** The chain state of an outpoint (amm-p2p reads.zig `spendOf`). */
-export interface Spend {
-  /** `<txid>.<vout>` */
-  outpoint: string;
-  spentBy?: string;
-  /** Followed from a pool output: its current output, `<txid>.<vout>` (absent: closed, or not a pool). */
-  current?: string;
-  hops: number;
-  closed: boolean;
-}
-
-export async function readSpend(base: string, outpoint: string, fetchFn: typeof fetch = fetch): Promise<Spend> {
-  return (await getJson(`${base}/spends?outpoint=${encodeURIComponent(outpoint)}`, fetchFn)) as Spend;
-}
-
-/** A token of the list (`GET <base>/color/tokens`, skein-1color): its id, topic and metadata. */
+/** A token's id, topic and metadata, as a token list names it. */
 export interface ListedToken {
   tokenId: string;
   topic: string;
   sym?: string;
   dec?: number;
   icon?: string;
-}
-
-/** The route's page size: `limit` is 1 to 100, `skip` up to 100000 (skein-1color color-lookup `tokens`). */
-const TOKEN_LIST_PAGE = 100;
-const TOKEN_LIST_MAX_SKIP = 100_000;
-
-/** The whole token list, read a page at a time, newest first as the route lists it. */
-export async function readTokenList(base: string, fetchFn: typeof fetch = fetch): Promise<ListedToken[]> {
-  const tokens: ListedToken[] = [];
-  for (let skip = 0; skip <= TOKEN_LIST_MAX_SKIP; skip += TOKEN_LIST_PAGE) {
-    const page = await readTokenPage(base, skip, fetchFn);
-    tokens.push(...page);
-    if (page.length < TOKEN_LIST_PAGE) break;
-  }
-  return tokens;
-}
-
-async function readTokenPage(base: string, skip: number, fetchFn: typeof fetch): Promise<ListedToken[]> {
-  const a = await getJson(`${base}/color/tokens?limit=${TOKEN_LIST_PAGE}&skip=${skip}`, fetchFn);
-  const list = Array.isArray(a) ? a : a && typeof a === "object" && Array.isArray((a as { tokens?: unknown }).tokens) ? (a as { tokens: unknown[] }).tokens : [];
-  return (list as Record<string, unknown>[])
-    .filter((t) => typeof t.tokenId === "string")
-    .map((t) => ({
-      tokenId: String(t.tokenId),
-      topic: typeof t.topic === "string" ? t.topic : `tm_color_${String(t.tokenId)}`,
-      ...(typeof t.sym === "string" ? { sym: t.sym } : {}),
-      ...(typeof t.dec === "number" ? { dec: t.dec } : typeof t.dec === "string" && /^\d+$/.test(t.dec) ? { dec: Number(t.dec) } : {}),
-      ...(typeof t.icon === "string" ? { icon: t.icon } : {}),
-    }));
-}
-
-/** One sender's latest beat on a liveness topic: its identity, when, and its body (bytes). */
-export interface Beat {
-  sender: string;
-  at: number;
-  body: Uint8Array;
-  from: string;
-}
-
-/** `GET <base>/.live/<topic>`: the beats within the instance's own window (`config.overlay.market.window`), newest first; [] when the skein keeps no liveness for it (404). */
-export async function readBeats(base: string, topic: string, fetchFn: typeof fetch = fetch): Promise<Beat[]> {
-  const res = await fetchFn(liveUrl(base, topic), { headers: { accept: "application/json" } });
-  if (res.status === 404) return [];
-  if (!res.ok) throw new Error(`GET ${topic}: ${res.status}`);
-  const a = await res.json();
-  return (Array.isArray(a) ? (a as Record<string, unknown>[]) : [])
-    .filter((x) => typeof x.sender === "string")
-    .map((x) => ({
-      sender: String(x.sender).toLowerCase(),
-      at: typeof x.at === "number" ? x.at : 0,
-      body: typeof x.body === "string" ? Uint8Array.from(Utils.toArray(x.body, "base64") as number[]) : new Uint8Array(),
-      from: typeof x.from === "string" ? x.from : "",
-    }));
 }
 
 /**
@@ -205,9 +134,14 @@ export interface EnabledToken {
 
 const STATUSES = new Set(["enabled", "disabled"]);
 
-/** The config instance's enable list, newest first as the read lists it. */
+/**
+ * The config instance's enable list, newest first as the read lists it. A row's icon: its `icon`
+ * (a data URL, open-exchange before 0.11.0), else its `iconUrl` (0.34.0, P12: origin-relative,
+ * `/@discovery/1color/<token>/icon`) made absolute against the list's URL.
+ */
 export async function readTokens(base: string, fetchFn: typeof fetch = fetch): Promise<EnabledToken[]> {
-  const a = await getJson(`${base}/tokens`, fetchFn);
+  const url = `${base}/tokens`;
+  const a = await getJson(url, fetchFn);
   return (Array.isArray(a) ? (a as Record<string, unknown>[]) : [])
     .filter((t) => typeof t.tokenId === "string" && typeof t.status === "string" && STATUSES.has(t.status))
     .map((t) => ({
@@ -215,7 +149,7 @@ export async function readTokens(base: string, fetchFn: typeof fetch = fetch): P
       topic: typeof t.topic === "string" ? t.topic : `tm_color_${String(t.tokenId)}`,
       sym: typeof t.sym === "string" ? t.sym : "",
       dec: typeof t.dec === "number" ? t.dec : 0,
-      ...(typeof t.icon === "string" ? { icon: t.icon } : {}),
+      ...(typeof t.icon === "string" ? { icon: t.icon } : typeof t.iconUrl === "string" && t.iconUrl ? { icon: new URL(t.iconUrl, url).href } : {}),
       status: t.status as EnabledToken["status"],
       since: typeof t.since === "number" ? t.since : 0,
     }));

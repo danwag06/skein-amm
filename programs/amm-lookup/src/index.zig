@@ -10,7 +10,7 @@
 //! runs `pool.check` and indexes only the pools that pass. Every map key
 //! starts with the topic (`tp` = len ‖ topic), so the index is per token; a
 //! query names its token (`tokenId`). See README.md for the map layout, the
-//! query shapes and the assumptions (the liveness join).
+//! query shapes.
 //!
 //! The listing (skein-amm 0.13.0, David Case 2026-10-22; docs/AMM.md "The listing"): a pool
 //! output is listed when
@@ -440,32 +440,6 @@ fn beatIfChanged(a: Allocator, svc: *Service) !void {
     if (comptime @hasDecl(Service, "beat")) try svc.beat(svc.name, try cbor.encode(a, v));
 }
 
-// ---------------------------------------------------------------- the liveness join (best effort; see README)
-
-/// Where the liveness program's `{identityKey → {peerId, at}}` map lives,
-/// if this service is wired to one (README, "Liveness join": the head name
-/// and shape are an assumption — no liveness program exists yet). Set by
-/// this program's own `main` (not by skein) before a `lookup` call; native
-/// tests set and clear it directly.
-pub const LiveJoin = struct { svc: *Service, map_name: []const u8 = "live" };
-threadlocal var live_join: ?LiveJoin = null;
-
-pub fn setLiveJoin(j: ?LiveJoin) void {
-    live_join = j;
-}
-
-fn liveOf(identity: []const u8) !?u64 {
-    const j = live_join orelse return null;
-    // A kernel-level MST value (`Map.get`, wallet-zig's `MValue`: kernel-zig
-    // src/cbor.zig), not wallet-zig's own richer `cbor.Value`
-    // (store.getValue/putValue) — different field names (`.int`, not
-    // `.uint`/`.nint`; `.string`, not `.text`) and no helper methods.
-    const v = (try j.svc.map(j.map_name).get(identity)) orelse return null;
-    if (v != .map) return null;
-    const at = v.get("at") orelse return null;
-    return if (at == .int and at.int >= 0) @intCast(at.int) else null;
-}
-
 // ---------------------------------------------------------------- rendering an answer
 
 fn hexOf(a: Allocator, bytes: []const u8) ![]const u8 {
@@ -493,12 +467,14 @@ fn parseOutpoint(text: []const u8) !ParsedOutpoint {
 }
 
 /// The engine's PoolState shape (amm-poc-engine/web/engine/src/types.ts)
-/// plus the outpoint string and the pool's commissionBps, from an indexed
-/// record.
+/// plus the outpoint string, the pool's commissionBps and (0.34.0) its LpPubKey (hex: the pool's id,
+/// D2), from an indexed record. (0.34.0: no `lastSeen`: the liveness join is the host's, D11.)
 fn poolStateValue(a: Allocator, rec: Value, outpoint: []const u8) !Value {
     const identity = rec.getBytes("validatorIdentityKey") orelse return error.BadIndex;
+    const lp = rec.getBytes("lpPubKey") orelse return error.BadIndex;
     var es: std.ArrayList(Entry) = .empty;
     try es.appendSlice(a, &.{
+        .{ .key = "lpPubKey", .value = .{ .text = try hexOf(a, lp) } },
         .{ .key = "outpoint", .value = .{ .text = outpoint } },
         .{ .key = "bsvReserve", .value = rec.get("bsvReserve") orelse return error.BadIndex },
         .{ .key = "tokenReserve", .value = rec.get("tokenReserve") orelse return error.BadIndex },
@@ -507,7 +483,6 @@ fn poolStateValue(a: Allocator, rec: Value, outpoint: []const u8) !Value {
         .{ .key = "commissionBps", .value = rec.get("commissionBps") orelse return error.BadIndex },
         .{ .key = "validatorIdentityKey", .value = .{ .text = try hexOf(a, identity) } },
     });
-    if (try liveOf(identity)) |ls| try es.append(a, .{ .key = "lastSeen", .value = .{ .uint = ls } });
     return .{ .map = es.items };
 }
 

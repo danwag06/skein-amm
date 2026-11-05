@@ -28,7 +28,12 @@
 //!                   who may call is the kernel's gate, 0.7.0): {fn, args} → {fn, result} | {fn, error}; `amm.swap.submit`
 //!                   answers {wait: true} and, called again with `resolved`, the record
 //!   spends          the read route `/spends?outpoint=<txid>.<vout>` (filter `spends`, 0.9.0): the chain
-//!                   state of an outpoint, a pool followed to its current output (reads.zig)
+//!                   state of an outpoint, a pool followed to its current output (reads.zig); 0.34.0:
+//!                   `?outpoint=a,b` one record per outpoint in query order (P8)
+//!   poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps
+//!                   the public read routes (0.34.0, reads.zig; docs/AMM.md "The public read API"):
+//!                   /pools/beef (P3), /positions (P4), /fees/validator (P5), /fees/commission (P6),
+//!                   /terms (P7), /tx (P9), /swaps (P10); plain GETs, cache headers per class
 //!   amm.swap.submit, amm.swap.status, amm.swap.terms   an in-VM call of the interface amm.swap/1 (relay.zig)
 //!   amm.pool.terms, amm.pool.affirm   an in-VM call of the interface amm.pool/1 (the validator's terms,
 //!                   0.9.0; the affirmation of a proposed pool, 0.11.0: amm-validator's fn `affirm`
@@ -81,6 +86,8 @@ const views = @import("views.zig");
 const relay = @import("relay.zig");
 const terms = @import("terms");
 const reads = @import("reads.zig");
+const lookup = @import("lookup");
+const amm_lookup = @import("amm_lookup");
 const app = @import("app");
 const sk = @import("sk");
 const files = @import("files");
@@ -263,6 +270,12 @@ fn call(a: Allocator, in: Value) !void {
         const ans = try spendsRead(a, in, arg);
         return vm.answer(a, if (isFilter(in)) try asFilterAnswer(a, ans) else ans);
     }
+    // The public read API (0.34.0): plain GETs over the pool lookup's answers, the chain state, the
+    // relay's records and the terms.
+    if (std.meta.stringToEnum(Read, func)) |r| {
+        const ans = try publicRead(a, in, arg, r);
+        return vm.answer(a, if (isFilter(in)) try asFilterAnswer(a, ans) else ans);
+    }
     if (isAppFn(func)) return vm.answer(a, try appCall(a, in, func, arg));
     if (eql(u8, func, "proofsByBlock")) return vm.answer(a, try proofsByBlock(a, in, arg));
     return error.UnknownFunction;
@@ -287,11 +300,110 @@ fn tokenTopic(a: Allocator) !?[]const u8 {
 const token_head = relay.app_name ++ "/token";
 
 /// The read `/spends?outpoint=<txid>.<vout>` (filter `spends`): the chain state of an outpoint
-/// (reads.zig `spendOf`).
+/// (reads.zig `spendOf`). 0.34.0 (P8): `?outpoint=a,b` (a comma in it) answers one record per
+/// outpoint in query order; one outpoint answers the single object, as before.
 fn spendsRead(a: Allocator, in: Value, arg: Value) !Value {
-    const op = reads.queryOutpoint(arg.getText("query") orelse "") orelse return reads.httpJson(a, 400, "{\"error\":\"want ?outpoint=<txid>.<vout>\"}");
+    const q = arg.getText("query") orelse "";
+    const want = "want ?outpoint=<txid>.<vout>[,<txid>.<vout>…]";
+    const text = (try reads.queryParam(a, q, "outpoint")) orelse return reads.httpError(a, 400, want);
+    const list = (try reads.queryList(a, q, "outpoint")).?;
+    if (list.len == 0) return reads.httpError(a, 400, want);
     const st = try loadState(a, in);
-    return reads.httpJson(a, 200, try reads.spendJson(a, try reads.spendOf(a, st.ch, op)));
+    if (std.mem.indexOfScalar(u8, text, ',') == null) {
+        const op = reads.parseOutpoint(list[0]) orelse return reads.httpError(a, 400, want);
+        return reads.httpCached(a, 200, "application/json", .state, try reads.spendJson(a, try reads.spendOf(a, st.ch, op)));
+    }
+    const ss = try a.alloc(reads.Spend, list.len);
+    for (list, ss) |t, *o| o.* = try reads.spendOf(a, st.ch, reads.parseOutpoint(t) orelse return reads.httpError(a, 400, want));
+    return reads.httpCached(a, 200, "application/json", .state, try reads.spendsJson(a, ss));
+}
+
+/// The public read routes' functions (0.34.0; the manifest's filters name them).
+const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps };
+
+/// One public read (reads.zig): P3 to P7, P9, P10.
+fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
+    const q = arg.getText("query") orelse "";
+    switch (r) {
+        .readTerms => return termsRead(a, in),
+        .swaps => return swapsRead(a, q),
+        .tx => return txRead(a, in, q),
+        else => {},
+    }
+    const rec = (try headRecord(a, token_head)) orelse return reads.httpError(a, 404, "no token yet: this instance has had no deploy");
+    const token = rec.getText("tokenId") orelse return reads.httpError(a, 404, "no token yet: this instance has had no deploy");
+    const st = try loadState(a, in);
+    var svc = try reads.loadLookup(a, vm.store(), try vm.head(a, try lookup.headName(a, relay.app_name, amm_lookup.service_name)));
+    const list = switch (r) {
+        .poolsBeef => "lp",
+        .positions => "lp",
+        .validatorFees => "id",
+        .commissionFees => "pkh",
+        else => unreachable,
+    };
+    const keys = try reads.queryList(a, q, list);
+    if (r == .poolsBeef) {
+        const pools = reads.currentPools(a, &svc, st.ch, token, keys) catch |e| return badQuery(a, e);
+        const txids = try a.alloc([32]u8, pools.len);
+        for (pools, txids) |p, *t| t.* = (reads.rowOutpoint(p) orelse return error.BadIndex).txid;
+        const beef = try ov.state.beefOfMany(st.ch, txids);
+        return reads.httpCached(a, 200, "application/json", .state, try reads.poolsBeefJson(a, pools, beef));
+    }
+    const ks = keys orelse return reads.httpError(a, 400, try std.fmt.allocPrint(a, "want ?{s}=k1,k2", .{list}));
+    const field = switch (r) {
+        .positions => "lpPubKeys",
+        .validatorFees => "validatorIdentityKeys",
+        .commissionFees => "commissionPkhs",
+        else => unreachable,
+    };
+    const v = reads.lookupAnswer(a, &svc, st.ch, token, field, ks) catch |e| return badQuery(a, e);
+    return reads.httpCached(a, 200, "application/json", .state, try reads.valueJson(a, v));
+}
+
+/// A lookup's refusal of a query (a key that is not hex of its length) as 400.
+fn badQuery(a: Allocator, e: anyerror) !Value {
+    if (e == error.BadQuery) return reads.httpError(a, 400, "a key that is not hex of its length");
+    return e;
+}
+
+/// P7 `/terms`: `amm.pool.terms` and `amm.swap.terms` in one, unsigned (reads.zig `termsJson`).
+fn termsRead(a: Allocator, in: Value) !Value {
+    const t = try validatorTerms(a);
+    const identity: ?[]const u8 = if (in.get("self")) |me| me.getBytes("identity") else null;
+    const v: ?reads.ValidatorTerms = if (t) |tt| .{
+        .identity = identity,
+        .peer_id = selfPeerText(a, in),
+        .lp_fee_bps = @intCast(tt.lp_fee_bps),
+        .validator_fee_bps = @intCast(tt.validator_fee_bps),
+        .commission_bps = @intCast(tt.commission_bps),
+    } else null;
+    const com = try commissionKey(a);
+    const m = try marketNow(a);
+    return reads.httpCached(a, 200, "application/json", .state, try reads.termsJson(a, v, com.pkh, m.min_commission_bps));
+}
+
+/// P9 `/tx?id=<txid>`: the transaction's Atomic BEEF from the chain state (its ancestry back to
+/// proven transactions, every input's source in it), `application/octet-stream`; `imm` only when it
+/// is proven; 404 unknown.
+fn txRead(a: Allocator, in: Value, q: []const u8) !Value {
+    const id = (try reads.queryParam(a, q, "id")) orelse return reads.httpError(a, 400, "want ?id=<txid>");
+    const txid = reads.parseTxid(id) orelse return reads.httpError(a, 400, "want ?id=<txid>: 64 hex characters");
+    const st = try loadState(a, in);
+    const beef = (try st.ch.beefOf(txid)) orelse return reads.httpError(a, 404, "unknown transaction");
+    return reads.httpCached(a, 200, "application/octet-stream", try reads.txCache(st.ch, txid), beef);
+}
+
+/// P10 `/swaps?id=<id>`: the relay record as `amm.swap.status` answers it (dag-json), unsigned.
+fn swapsRead(a: Allocator, q: []const u8) !Value {
+    const id = (try reads.queryParam(a, q, "id")) orelse return reads.httpError(a, 400, "want ?id=<swap id>");
+    const h = try AppHead.load(a);
+    var book = try relay.Book.load(a, vm.store(), h.state);
+    const args: Value = .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "id", .value = .{ .text = id } }}) };
+    return switch (try relay.statusOf(a, &book, .swap, args)) {
+        .found => |rec| reads.httpCached(a, 200, "application/json", .state, try dagjson.encode(a, try toSdk(a, try rec.answer(a)))),
+        .not_found => reads.httpError(a, 404, "not_found"),
+        .bad_id => reads.httpError(a, 400, "bad_id: 64 hex characters"),
+    };
 }
 
 /// The serving side of the direct call: one request frame, one reply frame. A utility since 0.2.0:
