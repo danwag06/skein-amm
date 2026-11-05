@@ -1541,6 +1541,26 @@ export async function setDefaultTerms(t: TermsInput): Promise<void> {
   await sendDefaults({ terms: { lpFeeBps: t.lpBps, validatorFeeBps: t.validatorBps, commissionBps: t.commissionBps } });
 }
 
+/** One token's validator terms as its instance holds them (0.35.0; P7 `GET /@<token>/amm/terms`, plain): the three fees, or null (a market only). */
+export async function tokenTerms(tokenId: TokenId): Promise<InstanceTerms["validator"]> {
+  return (await instanceTerms(tokenId)).validator;
+}
+
+/**
+ * Sets one token's validator terms (0.35.0, open-exchange 0.12.0): root's `{fn: "terms", args:
+ * {tokenId, terms: {lpFeeBps, validatorFeeBps, commissionBps} | null}}` to the swap instance's
+ * `<app>/admin`; swap emits it as a fact and the host sends it to the token's instance as root's
+ * `terms` (null: a market only). Nothing answers back: the token's `/terms` shows the result.
+ * Refused here unless each fee is an integer 0 to 10 000.
+ */
+export async function setTokenTerms(tokenId: TokenId, t: TermsInput | null): Promise<void> {
+  if (t) for (const [k, v] of Object.entries(t)) if (!Number.isInteger(v) || v < 0 || v > 10_000) throw new Error(`${k}: an integer, 0 to 10000 basis points`);
+  const { signedFor } = needWallet();
+  const me = await swapIdentity();
+  const terms = t ? { lpFeeBps: t.lpBps, validatorFeeBps: t.validatorBps, commissionBps: t.commissionBps } : null;
+  await sendMessage(signedFor(context.base), context.base, me, `${app()}/admin`, { fn: "terms", args: { tokenId: sdkTokenId(tokenId), terms } });
+}
+
 /** Clears the default validator terms (0.17.0): `{fn: "defaults", args: {terms: null}}`; a new token instance is a market only. */
 export async function clearDefaultTerms(): Promise<void> {
   await sendDefaults({ terms: null });

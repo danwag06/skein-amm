@@ -29,6 +29,8 @@ import {
   hasTerms,
   setDefaultMarket,
   setDefaultTerms,
+  setTokenTerms,
+  tokenTerms,
   setDiscovery,
   discoveryState,
   tokenBaseOf,
@@ -589,6 +591,28 @@ describe("exchange.ts, wired", () => {
     for (const bad of [{ lpBps: 30.5, validatorBps: 5, commissionBps: 0 }, { lpBps: -1, validatorBps: 5, commissionBps: 0 }, { lpBps: 30, validatorBps: 10_001, commissionBps: 0 }])
       await expect(setDefaultTerms(bad)).rejects.toThrow(/0 to 10000/);
     expect(inst.sent).toHaveLength(4);
+  });
+
+  it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {
+    inst.terms = { identity: SKEIN, peerId: "p", lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 };
+    expect(await tokenTerms(TOKEN)).toEqual({ identity: SKEIN, peerId: "p", lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 });
+    expect(inst.requests.at(-1)).toBe(`GET /@${TOKEN}/amm/terms`);
+    inst.terms = null;
+    expect(await tokenTerms(TOKEN)).toBeNull();
+    await expect(setTokenTerms(TOKEN, null)).rejects.toThrow(/Connect a wallet/);
+    connect();
+    const n = inst.requests.length;
+    await setTokenTerms(TOKEN, { lpBps: 40, validatorBps: 6, commissionBps: 3 });
+    await setTokenTerms(TOKEN, null);
+    expect(since(n).filter((r) => r.startsWith("POST"))).toEqual(["POST /sendMessage", "POST /sendMessage"]);
+    const msgs = inst.sent.map((s) => s.body.message as { recipient: Uint8Array; messageBox: string; body: Uint8Array });
+    expect(new Set(msgs.map((m) => `${Utils.toHex(Array.from(m.recipient))} ${m.messageBox}`))).toEqual(new Set([`${SKEIN} amm/admin`]));
+    expect(msgs.map((m) => decode(m.body))).toEqual([
+      { fn: "terms", args: { tokenId: TOKEN, terms: { lpFeeBps: 40, validatorFeeBps: 6, commissionBps: 3 } } },
+      { fn: "terms", args: { tokenId: TOKEN, terms: null } },
+    ]);
+    for (const bad of [{ lpBps: 30.5, validatorBps: 5, commissionBps: 0 }, { lpBps: 30, validatorBps: 10_001, commissionBps: 0 }]) await expect(setTokenTerms(TOKEN, bad)).rejects.toThrow(/0 to 10000/);
+    expect(inst.sent).toHaveLength(2);
   });
 
   it("discovery: GET /discovery; setDiscovery: root's {fn: discovery, args: {on}} to <app>/admin, the card's identity the recipient (the card read on load is used)", async () => {

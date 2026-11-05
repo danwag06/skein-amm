@@ -9,12 +9,14 @@
  * own instance at `/@<tokenId>`); the list, each enabled or disabled, with
  * Disable, and Enable again for a disabled one; and the defaults a new token
  * instance is given — its initial validator terms and market minimum (root's
- * `defaults`). A token's own terms are root's message to `/@<tokenId>` (not on
- * this page). Topic and lookup names are derived from the token id.
+ * `defaults`). Each enabled token's own terms (0.35.0): read once from its
+ * `/terms`, edited with the same three fields, sent as root's `terms {tokenId,
+ * terms}` to swap (the host forwards them to the token's instance). Topic and
+ * lookup names are derived from the token id.
  * Discovery: one switch, root's `discovery {on}` — the 1Color discovery topic
  * `tm_color` served by an instance of its own, started or stopped by the host.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { shortTokenId } from "../lib/tokenId";
 import {
   claimExchange,
@@ -25,6 +27,8 @@ import {
   setDefaultMarket,
   setDefaultTerms,
   setDiscovery,
+  setTokenTerms,
+  tokenTerms,
   useClaimStatus,
   useDefaults,
   useDiscovery,
@@ -37,6 +41,7 @@ import {
   type EnableSent,
   type RegisteredToken,
   type Session,
+  type TermsInput,
 } from "../data/exchange";
 import { NeedWallet, Notice, TokenName } from "./bits";
 
@@ -184,19 +189,59 @@ function bps(text: string): number | null {
   return n <= 10_000 ? n : null;
 }
 
-/** Default validator terms (0.17.0, root only): a new token instance's initial terms; set or clear them. */
-function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
-  const terms = defaults;
+/** The three fee fields' text (0.35.0: one form for the defaults card and each token's terms). */
+export function useTermsFields(): { lp: string; val: string; com: string; setLp: (v: string) => void; setVal: (v: string) => void; setCom: (v: string) => void; terms: TermsInput | null } {
   const [lp, setLp] = useState("");
   const [val, setVal] = useState("");
   const [com, setCom] = useState("");
-  const [error, busy, run] = useAct();
-  const [done, setDone] = useState<string | null>(null);
-  const t = terms.data ? terms.data.terms ?? null : undefined;
   const lpN = bps(lp);
   const valN = bps(val);
   const comN = bps(com);
-  const ready = lpN !== null && valN !== null && comN !== null;
+  return { lp, val, com, setLp, setVal, setCom, terms: lpN !== null && valN !== null && comN !== null ? { lpBps: lpN, validatorBps: valN, commissionBps: comN } : null };
+}
+
+/**
+ * The three fee fields and their buttons (0.35.0: shared by the defaults card and a token row's
+ * Edit). The caller's `<form>` submits (`setLabel`); `clearLabel` + `onClear` add the second button.
+ */
+export function TermsFields({ f, idPrefix, busy, setLabel, clearLabel, onClear }: { f: ReturnType<typeof useTermsFields>; idPrefix: string; busy: boolean; setLabel: string; clearLabel?: string; onClear?: () => void }) {
+  return (
+    <>
+      <div className="row row-wrap">
+        <div className="field">
+          <label htmlFor={`${idPrefix}-lp`}>LP fee (bps)</label>
+          <input id={`${idPrefix}-lp`} inputMode="numeric" value={f.lp} onChange={(e) => f.setLp(e.target.value)} aria-invalid={(f.lp !== "" && bps(f.lp) === null) || undefined} />
+        </div>
+        <div className="field">
+          <label htmlFor={`${idPrefix}-val`}>Validator fee (bps)</label>
+          <input id={`${idPrefix}-val`} inputMode="numeric" value={f.val} onChange={(e) => f.setVal(e.target.value)} aria-invalid={(f.val !== "" && bps(f.val) === null) || undefined} />
+        </div>
+        <div className="field">
+          <label htmlFor={`${idPrefix}-com`}>Commission (bps)</label>
+          <input id={`${idPrefix}-com`} inputMode="numeric" value={f.com} onChange={(e) => f.setCom(e.target.value)} aria-invalid={(f.com !== "" && bps(f.com) === null) || undefined} />
+        </div>
+      </div>
+      <div className="row row-wrap">
+        <button type="submit" className="btn btn-primary" disabled={busy || !f.terms}>
+          {busy ? "Sending…" : setLabel}
+        </button>
+        {onClear && (
+          <button type="button" className="btn btn-outline" disabled={busy} onClick={onClear}>
+            {clearLabel}
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** Default validator terms (0.17.0, root only): a new token instance's initial terms; set or clear them. */
+function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
+  const terms = defaults;
+  const f = useTermsFields();
+  const [error, busy, run] = useAct();
+  const [done, setDone] = useState<string | null>(null);
+  const t = terms.data ? terms.data.terms ?? null : undefined;
 
   return (
     <form
@@ -204,10 +249,11 @@ function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
       aria-labelledby="terms-h"
       onSubmit={(e) => {
         e.preventDefault();
+        const ready = f.terms;
         if (!ready) return;
         setDone(null);
         run(async () => {
-          await setDefaultTerms({ lpBps: lpN, validatorBps: valN, commissionBps: comN });
+          await setDefaultTerms(ready);
           setDone("The default terms are sent. They apply to the tokens enabled after this skein has taken the message.");
           terms.reload();
         });
@@ -225,42 +271,25 @@ function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
       ) : (
         <p className="fg2">No default terms: a token enabled from now on validates nothing until its own terms are set.</p>
       )}
-      <div className="row row-wrap">
-        <div className="field">
-          <label htmlFor="terms-lp">LP fee (bps)</label>
-          <input id="terms-lp" inputMode="numeric" value={lp} onChange={(e) => setLp(e.target.value)} aria-invalid={(lp !== "" && lpN === null) || undefined} />
-        </div>
-        <div className="field">
-          <label htmlFor="terms-val">Validator fee (bps)</label>
-          <input id="terms-val" inputMode="numeric" value={val} onChange={(e) => setVal(e.target.value)} aria-invalid={(val !== "" && valN === null) || undefined} />
-        </div>
-        <div className="field">
-          <label htmlFor="terms-com">Commission (bps)</label>
-          <input id="terms-com" inputMode="numeric" value={com} onChange={(e) => setCom(e.target.value)} aria-invalid={(com !== "" && comN === null) || undefined} />
-        </div>
-      </div>
-      <div className="row row-wrap">
-        <button type="submit" className="btn btn-primary" disabled={busy || !ready}>
-          {busy ? "Sending…" : "Set terms"}
-        </button>
-        {t && (
-          <button
-            type="button"
-            className="btn btn-outline"
-            disabled={busy}
-            onClick={() => {
-              setDone(null);
-              run(async () => {
-                await clearDefaultTerms();
-                setDone("Clearing is sent. Once taken, a token enabled after it validates nothing until its own terms are set.");
-                terms.reload();
-              });
-            }}
-          >
-            Clear terms
-          </button>
-        )}
-      </div>
+      <TermsFields
+        f={f}
+        idPrefix="terms"
+        busy={busy}
+        setLabel="Set terms"
+        clearLabel="Clear terms"
+        {...(t
+          ? {
+              onClear: () => {
+                setDone(null);
+                run(async () => {
+                  await clearDefaultTerms();
+                  setDone("Clearing is sent. Once taken, a token enabled after it validates nothing until its own terms are set.");
+                  terms.reload();
+                });
+              },
+            }
+          : {})}
+      />
       <span className="help">Each fee is an integer from 0 to 10000 basis points: a new token instance&apos;s initial terms. Each token&apos;s own terms, once set there, win.</span>
       {error && <Notice kind="bad">Could not send: {error}</Notice>}
       {done && <Notice kind="ok">{done}</Notice>}
@@ -387,19 +416,147 @@ function DiscoveryCard({ discovery }: { discovery: Data<Discovery> }) {
   );
 }
 
+/** A token's terms as its instance holds them (P7's `validator`). */
+type LiveTerms = { lpFeeBps: number; validatorFeeBps: number; commissionBps: number } | null;
+
+/** A token's terms, in a few words: `LP <n> · validator <n> · commission <n> bps`, or "market only". */
+export function tokenTermsText(v: LiveTerms): string {
+  return v ? `LP ${v.lpFeeBps} · validator ${v.validatorFeeBps} · commission ${v.commissionBps} bps` : "market only";
+}
+
+/** The line shown when the token's `/terms` has not followed a sent change within 10 s. */
+export const TERMS_NOT_APPLIED_TEXT = "sent, not applied yet";
+
+/** Whether the read terms are the ones sent (null: market only). */
+export function termsApplied(v: LiveTerms, want: TermsInput | null): boolean {
+  if (!want) return v === null;
+  return !!v && v.lpFeeBps === want.lpBps && v.validatorFeeBps === want.validatorBps && v.commissionBps === want.commissionBps;
+}
+
+/**
+ * After a terms change is sent: the token's `/terms` re-read until it shows `want` or `ms` pass
+ * (the host forwards swap's event to the token's instance). The last read, and whether it applied.
+ */
+export async function untilTermsApplied(read: () => Promise<LiveTerms>, want: TermsInput | null, ms = 10_000, every = 500): Promise<{ terms: LiveTerms | undefined; applied: boolean }> {
+  const end = Date.now() + ms;
+  let last: LiveTerms | undefined;
+  for (;;) {
+    last = await read().catch(() => last);
+    if (last !== undefined && termsApplied(last, want)) return { terms: last, applied: true };
+    if (Date.now() >= end) return { terms: last, applied: false };
+    await new Promise((r) => setTimeout(r, every));
+  }
+}
+
+/** An enabled token's terms (0.35.0): read once per page load; Edit opens the three fields. */
+export function TokenTermsLine({ terms, error, note }: { terms: LiveTerms | undefined; error: string | null; note: string | null }) {
+  return (
+    <>
+      {" · "}
+      {terms === undefined ? (error ? `terms not read: ${error}` : "reading terms…") : tokenTermsText(terms)}
+      {note ? ` · ${note}` : ""}
+    </>
+  );
+}
+
+function TokenTermsEdit({ t, onSent, onCancel }: { t: RegisteredToken; onSent: (want: TermsInput | null) => Promise<void>; onCancel: () => void }) {
+  const f = useTermsFields();
+  const [error, busy, run] = useAct();
+  const id = `tt-${t.tokenId.slice(0, 16)}`;
+  return (
+    <form
+      className="stack-sm"
+      aria-label={`${t.sym} terms`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        const want = f.terms;
+        if (!want) return;
+        run(async () => {
+          await setTokenTerms(t.tokenId, want);
+          await onSent(want);
+        });
+      }}
+    >
+      <TermsFields
+        f={f}
+        idPrefix={id}
+        busy={busy}
+        setLabel="Save"
+        clearLabel="Market only"
+        onClear={() =>
+          run(async () => {
+            await setTokenTerms(t.tokenId, null);
+            await onSent(null);
+          })
+        }
+      />
+      <div>
+        <button type="button" className="btn btn-outline" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+      {error && <Notice kind="bad">Could not send: {error}</Notice>}
+    </form>
+  );
+}
+
 function EnabledRow({ t }: { t: RegisteredToken }) {
   const [confirm, setConfirm] = useState(false);
   const [error, busy, run] = useAct();
-  const status = t.status === "enabled" ? "enabled" : "disabled";
+  const [terms, setTerms] = useState<LiveTerms | undefined>(undefined);
+  const [termsError, setTermsError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const enabled = t.status === "enabled";
+  useEffect(() => {
+    if (!enabled) return;
+    let live = true;
+    tokenTerms(t.tokenId).then(
+      (v) => live && setTerms(v),
+      (e: unknown) => live && setTermsError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [enabled, t.tokenId]);
+  const status = enabled ? "enabled" : "disabled";
   return (
     <li className="reg-row">
       <span className="req-text">
         <TokenName tokenId={t.tokenId} sym={t.sym} {...(t.icon ? { icon: t.icon } : {})} size="sm" />
         <span className="small muted">
           {status}
-          {t.status === "enabled" ? " · its own terms are root's message to its instance, /@<tokenId>" : ""}
+          {enabled && <TokenTermsLine terms={terms} error={termsError} note={note} />}
         </span>
       </span>
+      {enabled && !editing && (
+        <button
+          type="button"
+          className="btn btn-outline"
+          onClick={() => {
+            setNote(null);
+            setEditing(true);
+          }}
+          aria-label={`Edit ${t.sym} terms`}
+        >
+          Edit
+        </button>
+      )}
+      {enabled && editing && (
+        <TokenTermsEdit
+          t={t}
+          onCancel={() => setEditing(false)}
+          onSent={async (want) => {
+            const r = await untilTermsApplied(() => tokenTerms(t.tokenId), want);
+            if (r.terms !== undefined) {
+              setTerms(r.terms);
+              setTermsError(null);
+            }
+            setNote(r.applied ? null : TERMS_NOT_APPLIED_TEXT);
+            setEditing(false);
+          }}
+        />
+      )}
       {t.status === "enabled" ? (
         confirm ? (
           <span className="row row-wrap end">

@@ -82,3 +82,39 @@ describe("Settings: Enable a token", () => {
     expect(sent).toEqual([expect.stringMatching(/its deploy from discovery/)]);
   });
 });
+
+describe("Settings: a token's own terms (0.35.0)", () => {
+  it("the row's line: live terms as LP · validator · commission bps, or market only; a note after it", async () => {
+    const { TokenTermsLine, tokenTermsText, TERMS_NOT_APPLIED_TEXT } = await import("../src/ox/Settings");
+    const live = { lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 };
+    expect(tokenTermsText(live)).toBe("LP 30 · validator 5 · commission 25 bps");
+    expect(tokenTermsText(null)).toBe("market only");
+    expect(renderToStaticMarkup(<TokenTermsLine terms={live} error={null} note={null} />)).toBe(" · LP 30 · validator 5 · commission 25 bps");
+    expect(renderToStaticMarkup(<TokenTermsLine terms={null} error={null} note={null} />)).toBe(" · market only");
+    expect(renderToStaticMarkup(<TokenTermsLine terms={null} error={null} note={TERMS_NOT_APPLIED_TEXT} />)).toBe(" · market only · sent, not applied yet");
+  });
+
+  it("after a send, /terms is re-read until it shows the change (faked answers), else times out", async () => {
+    const { untilTermsApplied } = await import("../src/ox/Settings");
+    const answers = [{ lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 }, { lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 }, { lpFeeBps: 40, validatorFeeBps: 6, commissionBps: 3 }];
+    let reads = 0;
+    const read = async () => answers[Math.min(reads++, answers.length - 1)]!;
+    expect(await untilTermsApplied(read, { lpBps: 40, validatorBps: 6, commissionBps: 3 }, 1000, 1)).toEqual({ terms: answers[2], applied: true });
+    expect(reads).toBe(3);
+    expect(await untilTermsApplied(async () => null, null, 1000, 1)).toEqual({ terms: null, applied: true });
+    const late = await untilTermsApplied(async () => answers[0]!, null, 20, 5);
+    expect(late).toEqual({ terms: answers[0], applied: false });
+  });
+
+  it("the Edit form is the defaults card's three fields: Save and Market only", async () => {
+    const { TermsFields } = await import("../src/ox/Settings");
+    const f = { lp: "40", val: "6", com: "3", setLp: noop, setVal: noop, setCom: noop, terms: { lpBps: 40, validatorBps: 6, commissionBps: 3 } };
+    const html = renderToStaticMarkup(<TermsFields f={f} idPrefix="tt-x" busy={false} setLabel="Save" clearLabel="Market only" onClear={noop} />);
+    expect(html.match(/<input/g)).toHaveLength(3);
+    expect(html).toContain("LP fee (bps)");
+    expect(html).toContain("Validator fee (bps)");
+    expect(html).toContain("Commission (bps)");
+    expect(html).toContain(">Save<");
+    expect(html).toContain(">Market only<");
+  });
+});

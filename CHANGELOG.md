@@ -4,6 +4,19 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.35.0 (2026-11-05)
+
+- Pages only (agent-env plans/per-token-terms-2026-11-05.md; open-exchange 0.12.0): per-token
+  validator terms from Settings. `data/exchange.ts` `setTokenTerms(tokenId, terms | null)` =
+  root's `{fn: "terms", args: {tokenId, terms: {lpFeeBps, validatorFeeBps, commissionBps} |
+  null}}` to swap's `<app>/admin` (swap emits `token-terms`, the host sends it to the token's
+  instance as root's `terms`); `tokenTerms(tokenId)` = P7's `validator`. Each ENABLED row in
+  Settings' "Enabled" list reads its token's `/terms` once on load and shows `LP <n> · validator
+  <n> · commission <n> bps` or "market only"; Edit opens the default terms card's three fields
+  (one shared component, `TermsFields`) with Save and Market only; after sending, `/terms` is
+  re-read every 500 ms until it shows the change or 10 s pass ("sent, not applied yet"). Enable
+  is unchanged (a token is created with swap's defaults); the defaults cards are unchanged.
+
 ## 0.34.1 (2026-11-04)
 
 - Pages only (David, review item 8 of 0.34.0): the pools route `GET /@<token>/amm/pools` (P2) carries

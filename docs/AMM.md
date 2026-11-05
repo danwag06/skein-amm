@@ -804,7 +804,7 @@ door's `kernel.beef` on `admin` reads `chain/state`); `config["amm-config"]
 
 | route | what |
 |---|---|
-| mailbox `admin`, `kernel.beef` → `amm-config` | root's `enable {tokenId, beef}`, `disable {tokenId}`, `defaults {terms?, market?}`, each answered in `amm/admin` `{fn, request, replyTo, result \| error}` |
+| mailbox `admin`, `kernel.beef` → `amm-config` | root's `enable {tokenId, beef}`, `disable {tokenId}`, `defaults {terms?, market?}`, (0.35.0 pages; open-exchange 0.12.0's swap app) `terms {tokenId, terms: {lpFeeBps, validatorFeeBps, commissionBps} \| null}` → the event `token-terms {tokenId, terms}`, which the host sends to the token's instance as root's `terms` in `amm/validator`, each answered in `amm/admin` `{fn, request, replyTo, result \| error}` |
 | http `/tokens`, read (`tokens`) | the enable list `[{tokenId, topic, sym, dec, icon?, status, url?, since, reason?, delivered?}]`, newest first |
 | http `/defaults`, read (`defaults`) | `{terms?, market?}` |
 | http `/` prefix, read (`page`), `root: "www"` | the pages |
@@ -824,7 +824,12 @@ instances. Settings: Enable a token (2026-10-31: one list, one Enable per token 
 discovery and in the connected wallet not on the list yet; the deploy's BEEF from the wallet's
 module basket, else discovery's `ls_color` `color-admission` lookup at the host root), the enabled list with Disable / Enable again, the
 Default validator terms and Default market minimum cards; a token's own
-terms are root's message to `/@<tokenId>` (no page for it).
+terms (0.35.0): each enabled row reads its `GET /@<tokenId>/amm/terms` (P7) once
+on load and shows `LP <n> · validator <n> · commission <n> bps` or "market
+only"; Edit opens the defaults card's three fields with Save (`terms
+{tokenId, terms}` to swap's `amm/admin`) and Market only (`terms: null`), then
+re-reads `/terms` until it shows the change or 10 s pass ("sent, not applied
+yet").
 
 ## Not wired
 
