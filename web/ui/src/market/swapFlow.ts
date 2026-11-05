@@ -16,7 +16,7 @@
  * validator's slot empty), hex — known to the page, so a lost answer can be checked again.
  */
 import { Hash, Utils, type WalletInterface } from "@bsv/sdk";
-import type { PoolState } from "@amm-poc/matching-engine";
+import type { PoolState } from "@dcasegr/amm-engine";
 import { RelayError, parseSwapRecord, submitSwap, type AuthFetchLike, type SwapRecord } from "./relay";
 import { completeSwap, type CompletedSwap, type PreparedSwap } from "./swapAction";
 import { readSwap } from "../lib/overlay";

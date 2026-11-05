@@ -26,6 +26,9 @@
     ],
     "baseUrl": ".",
     "paths": {
+      "@dcasegr/amm-engine": [
+        "../engine/src/index.ts"
+      ],
       "cbor2": [
         "./node_modules/cbor2/lib/index.d.ts"
       ],

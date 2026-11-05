@@ -18,6 +18,8 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: [
+      // The engine package's source (the workspace, ../engine): its package.json names dist/.
+      { find: /^@dcasegr\/amm-engine$/, replacement: resolve(here, "../engine/src/index.ts") },
       // @1sat/actions lazily imports xdelta3-wasm (OrdFS patches, unused
       // here), whose package.json names a "module" file that is not in the
       // package (dist/xdelta3.esm.js; the file is dist/xdelta3-wasm.esm.js).

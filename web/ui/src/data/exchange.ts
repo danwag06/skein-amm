@@ -42,7 +42,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Beef, Transaction, type WalletInterface } from "@bsv/sdk";
 import { send1Color, type Send1ColorResult } from "@1sat/actions";
-import { computeSwap, type PoolState, type Plan } from "@amm-poc/matching-engine";
+import { computeSwap, type PoolState, type Plan } from "@dcasegr/amm-engine";
 import { useConnectDialog, useWallet } from "../wallet/AppWalletProvider";
 import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "../lib/tokenId";
 import { AMM_OVERLAY, FEE_RATE_SATS_PER_KB, appName, tokenBase } from "../lib/config";

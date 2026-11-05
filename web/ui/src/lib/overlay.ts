@@ -33,7 +33,7 @@
  * (BRC-207), the asset id `<txid>_<vout>`, `_0` included.
  */
 import { Beef, Utils } from "@bsv/sdk";
-import type { PoolState } from "@amm-poc/matching-engine";
+import type { PoolState } from "@dcasegr/amm-engine";
 import { parseTokenId, tokenIdText } from "./tokenId";
 
 // ---------------------------------------------------------------------------

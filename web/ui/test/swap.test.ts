@@ -11,7 +11,7 @@
 import { colorReceiptInstructions } from "@1sat/actions";
 import { colorProtocolID } from "@bsv/color-permission-module";
 import { BigNumber, ECDSA, Beef, Hash, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
-import { computeSwap, type Leg, type PoolState } from "@amm-poc/matching-engine";
+import { computeSwap, type Leg, type PoolState } from "@dcasegr/amm-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BRC29, brc29Side, isBrc29 } from "./brc29Wallet";
 import { settleStagedSwaps, stagedLegs, swapPayoutOf } from "../src/wallet/swapPayouts";

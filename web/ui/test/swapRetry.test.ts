@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Beef } from "@bsv/sdk";
-import { computeSwap, type PoolState } from "@amm-poc/matching-engine";
+import { computeSwap, type PoolState } from "@dcasegr/amm-engine";
 import type { PlannedLeg, PreparedSwap, SatsInput } from "../src/market/swapAction";
 import type { SwapOutcome } from "../src/market/swapFlow";
 import { PEER } from "./liveRead";

@@ -6,7 +6,7 @@
  * metadata (symbol, decimals, icon) comes from the wallet when it holds the
  * token's deploy output (the LP page's inventory); otherwise only the id.
  */
-import type { PoolState } from "@amm-poc/matching-engine";
+import type { PoolState } from "@dcasegr/amm-engine";
 import type { LiveAnswer, TokenTopic } from "../lib/overlay";
 import type { IconRef } from "../lp/inventory";
 import { formatAmount } from "../lp/amounts";

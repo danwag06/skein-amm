@@ -54,7 +54,7 @@ import {
   type WalletInterface,
   type WalletProtocol,
 } from "@bsv/sdk";
-import type { Direction, Leg, PoolState } from "@amm-poc/matching-engine";
+import type { Direction, Leg, PoolState } from "@dcasegr/amm-engine";
 import { PoolTemplate, decodeOneColor, type CallPlan, type PoolUtxo } from "../pool";
 import type { LookupOutput } from "../lib/overlay";
 import { isPoolRow } from "../lp/poolRows";

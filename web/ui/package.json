@@ -19,7 +19,7 @@
     "@1sat/react": "0.1.1",
     "@1sat/templates": "0.1.1",
     "@1sat/types": "0.1.1",
-    "@amm-poc/matching-engine": "file:../engine",
+    "@dcasegr/amm-engine": "file:../engine",
     "@bsv/color-permission-module": "^0.1.0",
     "@bsv/sdk": "^4.0.0",
     "@bsv/templates": "^2.1.0",

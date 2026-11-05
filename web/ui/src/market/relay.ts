@@ -54,7 +54,7 @@
  * read as DAG-JSON bytes, hex or a byte array.
  */
 import { Utils } from "@bsv/sdk";
-import type { PoolState } from "@amm-poc/matching-engine";
+import type { PoolState } from "@dcasegr/amm-engine";
 
 export const SWAP_SUBMIT_FN = "amm.swap.submit";
 export const SWAP_STATUS_FN = "amm.swap.status";

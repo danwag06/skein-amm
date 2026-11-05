@@ -1,4 +1,4 @@
-# @amm-poc/matching-engine
+# @dcasegr/amm-engine
 
 Pure TypeScript planning library for the AMM market UI's matching engine.
 No UI framework, no network: it plans swaps over an inventory of pools the
@@ -9,21 +9,31 @@ skein (2026-09-29)" (the "Market UI and matching engine" and "Commission
 fee" paragraphs), and `pool/Pool.runar.go` for the contract this
 mirrors.
 
-## Install / test
+## Install
 
 ```
-npm install
+npm install @dcasegr/amm-engine
+```
+
+ESM with type declarations (`dist/`, built by `tsc -p tsconfig.build.json`; `npm pack` builds
+it). No dependencies. Its version is the skein-amm release it is cut from (named
+`@amm-poc/matching-engine` and private before 0.36.0). The client package
+`@dcasegr/amm-client` (`../ui`, README "The packages") depends on it; the pages read this
+directory's `src/` directly (vite alias and tsconfig `paths` in `../ui`).
+
+## Test
+
+```
+npm ci
 npm test         # vitest run
 npm run typecheck
+npm run build    # dist/
 ```
-
-(No `bun` was available in the dev environment this was built in, so this
-uses `npm` + `vitest` per the task's fallback.)
 
 ## API
 
 ```ts
-import { plan, replan, computeSwap, feeAmount } from "@amm-poc/matching-engine";
+import { plan, replan, computeSwap, feeAmount } from "@dcasegr/amm-engine";
 ```
 
 ### `computeSwap(pool, direction, amountIn): SwapResult | null`

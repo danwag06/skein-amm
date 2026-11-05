@@ -5,8 +5,8 @@
  * display numbers: per-leg fees (LP, validator, commission), effective price
  * and slippage against the mid price.
  */
-import { plan as enginePlan } from "@amm-poc/matching-engine";
-import type { Direction, FixedCost, Plan, PlanRequest, PoolState } from "@amm-poc/matching-engine";
+import { plan as enginePlan } from "@dcasegr/amm-engine";
+import type { Direction, FixedCost, Plan, PlanRequest, PoolState } from "@dcasegr/amm-engine";
 import type { LiveAnswer } from "../lib/overlay";
 import { FEE_RATE_SATS_PER_KB } from "../lib/config";
 import { parseAmount } from "../lp/amounts";
