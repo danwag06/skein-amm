@@ -15,8 +15,8 @@
         // into bin/. (Its pages, www/, are outside the package's paths: scripts/color-pages.sh
         // copies them from the same tag's tarball by URL and sha256.)
         .skein_1color = .{
-            .url = "https://github.com/shruggr/skein-1color/archive/refs/tags/v0.13.3.tar.gz",
-            .hash = "skein_1color-0.13.3-_DlbUr0cIAAI9wCMG0hPUGGE4-OZqvIFzbbwqBjTF0VP",
+            .url = "https://github.com/shruggr/skein-1color/archive/refs/tags/v0.15.0.tar.gz",
+            .hash = "skein_1color-0.15.0-_DlbUllOIQDRdkliERPPxLsImTbyAwPL4Gb1pBC7h3Rb",
         },
     },
     .paths = .{

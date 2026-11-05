@@ -4,6 +4,16 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.37.0 (2026-11-05)
+
+- On skein-1color 0.15.0 (`build.zig.zon`; `bin/color-lookup.wasm` from its tag): color-lookup keeps
+  a per-token balance table over P2PKH value outputs. The token instance answers its holders under
+  one new prefix read row `/color/` (filter `colorToken` = `color-lookup.token`, the row the
+  discovery instance serves at `/`): `GET /@<token>/amm/color/<tokenId>/holders?limit=&skip=` →
+  `{count, rows: [{address, balance}]}` largest first (agent-env plans/history-api-build-2026-11-05.md
+  §2, D4). The same row answers `/color/<tokenId>` etc. as discovery does; on a token instance (no
+  `tm_color`) those are 404. zig 102.
+
 ## 0.36.0 (2026-11-05)
 
 The history reads, server side (agent-env plans/history-api-build-2026-11-05.md §1; decisions

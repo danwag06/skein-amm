@@ -1472,6 +1472,15 @@ test "read API (0.34.0): the routes and their filters in the manifest — plain 
         try testing.expect(found);
     }
     for (m.get("routes").?.array) |r| try testing.expect(!eql(u8, scbor.Value.str(r.get("address")).?, "/pools"));
+    // 0.37.0: the token's 1Color reads (color-lookup.token: /color/<tokenId>/holders) under one prefix row.
+    try testing.expectEqualStrings("color-lookup.token", scbor.Value.str(m.get("filters").?.get("colorToken")).?);
+    var prefix_row = false;
+    for (m.get("routes").?.array) |r| if (eql(u8, scbor.Value.str(r.get("address")).?, "/color/")) {
+        try testing.expect(r.get("handler") == null);
+        try testing.expectEqualStrings("colorToken", scbor.Value.str(r.get("filters").?.array[0]).?);
+        prefix_row = true;
+    };
+    try testing.expect(prefix_row);
 }
 
 test "read API (0.34.0): list parameters — comma-separated, percent-decoded, in order; absent is null" {

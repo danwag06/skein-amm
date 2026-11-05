@@ -769,6 +769,7 @@ writes fails inside the call). Exact paths match before a prefix, so
 | `/token` | read | `token` → `amm-setup.token` | 0.22.0 |
 | `/pools/beef`, `/positions`, `/fees/validator`, `/fees/commission`, `/terms`, `/tx`, `/swaps` | read | `poolsBeef`, `positions`, `validatorFees`, `commissionFees`, `readTerms`, `tx`, `swaps` → `amm-p2p.<the same>` | 0.34.0 ("The public read API") |
 | `/trades`, `/candles`, `/stats` | read | `trades`, `candles`, `stats` → `amm-p2p.<the same>` | 0.36.0 ("The history reads") |
+| `/color/` (prefix) | read | `colorToken` → `color-lookup.token` (skein-1color 0.15.0: `/color/<tokenId>/holders?limit=&skip=` → `{count, rows: [{address, balance}]}`, the token's holders from color-lookup's balance table) | 0.37.0 |
 | `/.live/tm_color_<txid>_0-live`, `/.live/ls_amm_<txid>_0-live` | the runtime's liveness read (no program, skein #138) | | |
 | `/live` | gone | | 0.5.0 (410 in 0.4.0) |
 
