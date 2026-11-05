@@ -1,6 +1,6 @@
 /**
  * 0.34.0 (D9): the rows are read here; their pools' state and fees come from ONE `GET
- * /@<token>/amm/positions?lp=k1,k2` per token (src/data/exchange.ts `myPositions`), not from
+ * /@<token>/amm/positions?lp=k1,k2` per token (src/client.ts `myPositions`), not from
  * `/spends` per row as below; the pool output's BEEF is read only when the LP acts (Close: `GET
  * /@<token>/amm/pools/beef?lp=<its key>`).
  *
@@ -29,11 +29,11 @@
  * outputIndex}` until 0.19.0).
  */
 import { Utils, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
-import { PoolTemplate } from "../pool";
-import { parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
-import { POOLS_BASKET } from "../wallet/color";
-import { POOL_TAG, isPoolRow } from "./poolRows";
-import { LP_KEY_PROTOCOL, lpKeyIdOfDescription, poolCustomInstructions, type BasketRow } from "./poolDeploy";
+import { PoolTemplate } from "../pool/index.js";
+import { parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
+import { POOLS_BASKET } from "../wallet/color.js";
+import { POOL_TAG, isPoolRow } from "./poolRows.js";
+import { LP_KEY_PROTOCOL, lpKeyIdOfDescription, poolCustomInstructions, type BasketRow } from "./poolDeploy.js";
 
 /** The wallet key that is a pool's LpPubKey (a BRC-29 key to self, or a pre-BRC-29 1Sat key). */
 export interface LpKeyRef {

@@ -32,7 +32,7 @@
 import { colorReceiptInstructions, type ColorReceipt } from "@1sat/actions";
 import { ASSETS_SELECTOR, COLOR_KEY_ID, ColorPlan, assetBasket, assetTag, colorProtocolID, type ColorRemittance } from "@bsv/color-permission-module";
 import { PublicKey, Utils, type CreateActionArgs, type InternalizeOutput, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
-import { randomBase64 } from "./brc29";
+import { randomBase64 } from "./brc29.js";
 
 export { ASSETS_SELECTOR, assetBasket, assetTag, colorProtocolID, type ColorReceipt };
 

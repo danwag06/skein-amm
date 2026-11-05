@@ -34,7 +34,7 @@
  */
 import { Beef, Utils } from "@bsv/sdk";
 import type { PoolState } from "@dcasegr/amm-engine";
-import { parseTokenId, tokenIdText } from "./tokenId";
+import { parseTokenId, tokenIdText } from "./tokenId.js";
 
 // ---------------------------------------------------------------------------
 // Names

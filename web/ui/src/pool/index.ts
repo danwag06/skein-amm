@@ -24,6 +24,6 @@ export {
   type PoolSigner,
   type SigSlot,
   type PoolBuildErrorCode,
-} from "./template";
-export { poolArtifact, artifactOf, METHOD_INDEX, type PoolMethod, type PoolVersion } from "./artifact";
-export { decodeOneColor, oneColorValuePrefix, type OneColorPrefix, type OneColorRole } from "./oneColor";
+} from "./template.js";
+export { poolArtifact, artifactOf, METHOD_INDEX, type PoolMethod, type PoolVersion } from "./artifact.js";
+export { decodeOneColor, oneColorValuePrefix, type OneColorPrefix, type OneColorRole } from "./oneColor.js";

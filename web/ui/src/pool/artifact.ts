@@ -1,5 +1,5 @@
 import type { RunarArtifact } from "../vendor/runar/runar-sdk.js";
-import poolArtifactJson from "./pool.artifact.json";
+import poolArtifactJson from "./pool.artifact.json" with { type: "json" };
 
 /**
  * The compiled Pool contract (pool/Pool.runar.go), as the Go compiler writes

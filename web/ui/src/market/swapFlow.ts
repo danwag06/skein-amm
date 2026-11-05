@@ -17,9 +17,9 @@
  */
 import { Hash, Utils, type WalletInterface } from "@bsv/sdk";
 import type { PoolState } from "@dcasegr/amm-engine";
-import { RelayError, parseSwapRecord, submitSwap, type AuthFetchLike, type SwapRecord } from "./relay";
-import { completeSwap, type CompletedSwap, type PreparedSwap } from "./swapAction";
-import { readSwap } from "../lib/overlay";
+import { RelayError, parseSwapRecord, submitSwap, type AuthFetchLike, type SwapRecord } from "./relay.js";
+import { completeSwap, type CompletedSwap, type PreparedSwap } from "./swapAction.js";
+import { readSwap } from "../lib/overlay.js";
 
 export type SwapOutcome =
   | { status: "accepted"; id: string; txid: string; completed: CompletedSwap }

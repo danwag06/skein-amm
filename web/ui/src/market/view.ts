@@ -7,9 +7,9 @@
  * token's deploy output (the LP page's inventory); otherwise only the id.
  */
 import type { PoolState } from "@dcasegr/amm-engine";
-import type { LiveAnswer, TokenTopic } from "../lib/overlay";
-import type { IconRef } from "../lp/inventory";
-import { formatAmount } from "../lp/amounts";
+import type { LiveAnswer, TokenTopic } from "../lib/overlay.js";
+import type { IconRef } from "../lp/inventory.js";
+import { formatAmount } from "../lp/amounts.js";
 
 export interface TokenMeta {
   sym?: string;

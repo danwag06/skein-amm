@@ -4,7 +4,7 @@
  * from their locking scripts with 1sat-sdk's `OneColor` (BRC-162), grouped
  * by asset id. The script is the authority for which asset an output holds;
  * the balance the page shows is the module's own (`p color balance
- * <assetTag>`, src/data/exchange.ts `myTokens`).
+ * <assetTag>`, src/client.ts `myTokens`).
  *
  * Metadata (sym/dec/icon) comes from the overlay (the token list, else the
  * deploy lookup) and, for a deploy output the wallet holds, from the deploy
@@ -13,8 +13,8 @@
  */
 import { OneColor, type OneColorIcon } from "@1sat/templates";
 import { Script } from "@bsv/sdk";
-import type { ImageContent } from "./images";
-import { parseOutpoint, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
+import type { ImageContent } from "./images.js";
+import { parseOutpoint, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
 
 export type TokenRole = "deploy" | "value" | "authority";
 

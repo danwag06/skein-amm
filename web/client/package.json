@@ -1,0 +1,41 @@
+{
+  "name": "@dcasegr/amm-client",
+  "version": "0.36.0",
+  "type": "module",
+  "description": "The Open Exchange client (skein-amm): reads, swap, pool deploy / close / rebalance, move back and positions over a BRC-100 wallet, bound to one exchange by createClient. No React, no styles, no wallet provider.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shruggr/skein-amm.git",
+    "directory": "web/client"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "npm --prefix ../engine run build && rm -rf dist && ../ui/node_modules/.bin/tsc -p tsconfig.build.json && mkdir -p dist/vendor/runar && cp ../ui/src/vendor/runar/LICENSE ../ui/src/vendor/runar/NOTICE dist/vendor/runar/",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@1sat/actions": "0.1.2",
+    "@dcasegr/amm-engine": "0.36.0",
+    "cbor2": "^2.3.0"
+  },
+  "peerDependencies": {
+    "@1sat/templates": "^0.1.1",
+    "@bsv/color-permission-module": "^0.1.0",
+    "@bsv/sdk": "^4.0.0"
+  }
+}

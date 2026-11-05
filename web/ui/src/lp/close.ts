@@ -21,15 +21,15 @@
  *      own submit. Nothing is taken in afterwards and nothing is kept in the browser.
  */
 import { Beef, PublicKey, Transaction, type WalletInterface } from "@bsv/sdk";
-import { PoolTemplate, type CallPlan } from "../pool";
-import { poolUtxoFrom, spendValid } from "../market/swapAction";
-import type { LookupOutput } from "../lib/overlay";
-import type { LpKeyRef } from "./positions";
-import { identityKeyOf, isBrc29Protocol } from "../wallet/brc29";
-import { sdkTokenId } from "../lib/tokenId";
-import { newReceivingKey, transferPlanLabels } from "../wallet/color";
-import { inputIndexOf, runAppSignedAction } from "../wallet/action";
-import { tokenP2pkhScript } from "./poolDeploy";
+import { PoolTemplate, type CallPlan } from "../pool/index.js";
+import { poolUtxoFrom, spendValid } from "../market/swapAction.js";
+import type { LookupOutput } from "../lib/overlay.js";
+import type { LpKeyRef } from "./positions.js";
+import { identityKeyOf, isBrc29Protocol } from "../wallet/brc29.js";
+import { sdkTokenId } from "../lib/tokenId.js";
+import { newReceivingKey, transferPlanLabels } from "../wallet/color.js";
+import { inputIndexOf, runAppSignedAction } from "../wallet/action.js";
+import { tokenP2pkhScript } from "./poolDeploy.js";
 
 export class CloseShapeError extends Error {
   constructor(message: string) {
@@ -126,6 +126,11 @@ export async function prepareClose(i: CloseInput): Promise<PreparedClose> {
   };
 }
 
+/** The `x-topics` header of a BRC-22 submit (D14): the topics as a JSON array, `["tm_color_<assetId>"]`. */
+export function xTopics(topics: string[]): string {
+  return JSON.stringify(topics);
+}
+
 /** BRC-22's STEAK: per topic, the outputs admitted and the coins retained and removed. */
 export type Steak = Record<string, { outputsToAdmit: number[]; coinsToRetain: number[]; coinsRemoved: number[] }>;
 
@@ -138,7 +143,8 @@ export type Steak = Record<string, { outputsToAdmit: number[]; coinsToRetain: nu
  * submission stands: `steak` absent). Plain `fetch`, unsigned (0.6.3; David 2026-10-08: "We
  * shouldn't be using authfetch for the submit http method."): the front door (shruggr/skein#135)
  * admits an unsigned POST at the overlay's `submit` row (sender `*`, filter `beef`), and
- * `@bsv/sdk`'s AuthFetch refuses the `x-topics` header client-side.
+ * `@bsv/sdk`'s AuthFetch refuses the `x-topics` header client-side. 0.36.0 (D14): `x-topics` is
+ * the BRC-22 JSON array (`xTopics`), the one form the client sends (the host takes a comma list too).
  */
 export async function submitToOverlay(
   base: string,
@@ -149,7 +155,7 @@ export async function submitToOverlay(
   const url = `${new URL(base).origin}/submit`;
   const res = await fetchFn(url, {
     method: "POST",
-    headers: { "content-type": "application/octet-stream", "x-topics": topic },
+    headers: { "content-type": "application/octet-stream", "x-topics": xTopics([topic]) },
     body: new Uint8Array(beef),
   });
   const text = await res.text();

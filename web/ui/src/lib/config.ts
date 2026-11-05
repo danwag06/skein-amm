@@ -1,35 +1,17 @@
 /**
- * The skein instances this page talks to (Open Exchange, shruggr/open-exchange#1):
- * the SWAP instance that serves it (`AMM_OVERLAY`: the token list `GET
- * <base>/tokens`, the defaults, root's enable /
- * disable / defaults / discovery messages) and, per enabled token, that token's own
- * instance (`tokenBase`: `<origin>/@<tokenId>/amm`, its pools, prices, liveness, `/call`, `/submit`,
- * `/spends`). Every request goes to one of those (a GET by plain `fetch`; every POST through
- * the connected wallet's BRC-104 `AuthFetch`, since a skein takes no unsigned
- * POST; src/lib/overlay.ts), or to the connected BRC-100 wallet. There are no DEV keys or DEV services.
+ * The skein instances the client talks to (Open Exchange, shruggr/open-exchange#1): the SWAP
+ * instance whose app base the client is given (`createClient({origin})`, `exchangeBase`: the
+ * token list `GET <base>/tokens`, the defaults, root's enable / disable / defaults / discovery
+ * messages) and, per enabled token, that token's own instance (`tokenBase`:
+ * `<origin>/@<tokenId>/amm`, its pools, prices, liveness, `/call`, `/submit`, `/spends`). Every
+ * request goes to one of those (a GET by plain `fetch`; every POST through the connected
+ * wallet's BRC-104 `AuthFetch`, since a skein takes no unsigned POST; src/lib/overlay.ts), or to
+ * the connected BRC-100 wallet.
  *
- *   AMM_OVERLAY        the AMM app's base URL: `https://<handle>.<host>/<app>`
- *                      or a host's dev form `<host>/@<handle>/<app>` (0.34.0: the
- *                      public read API's GETs, src/lib/overlay.ts; POST call and
- *                      sendMessage, signed; POST submit at the host root). The pages are the app's `www/`, served at
- *                      `<base>/` (index.html), so the base is the page's own
- *                      directory (`appBaseOf`; at the origin's root, `<origin>/amm`);
- *                      `VITE_AMM_OVERLAY` overrides
- *                      it (a dev server on another origin)
- *   VITE_AMM_PEER_OVERLAY  another instance's AMM base URL (no default): the
- *                      Validator page reads this instance's liveness (and
- *                      peer ID) from the peer's liveness read of its token
- *                      topics (GET .live/tm_color_<txid>_0-live, kept where the peer
- *                      is a market for the token)
- *   VITE_FEE_RATE      the miner fee rate, sats per 1000 bytes, the Swap page
- *                      applies to the swap transaction it builds (default
- *                      100). The swap's fee is paid from the leg's exact sats
- *                      output, so the rate is fixed here, not by the wallet
- *
- * From a dev server (serve.sh) the instance is called cross-origin: it sends
- * permissive CORS headers.
+ * 0.36.0 (D9): pure — no `import.meta.env`, no `location`. The pages compute their base and fee
+ * rate from their URL and env (src/ox/env.ts: `VITE_AMM_OVERLAY`, `VITE_FEE_RATE`, `appBaseOf`)
+ * and pass them to `createClient`.
  */
-const env = (import.meta as { env?: Record<string, string | undefined> }).env;
 
 /**
  * The app's base URL from the page's own URL: the directory the page is
@@ -62,35 +44,25 @@ export function appName(base: string): string | undefined {
   }
 }
 
-function pageHref(): string | undefined {
-  try {
-    return typeof location === "undefined" ? undefined : location.href;
-  } catch {
-    return undefined;
-  }
-}
-
-/** No trailing slash. `VITE_AMM_OVERLAY`, else the page's own directory, else a local host's dev form. */
-export const AMM_OVERLAY = (
-  env?.VITE_AMM_OVERLAY ?? (pageHref() ? appBaseOf(pageHref()!) : undefined) ?? "http://127.0.0.1:8100/@amm/amm"
-).replace(/\/+$/, "");
-
-/** The peer instance whose liveness read (`GET .live/tm_color_<txid>_0-live`) tells us whether our heartbeat is heard. `VITE_AMM_PEER_OVERLAY`; unset or "" disables. */
-export const AMM_PEER_OVERLAY = (env?.VITE_AMM_PEER_OVERLAY ?? "").replace(/\/+$/, "");
+/** The miner fee rate a client sizes a swap with when none is given, sats per 1000 bytes (D9: today's value). */
+export const DEFAULT_FEE_RATE_SATS_PER_KB = 100;
 
 /**
- * Miner fee rate for the swap transaction the page builds, sats per 1000
- * bytes (`VITE_FEE_RATE`, default 100). The leg's sats output (`amm-swap`) is sized to the
- * swap's inputs and outputs plus this fee over the swap's size with the pool
- * input at `PoolTemplate.maxCallUnlockLength`; the contract allows no change.
+ * The swap app's base URL of an exchange (`createClient({origin})`): an origin alone
+ * (`https://swap.skein.nexus`) is the app at its root, `<origin>/amm` (skein#147, as `appBaseOf`
+ * reads a page at the origin's root); a URL with a path is the base as given. No trailing slash.
  */
-export const FEE_RATE_SATS_PER_KB = Number(env?.VITE_FEE_RATE ?? 100);
+export function exchangeBase(origin: string): string {
+  const u = new URL(origin);
+  const path = u.pathname.replace(/\/+$/, "");
+  return path === "" ? `${u.origin}/${ROOT_APP}` : `${u.origin}${path}`;
+}
 
 /**
  * A token instance's AMM base (Open Exchange, shruggr/open-exchange#1): `<origin>/@<tokenId>/amm` on the
  * origin the swap instance's base is on — the host makes each enabled token's instance at that path
  * (skein#161: a token id is a path-only handle).
  */
-export function tokenBase(tokenId: string, from: string = AMM_OVERLAY): string {
+export function tokenBase(tokenId: string, from: string): string {
   return `${new URL(from).origin}/@${tokenId}/${ROOT_APP}`;
 }

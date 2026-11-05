@@ -483,7 +483,7 @@ describe("close (0.13.0; 0.29.3 one path, a module plan): the tokens to a module
     }) as unknown as SignedFetch["fetch"];
     const r = await submitToOverlay("http://x/@tok/amm", s.topic, s.beef, fetchFn as never);
     expect(seen[0]!.url).toBe("http://x/submit");
-    expect(seen[0]!.init.headers).toEqual({ "content-type": "application/octet-stream", "x-topics": s.topic });
+    expect(seen[0]!.init.headers).toEqual({ "content-type": "application/octet-stream", "x-topics": JSON.stringify([s.topic]) });
     expect(r).toEqual({ steak: STEAK });
     expect(steakText(r)).toBe(`admitted under ${s.topic} (outputs 1)`);
     const later = (async () => new Response('{"status":"error"}', { status: 503 })) as unknown as SignedFetch["fetch"];

@@ -17,14 +17,14 @@
  * Any failed read or take-in: nothing, the next load tries again.
  */
 import { PublicKey, Transaction, Utils, type InternalizeOutput, type WalletInterface, type WalletOutput } from "@bsv/sdk";
-import { WALLET_PAYMENT, brc29PublicKey, identityKeyOf, p2pkhHexOf } from "./brc29";
-import { SWAP_BASKET, newReceivingKey, receiptOutput } from "./color";
-import { PoolTemplate, decodeOneColor } from "../pool";
-import { parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
-import { legDerivation, legKeyInputOf } from "../market/swapAction";
-import { tokenP2pkhScript } from "../lp/poolDeploy";
-import { basketRows } from "../lp/wallet";
-import { readSpends, readTx } from "../lib/overlay";
+import { WALLET_PAYMENT, brc29PublicKey, identityKeyOf, p2pkhHexOf } from "./brc29.js";
+import { SWAP_BASKET, newReceivingKey, receiptOutput } from "./color.js";
+import { PoolTemplate, decodeOneColor } from "../pool/index.js";
+import { parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
+import { legDerivation, legKeyInputOf } from "../market/swapAction.js";
+import { tokenP2pkhScript } from "../lp/poolDeploy.js";
+import { basketRows } from "../lp/wallet.js";
+import { readSpends, readTx } from "../lib/overlay.js";
 
 /**
  * Whether output `vout` of `tx` (a swap: the pool at input 0 and output 0) pays this wallet's leg

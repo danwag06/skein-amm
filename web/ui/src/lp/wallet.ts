@@ -6,7 +6,7 @@
  * Nothing here talks to an overlay.
  */
 import { Beef, type WalletInterface, type WalletOutput } from "@bsv/sdk";
-import { LIST_LIMIT } from "../wallet/color";
+import { LIST_LIMIT } from "../wallet/color.js";
 
 /** A basket's outputs with locking scripts, tags and customInstructions. */
 export async function basketRows(wallet: WalletInterface, basket: string): Promise<WalletOutput[]> {

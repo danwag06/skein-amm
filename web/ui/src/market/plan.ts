@@ -7,18 +7,23 @@
  */
 import { plan as enginePlan } from "@dcasegr/amm-engine";
 import type { Direction, FixedCost, Plan, PlanRequest, PoolState } from "@dcasegr/amm-engine";
-import type { LiveAnswer } from "../lib/overlay";
-import { FEE_RATE_SATS_PER_KB } from "../lib/config";
-import { parseAmount } from "../lp/amounts";
-import { priceOf, validatorStatus, withLastSeen, type ValidatorStatus } from "./view";
+import type { LiveAnswer } from "../lib/overlay.js";
+import { DEFAULT_FEE_RATE_SATS_PER_KB } from "../lib/config.js";
+import { parseAmount } from "../lp/amounts.js";
+import { priceOf, validatorStatus, withLastSeen, type ValidatorStatus } from "./view.js";
 
 /**
  * Estimated miner fee per leg, in sats, for the engine's per-leg cost
  * heuristic: a swap is ~13 KB (docs/notes.md, "Publishing is part of
- * submit") at `VITE_FEE_RATE`. The exact fee of a built swap is
- * `swapFunding` (src/market/swapAction.ts).
+ * submit") at the client's fee rate (`createClient`'s `feeRateSatsPerKb`; the pages':
+ * `VITE_FEE_RATE`). The exact fee of a built swap is `swapFunding` (src/market/swapAction.ts).
  */
-export const LEG_MINER_FEE_SATS = BigInt(Math.ceil(13 * FEE_RATE_SATS_PER_KB));
+export function legMinerFeeSats(satsPerKb: number): bigint {
+  return BigInt(Math.ceil(13 * satsPerKb));
+}
+
+/** `legMinerFeeSats` at the default rate (100 sats/kB). */
+export const LEG_MINER_FEE_SATS = legMinerFeeSats(DEFAULT_FEE_RATE_SATS_PER_KB);
 
 export interface SwapForm {
   direction: Direction;
@@ -50,6 +55,8 @@ export function buildPlanRequest(
   pools: PoolState[],
   live: LiveAnswer | null,
   dec: number | undefined,
+  /** The miner fee rate the per-leg cost is estimated at, sats per 1000 bytes (default 100). */
+  satsPerKb: number = DEFAULT_FEE_RATE_SATS_PER_KB,
 ): PlanInput {
   if (!form.amount.trim()) return { ok: false, error: "enter an amount" };
   let amountIn: bigint;
@@ -78,7 +85,7 @@ export function buildPlanRequest(
           : "no pool's validator is live on this token",
     };
   }
-  const fixedCost: FixedCost = { minerFeeSats: LEG_MINER_FEE_SATS };
+  const fixedCost: FixedCost = { minerFeeSats: legMinerFeeSats(satsPerKb) };
   return {
     ok: true,
     request: {

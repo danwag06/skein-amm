@@ -18,7 +18,7 @@
  */
 import { encode, decode } from "cbor2";
 import { AuthFetch, Utils, type WalletInterface } from "@bsv/sdk";
-import { appName } from "./config";
+import { appName } from "./config.js";
 
 export interface SignedPost {
   fetch(url: string, config?: { method?: string; headers?: Record<string, string>; body?: unknown }): Promise<Response>;

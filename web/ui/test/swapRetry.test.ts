@@ -128,7 +128,7 @@ describe("executeSwap: a leg refused pool_spent (0.31.1)", () => {
     outcomes.push(spent());
     const r = await executeSwap(q);
     expect(relayed).toHaveLength(1);
-    expect(r.legs[0]).toEqual({ poolOutpoint: OLD.replace("_", "."), status: "failed", error: "refused: pool_spent" });
+    expect(r.legs[0]).toEqual({ poolOutpoint: OLD.replace("_", "."), status: "failed", error: "refused: pool_spent", kind: "pool_spent" });
   });
 
   it("the newest state names a validator that is not live: the leg fails \"the pool's validator changed\", nothing relayed again", async () => {

@@ -40,15 +40,15 @@
  *    derivation the page checks.
  */
 import { P2PKH, PublicKey, Transaction, Utils, type CreateActionOutput, type InternalizeOutput, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
-import { PoolTemplate, RESCINDED_KEY, decodeOneColor, oneColorValuePrefix, type PoolArgs, type PoolFields } from "../pool";
-import { deriveFirstValidatorPubKey } from "../lib/keys";
-import { priceOf } from "../market/view";
-import { callApp, dagBytes, readBytes, type AuthFetchLike } from "../market/relay";
-import { BRC29_PROTOCOL, brc29KeyID, randomBase64 } from "../wallet/brc29";
-import { POOLS_BASKET, runTokenAction, transferPlanLabels, type HeldOutput } from "../wallet/color";
-import { POOL_OP, POOL_TAG, isPoolRow } from "./poolRows";
-import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
-import { submitToOverlay, steakText } from "./close";
+import { PoolTemplate, RESCINDED_KEY, decodeOneColor, oneColorValuePrefix, type PoolArgs, type PoolFields } from "../pool/index.js";
+import { deriveFirstValidatorPubKey } from "../lib/keys.js";
+import { priceOf } from "../market/view.js";
+import { callApp, dagBytes, readBytes, type AuthFetchLike } from "../market/relay.js";
+import { BRC29_PROTOCOL, brc29KeyID, randomBase64 } from "../wallet/brc29.js";
+import { POOLS_BASKET, runTokenAction, transferPlanLabels, type HeldOutput } from "../wallet/color.js";
+import { POOL_OP, POOL_TAG, isPoolRow } from "./poolRows.js";
+import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
+import { submitToOverlay, steakText } from "./close.js";
 
 export { POOL_OP, POOL_TAG, isPoolRow };
 

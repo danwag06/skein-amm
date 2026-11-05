@@ -55,13 +55,13 @@ import {
   type WalletProtocol,
 } from "@bsv/sdk";
 import type { Direction, Leg, PoolState } from "@dcasegr/amm-engine";
-import { PoolTemplate, decodeOneColor, type CallPlan, type PoolUtxo } from "../pool";
-import type { LookupOutput } from "../lib/overlay";
-import { isPoolRow } from "../lp/poolRows";
-import { basketBeef } from "../lp/wallet";
-import { outpointText, parseOutpoint, parseTokenId, sdkTokenId } from "../lib/tokenId";
-import { WALLET_PAYMENT, identityKeyOf, newBrc29Payout, type Brc29Payout } from "../wallet/brc29";
-import { SWAP_BASKET, newReceivingKey, receiptOutput, type ColorReceipt } from "../wallet/color";
+import { PoolTemplate, decodeOneColor, type CallPlan, type PoolUtxo } from "../pool/index.js";
+import type { LookupOutput } from "../lib/overlay.js";
+import { isPoolRow } from "../lp/poolRows.js";
+import { basketBeef } from "../lp/wallet.js";
+import { outpointText, parseOutpoint, parseTokenId, sdkTokenId } from "../lib/tokenId.js";
+import { WALLET_PAYMENT, identityKeyOf, newBrc29Payout, type Brc29Payout } from "../wallet/brc29.js";
+import { SWAP_BASKET, newReceivingKey, receiptOutput, type ColorReceipt } from "../wallet/color.js";
 
 /** A P2PKH unlocking script's upper bound: push(DER ≤ 72 + sighash byte) + push(33-byte key). */
 export const P2PKH_UNLOCK_LENGTH = 108;

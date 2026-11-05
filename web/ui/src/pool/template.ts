@@ -64,9 +64,9 @@ import {
   UnlockingScript,
   Utils,
 } from "@bsv/sdk";
-import { METHOD_INDEX, artifactOf, poolArtifact, type PoolMethod, type PoolVersion } from "./artifact";
-import { decodeOneColor, oneColorValuePrefix } from "./oneColor";
-import { deriveFirstValidatorPubKey, deriveValidatorPubKey } from "../lib/keys";
+import { METHOD_INDEX, artifactOf, poolArtifact, type PoolMethod, type PoolVersion } from "./artifact.js";
+import { decodeOneColor, oneColorValuePrefix } from "./oneColor.js";
+import { deriveFirstValidatorPubKey, deriveValidatorPubKey } from "../lib/keys.js";
 
 // ---------------------------------------------------------------------------
 // Types

@@ -46,15 +46,15 @@
  *     keeps them as its change and pays the fee (`moveBackSats`).
  */
 import { Beef, P2PKH, PublicKey, Transaction, Utils, type InternalizeOutput, type WalletInterface } from "@bsv/sdk";
-import { decodeOneColor } from "../pool";
-import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId";
-import { basketBeef, basketRows } from "../lp/wallet";
-import { tokenP2pkhScript } from "../lp/poolDeploy";
-import { steakText, submitToOverlay, type Steak } from "../lp/close";
-import { SWAP_BASKET, SWAP_PROTOCOL, newReceivingKey, swapInstructions, swapSatsInstructions, runTokenAction, transferPlanLabels } from "../wallet/color";
-import { identityKeyOf } from "../wallet/brc29";
-import { inputIndexOf, runAppSignedAction, type Spends } from "../wallet/action";
-import { P2PKH_UNLOCK_LENGTH, satsInputsOf, signP2pkhWithWallet, spendValid, tokenInputsOf, type SatsInput, type TokenInput } from "./swapAction";
+import { decodeOneColor } from "../pool/index.js";
+import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
+import { basketBeef, basketRows } from "../lp/wallet.js";
+import { tokenP2pkhScript } from "../lp/poolDeploy.js";
+import { steakText, submitToOverlay, type Steak } from "../lp/close.js";
+import { SWAP_BASKET, SWAP_PROTOCOL, newReceivingKey, swapInstructions, swapSatsInstructions, runTokenAction, transferPlanLabels } from "../wallet/color.js";
+import { identityKeyOf } from "../wallet/brc29.js";
+import { inputIndexOf, runAppSignedAction, type Spends } from "../wallet/action.js";
+import { P2PKH_UNLOCK_LENGTH, satsInputsOf, signP2pkhWithWallet, spendValid, tokenInputsOf, type SatsInput, type TokenInput } from "./swapAction.js";
 
 /** The keyID prefix of an `amm-swap` key (`SWAP_PROTOCOL`, counterparty self). */
 export const SWAP_KEY_PREFIX = "amm-swap-";
