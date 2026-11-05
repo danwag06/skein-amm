@@ -39,9 +39,16 @@ exchange with another wallet, keeping what was read and quoted.
 
 The client (each an async function unless noted):
 
-- the exchange: `enabledList`, `registeredTokens`, `tokenBaseOf`, `hostedTokens`,
-  `watchHostedPools` / `watchTokenPools` (event streams, sync, return the unsubscribe),
+- the exchange: `enabledList`, `registeredTokens`, `tokenBaseOf`, `hostedTokens` (the token list
+  and ONE `GET /amm/stats`), `watchTokenPools` (the token's pools route as an event stream: the
+  whole answer, then each `change` — `swap`, `deploy`, `close`, `rescind` — applied to it, one it
+  cannot apply read again once; sync, returns the unsubscribe; 0.39.0: no host-wide stream),
   `claimStatus`, `isRoot`, `claimExchange`, `discoveryBase` (sync), `onDataChange` (sync);
+- history (0.39.0, plain GETs): `trades(tokenId, {from?, to?, limit?, before?, lp?})` →
+  `{trades, next}`, `trade(tokenId, txid)` → a `Trade` or null, `candles(tokenId, {tf, from, to})`,
+  `stats(tokenId)`, `statsAll({ids?})`, `holders(tokenId, {limit?, skip?})` → `{count, rows}`,
+  `positionsAll(lpKeys)` (every enabled token's positions); amounts bigints, prices `{sats,
+  tokens}` pairs of bigints (base units both);
 - swap: `quoteSwap(request, poolsAnswer, {sym, dec})` (sync: the engine's plan over the pools the
   token's pools stream gave), `executeSwap(quote, {onProgress})`, `checkSwapAgain(leg)`,
   `walletSats`;
@@ -54,7 +61,7 @@ The client (each an async function unless noted):
   `setDefaultTerms`, `clearDefaultTerms`, `setDefaultMarket`, `clearDefaultMarket`, `tokenTerms`,
   `setTokenTerms`, `discoveryState`, `setDiscovery`.
 
-Pure helpers beside it: `hostedFrom`, `poolViews`, `poolFees`, `withLeg`, `hasTerms`,
+Pure helpers beside it: `hostedFrom`, `applyPoolChange`, `parseChange`, `poolViews`, `poolFees`, `withLeg`, `hasTerms`,
 `enableCandidates`, `topicOf`, `lookupOf`, `ammLookupOf`, `walletDeployBeef`, `exchangeBase`,
 `tokenBase`; the types (`Quote`, `SwapResult`, `LegResult`, `Position`, `WalletToken`, …).
 

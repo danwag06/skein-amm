@@ -443,6 +443,11 @@ topic manager's beat carries no prices.
 (`GET /@<token>/amm/pools`, the host's, held as an event stream; the landing page holds the
 host-wide `GET /amm/pools`); the beat is the validator liveness filter only, applied by the host.
 
+0.39.0 (D7): the landing page reads the host-wide stats `GET /amm/stats` once per load and every
+30 s while the tab is visible (price, TVL, pools; no host-wide stream); the token's pools stream
+sends the whole answer once, then one `change` per pool change, applied by the page to the answer
+it holds.
+
 ## The public read API (0.34.0)
 
 David Case, 2026-11-04 (agent-env plans/exchange-api-2026-11-04.md §0, D1–D25): the exchange's

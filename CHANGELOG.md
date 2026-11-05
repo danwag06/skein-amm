@@ -4,6 +4,22 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.39.0 (2026-11-05)
+
+The pages and the client on open-exchange 0.13.0's reads (agent-env plans/history-api-2026-11-05.md D7):
+
+- The token's pools stream (`watchTokenPools`, the Swap page): `pools` replaces the held answer;
+  each `change` is applied to it — `swap`: the row of `trade.lpPubKey` replaced by `pool`;
+  `deploy`: `pool` added; `close` / `rescind`: the row at `outpoint` removed. A change it cannot
+  apply (no answer held, an unknown kind, a row not held) → the route is read once more. Swap
+  re-quotes after either as before.
+- The landing (and every page's token list): no host-wide stream; ONE `GET /amm/stats` per load,
+  again every 30 s while the tab is visible — price, liquidity (TVL) and pools, the same columns.
+  `watchHostedPools` gone.
+- The client: `trades`, `trade`, `candles`, `stats`, `statsAll`, `holders`, `positionsAll` (plain
+  GETs of the history routes; amounts bigints, prices `{sats, tokens}`), the `PoolChange` type,
+  `applyPoolChange`. `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.39.0.
+
 ## 0.38.2 (2026-11-05)
 
 Pins only: the pages and `@dcasegr/amm-client` on `@1sat/actions` 0.1.3 (pages: `@1sat/connect`, `@1sat/react` 0.1.2), the 2026-11-05 `@1sat/*` release (`@1sat/wallet` 0.1.2 under them). 0.38.1's client pinned 0.1.2. No code change.
