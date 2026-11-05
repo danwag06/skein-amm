@@ -17,7 +17,7 @@
 //
 //   zig build              → zig-out/bin/{amm-lookup,amm-validator,amm-p2p,amm-setup}.wasm
 //   zig build bin          the four, written to bin/, with bin/overlay.wasm (skein-overlay v0.20.2)
-//                          and bin/color-{topic,lookup}.wasm (skein-1color v0.15.0) copied beside
+//                          and bin/color-{topic,lookup}.wasm (skein-1color v0.15.1) copied beside
 //   zig build test         the pool library and the programs' tests, natively
 //
 // The pages are built from the page library web/ui by shruggr/open-exchange (its scripts/www.sh), whose swap app serves them.

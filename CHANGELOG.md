@@ -4,6 +4,14 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.38.1 (2026-11-05)
+
+- On skein-1color 0.15.1 (`build.zig.zon`; `bin/color-lookup.wasm` from its tag): color-lookup files
+  a deploy by what it holds — a supply-holding deploy is a value output (in `ls_color_<assetId>`'s
+  `{tokenId}` answer and the holders), an authority-only deploy an authority. Until 0.15.0 every
+  deploy was filed as an authority, an error. The web packages follow the release version
+  (`@dcasegr/amm-engine`, `@dcasegr/amm-client` 0.38.1; nothing in them changed). zig 102.
+
 ## 0.38.0 (2026-11-05)
 
 The client as two npm packages (agent-env plans/client-packages-build-2026-11-05.md; decisions
