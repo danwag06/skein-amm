@@ -1,5 +1,5 @@
 /**
- * Rebalance (skein-amm 0.36.0, D11, David Case 2026-11-05): a position's pool closed and a new
+ * Rebalance (skein-amm 0.38.0, D11, David Case 2026-11-05): a position's pool closed and a new
  * one deployed in ONE wallet createAction — what Close (src/lp/close.ts) and the deploy
  * (src/lp/poolDeploy.ts) do, in the same transaction. A position is still only deployed or
  * closed (the pool A's Close, a new pool B with a new LP key); wallet-built, so nothing is

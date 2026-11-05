@@ -17,7 +17,7 @@ npm install @dcasegr/amm-engine
 
 ESM with type declarations (`dist/`, built by `tsc -p tsconfig.build.json`; `npm pack` builds
 it). No dependencies. Its version is the skein-amm release it is cut from (named
-`@amm-poc/matching-engine` and private before 0.36.0). The client package
+`@amm-poc/matching-engine` and private before 0.38.0). The client package
 `@dcasegr/amm-client` (`../ui`, README "The packages") depends on it; the pages read this
 directory's `src/` directly (vite alias and tsconfig `paths` in `../ui`).
 

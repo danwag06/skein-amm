@@ -1,5 +1,5 @@
 /**
- * createClient's swap (0.36.0, D9, D12, D13): the fee rate the client was given reaches every
+ * createClient's swap (0.38.0, D9, D12, D13): the fee rate the client was given reaches every
  * leg's `satsPerKb`; `onProgress` reports staging → relaying → (repricing) → done / failed in that
  * order; a quote gone since the read throws `ClientError` pool_spent. The leg's build and the relay
  * are faked as in swapRetry.test.ts.

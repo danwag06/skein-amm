@@ -1,5 +1,5 @@
 /**
- * The package `@dcasegr/amm-client` (src/index.ts; 0.36.0, D8–D14): `createClient` bound to the
+ * The package `@dcasegr/amm-client` (src/index.ts; 0.38.0, D8–D14): `createClient` bound to the
  * origin and fetch it is given (D9: no env, no location), the shared names (D10), the error kinds
  * (D13) and the `x-topics` form (D14).
  */

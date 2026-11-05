@@ -143,7 +143,7 @@ export type Steak = Record<string, { outputsToAdmit: number[]; coinsToRetain: nu
  * submission stands: `steak` absent). Plain `fetch`, unsigned (0.6.3; David 2026-10-08: "We
  * shouldn't be using authfetch for the submit http method."): the front door (shruggr/skein#135)
  * admits an unsigned POST at the overlay's `submit` row (sender `*`, filter `beef`), and
- * `@bsv/sdk`'s AuthFetch refuses the `x-topics` header client-side. 0.36.0 (D14): `x-topics` is
+ * `@bsv/sdk`'s AuthFetch refuses the `x-topics` header client-side. 0.38.0 (D14): `x-topics` is
  * the BRC-22 JSON array (`xTopics`), the one form the client sends (the host takes a comma list too).
  */
 export async function submitToOverlay(

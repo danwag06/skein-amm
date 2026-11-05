@@ -1,5 +1,5 @@
 /**
- * The pages' data layer (skein-amm 0.9.0; 0.36.0, D8–D14): ONE client of the exchange
+ * The pages' data layer (skein-amm 0.9.0; 0.38.0, D8–D14): ONE client of the exchange
  * (`createClient`, src/client.ts — the package `@dcasegr/amm-client`) bound to the pages' own
  * base and fee rate (src/ox/env.ts: `VITE_AMM_OVERLAY` else the page's directory,
  * `VITE_FEE_RATE`) and the connected wallet, and the React hooks over it. The pages import from

@@ -4,6 +4,43 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.38.0 (2026-11-05)
+
+The client as two npm packages (agent-env plans/client-packages-build-2026-11-05.md; decisions
+D8–D14 in plans/history-api-2026-11-05.md). `web/` only; the pages' behaviour unchanged.
+
+- **`@dcasegr/amm-engine` 0.38.0** (`web/engine`, was the private `@amm-poc/matching-engine`): tsc
+  to `dist/` (ESM + `.d.ts`). The pages import it by that name from `../engine/src`.
+- **`@dcasegr/amm-client` 0.38.0** (`web/client`, built from `web/ui/src` minus the pages: `ox/`,
+  `App.tsx`, `main.tsx`, `data/exchange.ts`, `components/`, `AppWalletProvider.tsx`, fonts,
+  styles): `createClient({origin, feeRateSatsPerKb, wallet, fetch, signedFor?, identityKey?})`
+  (`src/client.ts`, D9) binds the reads, the swap, deploy / close / rebalance, Move back,
+  positions and the settings to the exchange's origin (or app base), the fee rate (default 100),
+  the wallet and the fetch; nothing in it reads `import.meta.env` or `location` (`src/lib/config.ts`
+  pure; the pages' env in `src/ox/env.ts`); `withWallet` keeps what was read and quoted. Peers
+  `@bsv/sdk`, `@1sat/templates`, `@bsv/color-permission-module`.
+- Exports (D10, `src/index.ts`): `POOLS_BASKET`, `SWAP_BASKET`, `SWAP_PROTOCOL`, `SWAP_KEY_PREFIX`,
+  `swapKeyID`, `swapInstructions`, `swapSatsInstructions`, `LP_KEY_PROTOCOL`, `LP_KEY_MARK`,
+  `lpKeyDescription`, `lpKeyIdOfDescription`, `POOL_TAG`, `POOL_OP`, `isPoolRow`,
+  `poolCustomInstructions`, `POOL_DEPLOY_LABEL`, `SWAP_TTL_MS`, `transferPlanLabels`,
+  `newReceivingKey`, `receiptOutput`, `xTopics`; nothing renamed.
+- **Rebalance** (D11, `src/lp/rebalance.ts`, `rebalancePosition`): ONE wallet createAction — the
+  old pool the explicit input unlocked as Close does, output 0 the new pool affirmed by
+  `amm.pool.affirm`, more tokens selected by the module / fewer to a module receiving key of the
+  user's own (owned output 1), the sats difference to or from the wallet's change; labels the
+  plan's + `amm-pool-deploy` + `amm-close`; the new pool filed in `amm-pools`. Not on a page.
+- Swap progress (D12): `executeSwap(quote, {onProgress})` reports `staging`, `relaying`,
+  `repricing`, `done` / `failed`; Move back returns what it did.
+- Error kinds (D13, `src/errors.ts`): `ClientError {kind, message}` for `stale_pool`,
+  `fee_mismatch`, `quote_mismatch`, `slippage`, `pool_spent`, `user_rejected`, `no_answer`,
+  `refused`, `network`; a failed swap leg carries `kind` beside its text.
+- `x-topics` (D14): every submit sends the BRC-22 JSON array (`xTopics`).
+- runar-sdk vendored (`web/ui/src/vendor/runar`, MIT, Rúnar d207ee8e: the import closure the pool
+  template uses, two import lines edited, NOTICE): runar-sdk 1.0.0-rc.1 is not published; the
+  `RUNAR_DIR` alias is gone. Relative imports under `src/` name `.js`.
+- vitest 248 (236 + 12; two assertions moved to D13/D14: a failed leg's `kind`, the JSON
+  `x-topics`), engine 35.
+
 ## 0.37.0 (2026-11-05)
 
 - On skein-1color 0.15.0 (`build.zig.zon`; `bin/color-lookup.wasm` from its tag): color-lookup keeps

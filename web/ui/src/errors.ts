@@ -1,5 +1,5 @@
 /**
- * The client's named error kinds (0.36.0, D13): a `ClientError` carries one of `CLIENT_ERROR_KINDS`
+ * The client's named error kinds (0.38.0, D13): a `ClientError` carries one of `CLIENT_ERROR_KINDS`
  * and the message the pages showed before (unchanged: the pages keep their texts). Thrown by the
  * client's functions where the error is of one of these kinds; a swap leg's result carries the
  * kind beside its text (`LegResult.kind`). Other errors (a missing wallet, a malformed answer…)

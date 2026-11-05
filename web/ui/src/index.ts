@@ -1,5 +1,5 @@
 /**
- * `@dcasegr/amm-client` (skein-amm 0.36.0, D8): the Open Exchange client without the pages —
+ * `@dcasegr/amm-client` (skein-amm 0.38.0, D8): the Open Exchange client without the pages —
  * `createClient` (src/client.ts) and the names two sites must share to file identical wallet rows
  * (D10). ESM + types, no React, no styles, no wallet provider: the caller connects a BRC-100 wallet
  * and passes it in. README "The packages".

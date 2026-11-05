@@ -496,10 +496,10 @@ describe("close (0.13.0; 0.29.3 one path, a module plan): the tokens to a module
 
 
 // ---------------------------------------------------------------------------
-// Rebalance (0.36.0, D11)
+// Rebalance (0.38.0, D11)
 // ---------------------------------------------------------------------------
 
-describe("rebalance (0.36.0, D11): the old pool closed and a new one deployed in ONE wallet createAction", () => {
+describe("rebalance (0.38.0, D11): the old pool closed and a new one deployed in ONE wallet createAction", () => {
   // The old pool A: the fixture's after swap2, its LP key the wallet's BRC-29 LP key.
   const lpRef = { protocolID: BRC29 as never, keyID: LP_KEY_ID, counterparty: "self" };
   const lpPub = side.publicKey({ ...lpRef, forSelf: true });

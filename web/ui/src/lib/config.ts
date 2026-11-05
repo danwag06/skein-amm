@@ -8,7 +8,7 @@
  * wallet's BRC-104 `AuthFetch`, since a skein takes no unsigned POST; src/lib/overlay.ts), or to
  * the connected BRC-100 wallet.
  *
- * 0.36.0 (D9): pure — no `import.meta.env`, no `location`. The pages compute their base and fee
+ * 0.38.0 (D9): pure — no `import.meta.env`, no `location`. The pages compute their base and fee
  * rate from their URL and env (src/ox/env.ts: `VITE_AMM_OVERLAY`, `VITE_FEE_RATE`, `appBaseOf`)
  * and pass them to `createClient`.
  */

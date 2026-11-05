@@ -1,5 +1,5 @@
 /**
- * The Open Exchange client (skein-amm 0.36.0, D8–D14, agent-env plans/history-api-2026-11-05.md):
+ * The Open Exchange client (skein-amm 0.38.0, D8–D14, agent-env plans/history-api-2026-11-05.md):
  * every read and every action the pages make, bound by `createClient` to one exchange, one miner
  * fee rate, one wallet and one fetch — configuration as arguments (D9): nothing here reads
  * `import.meta.env` or `location`. No React; the pages (src/data/exchange.ts) hold a client and
@@ -183,7 +183,7 @@ export interface LegResult {
   repriced?: true;
   /** 0.34.0 (D15): no answer yet — the swap's id, for "Check again" (`checkSwapAgain`). */
   checkId?: string;
-  /** 0.36.0 (D13): the failure's kind, when it has one (`error` stays the text). */
+  /** 0.38.0 (D13): the failure's kind, when it has one (`error` stays the text). */
   kind?: ClientErrorKind;
 }
 

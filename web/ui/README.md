@@ -1,6 +1,6 @@
 # @amm-poc/market-ui
 
-**skein-amm 0.36.0: the client as packages** (agent-env plans/history-api-2026-11-05.md D8–D14;
+**skein-amm 0.38.0: the client as packages** (agent-env plans/history-api-2026-11-05.md D8–D14;
 "The packages" below). `src/` minus the pages (`src/ox/`, `App.tsx`, `main.tsx`,
 `src/data/exchange.ts`, `components/`, `wallet/AppWalletProvider.tsx`, fonts, styles) is the
 package `@dcasegr/amm-client` (`../client`), the engine `@dcasegr/amm-engine` (`../engine`).
@@ -361,7 +361,7 @@ pages' sections below.
 
 Vite reads these at build / dev-server start (a local `.env.local`,
 untracked, or the environment); `src/ox/env.ts` reads them for the pages and passes the base
-and the fee rate to `createClient` (0.36.0: the client package reads no env):
+and the fee rate to `createClient` (0.38.0: the client package reads no env):
 
 | variable | default | what |
 |---|---|---|
@@ -481,7 +481,7 @@ npm run typecheck
 
 ## The instance (config)
 
-`src/lib/config.ts` (0.36.0: pure; the pages' values from `src/ox/env.ts`): every request the
+`src/lib/config.ts` (0.38.0: pure; the pages' values from `src/ox/env.ts`): every request the
 page makes goes to one skein instance,
 the AMM app's base URL (the page's own directory, else `VITE_AMM_OVERLAY`),
 or to the connected BRC-100 wallet. Under that
@@ -710,7 +710,7 @@ public/
   manifest.json        W3C manifest + metanet.groupPermissions ("Permissions")
 src/
   lib/
-    config.ts          appBaseOf / exchangeBase / tokenBase / the default fee rate (pure; 0.36.0)
+    config.ts          appBaseOf / exchangeBase / tokenBase / the default fee rate (pure; 0.38.0)
     overlay.ts         the public read API's client (0.34.0): pools routes and their stream, /pools/beef, /positions, /terms, /spends, /tx, /swaps, discovery's /tokens and /<token>/deploy; topic names
     keys.ts             validator signing-key derivation (BRC-43, "amm pool", anyone counterparty)
   pool/
@@ -1225,7 +1225,7 @@ aff025c3 worktree of 0.8.0–0.11.0) is gone. `@1sat/actions` lazily imports
 
 ## runar-sdk, vendored
 
-0.36.0: `runar-sdk` is a vendored copy in `src/vendor/runar` (MIT, `LICENSE` and `NOTICE`
+0.38.0: `runar-sdk` is a vendored copy in `src/vendor/runar` (MIT, `LICENSE` and `NOTICE`
 there): the modules runar-sdk's `contract.ts`, `state.ts` and `script-utils.ts` import, and the
 eight `runar-ir-schema` modules its barrel re-exports, from the Rúnar commit go.mod pins for the
 Go side (d207ee8e). Copied unchanged except two import lines (`NOTICE`): their `runar-ir-schema`
@@ -1242,7 +1242,7 @@ checkout (`RUNAR_DIR`, default `~/Work/bsv/runar`), which a published package ca
 
 ## The packages
 
-0.36.0 (D8–D14): two npm packages, ESM + `.d.ts` built by `tsc` (no bundler), versioned with the
+0.38.0 (D8–D14): two npm packages, ESM + `.d.ts` built by `tsc` (no bundler), versioned with the
 skein-amm release; David publishes them.
 
 | package | directory | what |

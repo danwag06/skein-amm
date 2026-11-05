@@ -1,5 +1,5 @@
 /**
- * What the pages take from their URL and env (0.36.0, D9: the client takes these as arguments,
+ * What the pages take from their URL and env (0.38.0, D9: the client takes these as arguments,
  * src/lib/config.ts and src/client.ts; before, src/lib/config.ts read them itself):
  *
  *   AMM_OVERLAY        the AMM app's base URL: `https://<handle>.<host>/<app>`
