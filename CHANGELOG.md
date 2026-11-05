@@ -4,6 +4,10 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.38.2 (2026-11-05)
+
+Pins only: the pages and `@dcasegr/amm-client` on `@1sat/actions` 0.1.3 (pages: `@1sat/connect`, `@1sat/react` 0.1.2), the 2026-11-05 `@1sat/*` release (`@1sat/wallet` 0.1.2 under them). 0.38.1's client pinned 0.1.2. No code change.
+
 ## 0.38.1 (2026-11-05)
 
 - On skein-1color 0.15.1 (`build.zig.zon`; `bin/color-lookup.wasm` from its tag): color-lookup files
