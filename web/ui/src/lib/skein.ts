@@ -168,12 +168,19 @@ export interface Defaults {
 export interface ExchangeWallet {
   sats: number;
   outputs: number;
+  /** The admin's withdrawals, each kept by the swap app once proven; n counts from 1. */
+  withdrawals: { n: number; txid: string; sats: number; at: number }[];
 }
 
-/** `GET <swap>/wallet`: `{sats, outputs}`. */
+/** `GET <swap>/wallet`: `{sats, outputs, withdrawals}`. */
 export async function readWallet(base: string, fetchFn: typeof fetch = fetch): Promise<ExchangeWallet> {
   const a = (await getJson(`${base}/wallet`, fetchFn)) as Record<string, unknown> | null;
-  return { sats: typeof a?.sats === "number" ? a.sats : 0, outputs: typeof a?.outputs === "number" ? a.outputs : 0 };
+  const ws = Array.isArray(a?.withdrawals) ? (a.withdrawals as Record<string, unknown>[]) : [];
+  return {
+    sats: typeof a?.sats === "number" ? a.sats : 0,
+    outputs: typeof a?.outputs === "number" ? a.outputs : 0,
+    withdrawals: ws.filter((w) => typeof w.n === "number" && typeof w.txid === "string").map((w) => ({ n: w.n as number, txid: w.txid as string, sats: Number(w.sats ?? 0), at: Number(w.at ?? 0) })),
+  };
 }
 
 /** Discovery (`GET <swap>/discovery`): root's last decision, on or off, and since when (ms); the host starts or stops the discovery instance. */

@@ -69,7 +69,7 @@ describe("manifest.json", () => {
       // encryption's counterparty is the recipient, unknown here (the group check skips a level-2 entry without one: it asks per send).
       [[2, "metanet handles envelope"], "anyone"],
       [[2, "message encryption"], undefined],
-      ...["amm-swap", "amm-swap-stage", "amm-pool-deploy", "amm-close", "amm-payout"].map((l) => [[1, `action label ${l}`], undefined]),
+      ...["amm-swap", "amm-swap-stage", "amm-pool-deploy", "amm-close", "amm-payout", "amm-withdraw"].map((l) => [[1, `action label ${l}`], undefined]),
       // The `p nosend expiry seconds <n>` label goes to the toolbox's built-in BRC-177 module, which asks this one fixed label.
       [[1, "action label BRC-177 noSend expiry"], undefined],
     ]);

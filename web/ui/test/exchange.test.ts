@@ -8,7 +8,7 @@
  * and the request counts per page are measured here ("requests per page").
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
+import { Beef, Hash, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { ColorPlan } from "@bsv/color-permission-module";
 import { sdk as toolboxSdk } from "@bsv/wallet-toolbox-client";
 const { specOpWalletBalance } = toolboxSdk;
@@ -31,6 +31,8 @@ import {
   setDefaultTerms,
   setEnablePrice,
   exchangeWallet,
+  withdrawAll,
+  settleWithdrawals,
   setTokenTerms,
   tokenTerms,
   setDiscovery,
@@ -194,6 +196,7 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     if (path === "/tokens") return json(inst.enabled);
     if (path === "/defaults") return json(inst.defaults);
     if (path === "/wallet") return json(inst.wallet);
+    if (path === "/wallet/tx") return u.searchParams.get("n") === "1" ? bytes([1, 1, 1, 1, 9]) : json({ status: "error" }, 404);
     if (path === "/discovery") return json(inst.discovery);
     if (path === "/admin") return json({});
     if (path === "/pools") return json(inst.enabled.filter((t) => t.status === "enabled").flatMap((t) => (inst.pools[String(t.tokenId)] ?? []).map((p) => ({ tokenId: t.tokenId, ...(p as object) }))));
@@ -614,8 +617,35 @@ describe("exchange.ts, wired", () => {
     for (const bad of [0, -5, 1.5]) await expect(setEnablePrice(bad)).rejects.toThrow(/whole number/);
     expect(inst.sent).toHaveLength(2);
     inst.wallet = { sats: 2000, outputs: 1 };
-    expect(await exchangeWallet()).toEqual({ sats: 2000, outputs: 1 });
+    expect(await exchangeWallet()).toEqual({ sats: 2000, outputs: 1, withdrawals: [] });
     expect(inst.requests.at(-1)).toBe("GET /amm/wallet");
+  });
+
+  it("withdrawAll (0.42.0): the admin's {fn: withdraw, args: {lockingScript}} — the P2PKH of the BRC-29 key for self of withdrawal n (the read's count + 1); nothing to withdraw refused before sending; settleWithdrawals takes in each withdrawal the wallet lacks as a wallet payment from /amm/wallet/tx", async () => {
+    // A wallet whose keys are points (the derived key's P2PKH is built).
+    const KEY = PrivateKey.fromRandom().toPublicKey().toString();
+    setExchangeContext({ wallet: { ...fakeWallet(), getPublicKey: async () => ({ publicKey: KEY }) } as unknown as WalletInterface, signedFor: () => af as never, identityKey: ME });
+    inst.wallet = { sats: 0, outputs: 0, withdrawals: [] };
+    await expect(withdrawAll()).rejects.toThrow(/nothing to withdraw/);
+    expect(inst.sent).toHaveLength(0);
+    inst.wallet = { sats: 2000, outputs: 1, withdrawals: [] };
+    expect(await withdrawAll()).toBe(1);
+    const m = inst.sent[0]!.body.message as { messageBox: string; body: Uint8Array };
+    expect(m.messageBox).toBe("amm/admin");
+    expect(decode(m.body)).toEqual({ fn: "withdraw", args: { lockingScript: new P2PKH().lock(PublicKey.fromString(KEY).toAddress()).toHex() } });
+    // Withdrawal 1 kept: taken in once, as a wallet payment to its derived key.
+    inst.wallet = { sats: 0, outputs: 0, withdrawals: [{ n: 1, txid: "ab".repeat(32), sats: 1977, at: 5 }] };
+    const n0 = internalized.length;
+    expect(await settleWithdrawals()).toEqual(["ab".repeat(32)]);
+    const ia = internalized.at(-1) as { tx: number[]; outputs: Array<{ outputIndex: number; protocol: string; paymentRemittance: Record<string, string> }>; labels: string[] };
+    expect(internalized.length).toBe(n0 + 1);
+    expect(ia.tx).toEqual([1, 1, 1, 1, 9]);
+    expect(ia.labels).toEqual(["amm-withdraw"]);
+    expect(ia.outputs).toEqual([{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: {
+      derivationPrefix: Utils.toBase64(Utils.toArray("amm withdraw", "utf8")),
+      derivationSuffix: Utils.toBase64(Hash.sha256(Utils.toArray(`${SKEIN} 1`, "utf8"))),
+      senderIdentityKey: KEY,
+    } }]);
   });
 
   it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {

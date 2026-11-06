@@ -137,6 +137,6 @@ describe("Settings: the price to enable a token and the exchange's wallet (0.42.
   it("the texts", () => {
     expect(enablePriceText(undefined)).toBe("Off: only you enable tokens.");
     expect(enablePriceText(2000)).toBe("Anyone with a wallet can enable a token for 2000 sats. Only you can disable it.");
-    expect(exchangeWalletText({ sats: 2000, outputs: 1 })).toBe("Exchange wallet: 2000 sats");
+    expect(exchangeWalletText({ sats: 2000, outputs: 1, withdrawals: [] })).toBe("Exchange wallet: 2000 sats");
   });
 });

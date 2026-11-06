@@ -148,6 +148,8 @@ export const discoveryState: AmmClient["discoveryState"] = (...a: Parameters<Amm
 export const setDiscovery: AmmClient["setDiscovery"] = (...a: Parameters<AmmClient["setDiscovery"]>) => (client.setDiscovery as (...x: unknown[]) => ReturnType<AmmClient["setDiscovery"]>)(...a);
 export const setEnablePrice: AmmClient["setEnablePrice"] = (...a: Parameters<AmmClient["setEnablePrice"]>) => (client.setEnablePrice as (...x: unknown[]) => ReturnType<AmmClient["setEnablePrice"]>)(...a);
 export const exchangeWallet: AmmClient["exchangeWallet"] = (...a: Parameters<AmmClient["exchangeWallet"]>) => (client.exchangeWallet as (...x: unknown[]) => ReturnType<AmmClient["exchangeWallet"]>)(...a);
+export const withdrawAll: AmmClient["withdrawAll"] = (...a: Parameters<AmmClient["withdrawAll"]>) => (client.withdrawAll as (...x: unknown[]) => ReturnType<AmmClient["withdrawAll"]>)(...a);
+export const settleWithdrawals: AmmClient["settleWithdrawals"] = () => client.settleWithdrawals();
 
 // ---------------------------------------------------------------------------
 // Session

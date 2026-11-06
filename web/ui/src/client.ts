@@ -41,7 +41,8 @@
  * an outpoint is `<txid>.<vout>`. Amounts are bigints in base units; prices
  * are numbers: sats per whole token.
  */
-import { Beef, Transaction, type WalletInterface } from "@bsv/sdk";
+import { Beef, Hash, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import { WALLET_PAYMENT, brc29PublicKey, identityKeyOf, p2pkhHexOf } from "./wallet/brc29.js";
 import { send1Color, type Send1ColorResult } from "@1sat/actions";
 import { nextLeg, priceOf, type Leg, type PoolState, type Plan, type PricePair } from "@dcasegr/amm-engine";
 import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "./lib/tokenId.js";
@@ -577,6 +578,10 @@ export interface EnableCandidate {
   onDiscovery: boolean;
   inWallet: boolean;
 }
+
+/** 0.42.0: a withdrawal's BRC-29 derivation prefix (base64 of this text) and its action label in the admin's wallet. */
+export const WITHDRAW_PREFIX = "amm withdraw";
+export const WITHDRAW_LABEL = "amm-withdraw";
 
 const canonicalId = (tokenId: string): string | null => {
   const ref = parseTokenId(tokenId);
@@ -1778,6 +1783,69 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return readWallet(swapBase, ff);
   }
 
+  /**
+   * The BRC-29 key (for self) withdrawal `n` pays (0.42.0): prefix base64 "amm withdraw", suffix base64
+   * sha256 of `<swap identity> <n>` — derived from its number, so the admin's wallet finds it again.
+   */
+  async function withdrawKey(wallet: WalletInterface, n: number): Promise<{ derivationPrefix: string; derivationSuffix: string; lockingScript: string }> {
+    const me = await swapIdentity();
+    const d = { derivationPrefix: Utils.toBase64(Utils.toArray(WITHDRAW_PREFIX, "utf8")), derivationSuffix: Utils.toBase64(Hash.sha256(Utils.toArray(`${me} ${n}`, "utf8"))) };
+    return { ...d, lockingScript: p2pkhHexOf(await brc29PublicKey(wallet, d)) };
+  }
+
+  /**
+   * Withdraws everything in the exchange's wallet to a key of the admin's own (0.42.0, open-exchange
+   * 0.15.0): the admin's `{fn: "withdraw", args: {lockingScript}}` to swap's `<app>/admin`, the script
+   * the P2PKH of `withdrawKey` for the next withdrawal number (the read's count + 1). swap's program
+   * spends every coin to it (no change); the withdrawal is kept, and listed by `exchangeWallet`, once
+   * proven; `settleWithdrawals` takes it in. → the withdrawal's number.
+   */
+  async function withdrawAll(): Promise<number> {
+    const { wallet, signedFor } = needWallet();
+    const w = await readWallet(swapBase, ff);
+    if (w.sats <= 0) throw new Error("the exchange's wallet holds nothing to withdraw");
+    const n = w.withdrawals.length + 1;
+    const k = await withdrawKey(wallet, n);
+    const me = await swapIdentity();
+    await sendMessage(signedFor(swapBase), swapBase, me, `${app()}/admin`, { fn: "withdraw", args: { lockingScript: k.lockingScript } });
+    emit();
+    return n;
+  }
+
+  /**
+   * Takes in each withdrawal this wallet has not (0.42.0): its Atomic BEEF from `GET <swap>/wallet/tx?n=`,
+   * output 0 as a wallet payment to `withdrawKey(n)` (sender the admin's own identity), labelled
+   * `amm-withdraw`; the ones held are the wallet's `amm-withdraw` actions. Never throws. → the txids taken in.
+   */
+  async function settleWithdrawals(): Promise<string[]> {
+    if (!boundWallet) return [];
+    const wallet = boundWallet;
+    const taken: string[] = [];
+    try {
+      const w = await readWallet(swapBase, freshFetch as typeof fetch);
+      if (w.withdrawals.length === 0) return [];
+      const held = new Set((await wallet.listActions({ labels: [WITHDRAW_LABEL] })).actions.map((x) => x.txid));
+      const identity = await identityKeyOf(wallet);
+      for (const x of w.withdrawals) {
+        if (held.has(x.txid)) continue;
+        try {
+          const res = await freshFetch(`${swapBase}/wallet/tx?n=${x.n}`);
+          if (!res.ok) continue;
+          const beef = Array.from(new Uint8Array(await res.arrayBuffer()));
+          const k = await withdrawKey(wallet, x.n);
+          const r = await wallet.internalizeAction({ tx: beef, outputs: [{ outputIndex: 0, protocol: WALLET_PAYMENT, paymentRemittance: { derivationPrefix: k.derivationPrefix, derivationSuffix: k.derivationSuffix, senderIdentityKey: identity } }], description: `Open Exchange withdraw ${x.n}`, labels: [WITHDRAW_LABEL] });
+          if (r.accepted) taken.push(x.txid);
+        } catch {
+          /* the next load */
+        }
+      }
+    } catch {
+      /* the next load */
+    }
+    if (taken.length > 0) emit();
+    return taken;
+  }
+
   /** The discovery instance's record (0.18.0, shruggr/skein#137; `GET <config>/discovery`): `{on: false}` until root turns it on. */
   async function discoveryState(): Promise<Discovery> {
     return readDiscovery(swapBase, ff);
@@ -1866,5 +1934,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     setDiscovery: guard(setDiscovery),
     setEnablePrice: guard(setEnablePrice),
     exchangeWallet: guard(exchangeWallet),
+    withdrawAll: guard(withdrawAll),
+    settleWithdrawals,
   };
 }

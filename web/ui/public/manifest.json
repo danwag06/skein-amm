@@ -64,6 +64,10 @@
           "description": "Label the pool payouts your wallet takes in so they are listed together."
         },
         {
+          "protocolID": [1, "action label amm-withdraw"],
+          "description": "Label the exchange's withdrawals your wallet takes in (the admin's) so they are listed together."
+        },
+        {
           "protocolID": [1, "action label BRC-177 noSend expiry"],
           "description": "Mark a token send as held for the recipient until it expires."
         }

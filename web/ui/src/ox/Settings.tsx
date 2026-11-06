@@ -17,7 +17,9 @@
  * `tm_color` served by an instance of its own, started or stopped by the host.
  * The price to enable a token (0.42.0, open-exchange 0.15.0): one field, root's `price {sats}`
  * (empty: off, only the admin enables); any signed sender may then enable a token on
- * `POST /amm/enable` for it. The exchange's wallet: the sats it holds (`GET <swap>/wallet`).
+ * `POST /amm/enable` for it. The exchange's wallet: the sats it holds (`GET <swap>/wallet`), one
+ * Withdraw (everything to a key of the admin's own; disabled at 0 sats), and each proven withdrawal
+ * taken in on load (`settleWithdrawals`).
  */
 import { useEffect, useState } from "react";
 import { shortTokenId } from "../lib/tokenId";
@@ -31,6 +33,8 @@ import {
   setDefaultTerms,
   setDiscovery,
   setEnablePrice,
+  settleWithdrawals,
+  withdrawAll,
   setTokenTerms,
   tokenTerms,
   useClaimStatus,
@@ -471,8 +475,18 @@ export function exchangeWalletText(w: ExchangeWallet): string {
   return `Exchange wallet: ${w.sats} sats`;
 }
 
-/** The exchange's wallet (0.42.0, root only): what the paid enables paid into it. */
+/** What the Withdraw button says once sent (0.42.0). */
+export const WITHDRAW_SENT_TEXT = "Withdraw sent. The sats reach your wallet once the transaction is mined.";
+
+/** The exchange's wallet (0.42.0, root only): what the paid enables paid into it, and one Withdraw. */
 function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
+  const [error, busy, run] = useAct();
+  const [done, setDone] = useState<string | null>(null);
+  useEffect(() => {
+    void settleWithdrawals().then((t) => { if (t.length > 0) wallet.reload(); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const sats = wallet.data?.sats ?? 0;
   return (
     <section className="panel stack-sm" aria-labelledby="wallet-h">
       <h2 id="wallet-h" className="h2">
@@ -483,6 +497,26 @@ function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
       ) : (
         <p className="fg2">{exchangeWalletText(wallet.data)}</p>
       )}
+      <div className="row row-wrap">
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={busy || sats <= 0}
+          onClick={() => {
+            setDone(null);
+            run(async () => {
+              await withdrawAll();
+              setDone(WITHDRAW_SENT_TEXT);
+              wallet.reload();
+            });
+          }}
+        >
+          {busy ? "Sending…" : "Withdraw"}
+        </button>
+      </div>
+      <span className="help">Everything in the exchange&apos;s wallet goes to your own wallet, less the network fee.</span>
+      {error && <Notice kind="bad">Could not send: {error}</Notice>}
+      {done && <Notice kind="ok">{done}</Notice>}
     </section>
   );
 }
