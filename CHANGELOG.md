@@ -4,6 +4,39 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.41.0 (2026-11-05)
+
+Pool events, and the validator's answer carries the transaction (agent-env
+plans/swap-balance-build-2026-11-05.md §5, David Case 2026-11-05).
+
+- On skein-overlay 0.20.4 (a lookup hook hands back events) and skein-1color 0.15.3.
+- The AMM lookup emits ONE event wherever it writes a history row (deploy, swap, close,
+  rescind): `{event: "pool", topic: "ls_amm_<tokenId>", tokenId: "<txid>_<vout>", row}`, `row`
+  the history row exactly as `/pools/history` answers it (one reader, `eventRow`, builds both:
+  text and numbers only). A rejection emits, per pool whose rows the transaction wrote, `{kind:
+  "revert", txid, poolId, at, …}` with the pool as it stands after the undo, or none of those
+  when it no longer exists.
+- The validator's `pool_spent` refusal carries `beef` (the newest pool output's transaction back
+  to proven ones) beside `pool`; the accepted answer carries the BEEF it submitted to its own
+  overlay.
+- The relay: an answer carrying `beef` is submitted to this instance's own overlay (the token
+  topic, amm-validator's submission message) and the relay thread awaits that submission's first
+  answer before it settles the record and answers the page, within `expires`; a refusal there is
+  said in `detail`, the validator's verdict stands. A local validator needs none of it.
+- The client: `executeSwap` reads the server's pool list fresh before EACH leg and keeps no list
+  of its own (the refusal-state rows, the `waiting` map and the wait on the stream are gone). The
+  stream reader of the pools route goes with no alias (`watchPools`, `applyPoolChange`,
+  `parseChange`, `PoolChange`, `watchTokenPools`); new `tokenPools` (the plain read),
+  `watchPoolEvents(tokenId | "all", onEvent)` over the host's `/@<token>/amm/events` and
+  `<origin>/amm/events`, `parsePoolEventMessage`, `PoolEventMessage`, `PoolRevert`,
+  `statsAll({fresh})`.
+- The pages: Swap reads the pools with a plain read and again (no cache), re-quoting, on a pool
+  event for its token; Landing listens to the `all` feed and reads a token's stats row again (no
+  cache) on its pool event; the 30 s read while visible stays.
+- gen/vectors: `close_after_token_change`, the LP's Close of the pool `swap_token_change` left
+  (it spends swap_token_change:0); every other vector byte for byte.
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.41.0 (the engine: no code change).
+
 ## 0.40.2 (2026-11-05)
 
 - `maxSources` (required) caps how many pools an order draws on, in place of `allowPartial` (no
