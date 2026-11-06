@@ -1318,10 +1318,10 @@ test "pool id (0.40.0): the deploy's outpoint, copied forward at each Swap with 
     try testing.expectEqual(@as(u64, 100), r0.getUint("admittedAt").?);
     try testing.expectEqual(@as(u64, 2_000), r2.getUint("admittedAt").?);
     // history: tp ‖ poolId ‖ at ‖ swaps, in that order: deploy, swap, swap.
-    const evs = try idx.poolHistory(a, &svc, tp, null, null, pid, 500);
+    const evs = try histOf(a, &svc, tp, null, null, pid, 500);
     try testing.expectEqualStrings("dss", try kinds(a, evs));
     try testing.expectEqual(@as(u64, 100), evs[0].at);
-    try testing.expectEqual(@as(u64, 2), evs[2].swaps);
+    try testing.expectEqual(@as(u64, 2), evs[2].seq);
     try testing.expectEqualSlices(u8, &e.f.txid("pool_deploy"), evs[0].rec.getBytes("txid").?);
     try testing.expectEqualSlices(u8, &w.store.outpointKey(e.f.txid("pool_deploy"), 0), evs[0].rec.getBytes("outpoint").?);
     try testing.expectEqual(@as(u64, vec.pool0.bsv), evs[0].rec.getUint("bsvReserve").?);
@@ -1353,7 +1353,7 @@ test "pool history (0.40.0): a close is written in `spent` when the spender cont
     idx.now_ms = 3_000;
     try idx.admitted(a, &svc, e.topic, cl, &.{1}, &.{0});
     try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, cl);
-    const evs = try idx.poolHistory(a, &svc, tp, null, null, pid, 500);
+    const evs = try histOf(a, &svc, tp, null, null, pid, 500);
     try testing.expectEqualStrings("dssc", try kinds(a, evs));
     const c = evs[3].rec;
     try testing.expectEqualSlices(u8, &e.f.txid("close"), c.getBytes("txid").?);
@@ -1363,7 +1363,7 @@ test "pool history (0.40.0): a close is written in `spent` when the spender cont
     try testing.expect((try svc.map("closes").link(try cat(a, &.{ tp, &be64t(3_000), &pid }))) != null);
     // Rejected: the close rows go, the pool is live again.
     try idx.rejected(a, &svc, e.topic, cl);
-    try testing.expectEqualStrings("dss", try kinds(a, try idx.poolHistory(a, &svc, tp, null, null, pid, 500)));
+    try testing.expectEqualStrings("dss", try kinds(a, try histOf(a, &svc, tp, null, null, pid, 500)));
     try testing.expectEqual(@as(usize, 0), try svc.map("closes").count());
     try testing.expectEqual(@as(usize, 1), try svc.map("pools").count());
 }
@@ -1385,7 +1385,7 @@ test "pool history (0.40.0): a Rescind writes its rescind event and the rescinde
     const r = try svc.store.getValue(a, (try svc.map("rescinded").link(try cat(a, &.{ tp, &pid }))).?);
     try testing.expectEqualSlices(u8, &pid, r.getBytes("poolId").?);
     try testing.expectEqual(@as(u64, 2), r.getUint("swaps").?);
-    const evs = try idx.poolHistory(a, &svc, tp, null, null, pid, 500);
+    const evs = try histOf(a, &svc, tp, null, null, pid, 500);
     try testing.expectEqualStrings("dssr", try kinds(a, evs));
     try testing.expectEqualSlices(u8, &w.store.outpointKey(e.f.txid("rescind"), 0), evs[3].rec.getBytes("outpoint").?);
     try testing.expectEqual(@as(usize, 1), try svc.map("closes").count());
@@ -1394,7 +1394,7 @@ test "pool history (0.40.0): a Rescind writes its rescind event and the rescinde
     idx.now_ms = 4_000;
     try idx.admitted(a, &svc, e.topic, cr, &.{1}, &.{0});
     try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("rescind"), .vout = 0 }, cr);
-    try testing.expectEqual(@as(usize, 4), (try idx.poolHistory(a, &svc, tp, null, null, pid, 500)).len);
+    try testing.expectEqual(@as(usize, 4), (try histOf(a, &svc, tp, null, null, pid, 500)).len);
     // A rejected Rescind (a fresh index): the rescind rows and the rescinded record go.
     var svc2 = try e.svc(a);
     try threeEvents(a, e, &svc2, 100, 1_000, 2_000);
@@ -1402,7 +1402,7 @@ test "pool history (0.40.0): a Rescind writes its rescind event and the rescinde
     try idx.admitted(a, &svc2, e.topic, rs, &.{0}, &.{0});
     try idx.spent(a, &svc2, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, rs);
     try idx.rejected(a, &svc2, e.topic, rs);
-    try testing.expectEqualStrings("dss", try kinds(a, try idx.poolHistory(a, &svc2, tp, null, null, pid, 500)));
+    try testing.expectEqualStrings("dss", try kinds(a, try histOf(a, &svc2, tp, null, null, pid, 500)));
     try testing.expectEqual(@as(usize, 0), try svc2.map("closes").count());
     try testing.expectEqual(@as(usize, 0), try svc2.map("rescinded").count());
 }
@@ -1418,7 +1418,7 @@ test "pool history (0.40.0): a rejected Swap's event and a rejected deploy's eve
     try threeEvents(a, e, &svc, 100, 1_000, 2_000);
     const pid = poolId(e);
     try idx.rejected(a, &svc, e.topic, try ltx(a, e.f.txid("swap_tokens_in"), e.f.tx("swap_tokens_in")));
-    try testing.expectEqualStrings("ds", try kinds(a, try idx.poolHistory(a, &svc, tp, null, null, pid, 500)));
+    try testing.expectEqualStrings("ds", try kinds(a, try histOf(a, &svc, tp, null, null, pid, 500)));
     try idx.rejected(a, &svc, e.topic, try ltx(a, e.f.txid("swap_bsv_in"), e.f.tx("swap_bsv_in")));
     try idx.rejected(a, &svc, e.topic, try ltx(a, e.f.txid("pool_deploy"), e.f.tx("pool_deploy")));
     try testing.expectEqual(@as(usize, 0), try svc.map("history").count());
@@ -1470,20 +1470,93 @@ test "pool history (0.40.0): rows at one time sort by the pool's swap count (two
     const tp = try w.store.nameKey(a, e.topic, &.{});
     try threeEvents(a, e, &svc, 100, 1_000, 1_000);
     const pid = poolId(e);
-    const evs = try idx.poolHistory(a, &svc, tp, null, null, null, 500);
+    const evs = try histOf(a, &svc, tp, null, null, null, 500);
     try testing.expectEqualStrings("dss", try kinds(a, evs));
-    try testing.expectEqual(@as(u64, 1), evs[1].swaps);
-    try testing.expectEqual(@as(u64, 2), evs[2].swaps);
+    try testing.expectEqual(@as(u64, 1), evs[1].seq);
+    try testing.expectEqual(@as(u64, 2), evs[2].seq);
     try testing.expectEqualSlices(u8, &e.f.txid("swap_bsv_in"), evs[1].rec.getBytes("txid").?);
     try testing.expectEqualSlices(u8, &e.f.txid("swap_tokens_in"), evs[2].rec.getBytes("txid").?);
     // The window: from ≤ at < to.
-    try testing.expectEqualStrings("ss", try kinds(a, try idx.poolHistory(a, &svc, tp, 101, null, null, 500)));
-    try testing.expectEqualStrings("d", try kinds(a, try idx.poolHistory(a, &svc, tp, null, 1_000, pid, 500)));
-    try testing.expectEqualStrings("dss", try kinds(a, try idx.poolHistory(a, &svc, tp, 100, 1_001, pid, 500)));
-    try testing.expectEqual(@as(usize, 0), (try idx.poolHistory(a, &svc, tp, 1_001, null, null, 500)).len);
-    try testing.expectEqual(@as(usize, 0), (try idx.poolHistory(a, &svc, tp, null, null, .{0xa0} ** 36, 500)).len);
+    try testing.expectEqualStrings("ss", try kinds(a, try histOf(a, &svc, tp, 101, null, null, 500)));
+    try testing.expectEqualStrings("d", try kinds(a, try histOf(a, &svc, tp, null, 1_000, pid, 500)));
+    try testing.expectEqualStrings("dss", try kinds(a, try histOf(a, &svc, tp, 100, 1_001, pid, 500)));
+    try testing.expectEqual(@as(usize, 0), (try histOf(a, &svc, tp, 1_001, null, null, 500)).len);
+    try testing.expectEqual(@as(usize, 0), (try histOf(a, &svc, tp, null, null, .{0xa0} ** 36, 500)).len);
     // The limit keeps the oldest.
-    try testing.expectEqualStrings("ds", try kinds(a, try idx.poolHistory(a, &svc, tp, null, null, null, 2)));
+    try testing.expectEqualStrings("ds", try kinds(a, try histOf(a, &svc, tp, null, null, null, 2)));
     // The trades of one ms: both, the newest (by txid in `trades`) first.
     try testing.expectEqual(@as(usize, 2), (try idx.trades(a, &svc, tp, .{ .from = 1_000, .to = 1_001 })).len);
+}
+
+/// `idx.poolHistory`'s events, from the first page.
+fn histOf(a: Allocator, svc: *lookup.Service, tp: []const u8, from: ?u64, to: ?u64, pid: ?[36]u8, limit: usize) ![]const idx.Event {
+    return (try idx.poolHistory(a, svc, tp, from, to, pid, limit, null)).events;
+}
+
+test "pool history (0.40.0): a Swap and the pool's close at the same ms — both rows, the close after (its sequence the swap count + 1); /pools/at then gives no row; rejecting the close makes the Swap the floor again" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    try threeEvents(a, e, &svc, 100, 1_000, 2_000);
+    const pid = poolId(e);
+    const cl = try ltx(a, e.f.txid("close"), e.f.tx("close"));
+    idx.now_ms = 2_000; // the last Swap's time
+    try idx.admitted(a, &svc, e.topic, cl, &.{1}, &.{0});
+    try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, cl);
+    const evs = try histOf(a, &svc, tp, null, null, pid, 500);
+    try testing.expectEqualStrings("dssc", try kinds(a, evs));
+    try testing.expectEqual(@as(u64, 2), evs[2].seq);
+    try testing.expectEqual(@as(u64, 3), evs[3].seq);
+    try testing.expectEqual(@as(u64, 2), evs[3].rec.getUint("swaps").?); // the record's swap count unchanged
+    try testing.expect((try svc.map("history").link(try cat(a, &.{ tp, &pid, &be64t(2_000), &be64t(2) }))) != null);
+    try testing.expectEqual(@as(usize, 0), (try idx.poolsAt(a, &svc, tp, 2_000)).len);
+    try idx.rejected(a, &svc, e.topic, cl);
+    const back = try idx.poolsAt(a, &svc, tp, 2_000);
+    try testing.expectEqual(@as(usize, 1), back.len);
+    try testing.expectEqualSlices(u8, &e.f.txid("swap_tokens_in"), back[0].getBytes("txid").?);
+    try testing.expectEqualStrings("dss", try kinds(a, try histOf(a, &svc, tp, null, null, pid, 500)));
+}
+
+test "pool history (0.40.0): forward paging — a window larger than the limit, read page by page with `after`, gives every event exactly once, in order; the same over one pool; within from/to" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    try threeEvents(a, e, &svc, 100, 1_000, 1_000);
+    const cl = try ltx(a, e.f.txid("close"), e.f.tx("close"));
+    idx.now_ms = 3_000;
+    try idx.admitted(a, &svc, e.topic, cl, &.{1}, &.{0});
+    try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, cl);
+    const all = try histOf(a, &svc, tp, null, null, null, 500);
+    try testing.expectEqualStrings("dssc", try kinds(a, all));
+    for ([_]?[36]u8{ null, poolId(e) }) |one| for ([_]usize{ 1, 2, 3 }) |limit| {
+        var got: std.ArrayList(idx.Event) = .empty;
+        var after: ?idx.EventCursor = null;
+        var pages: usize = 0;
+        while (true) : (pages += 1) {
+            const pg = try idx.poolHistory(a, &svc, tp, null, null, one, limit, after);
+            try got.appendSlice(a, pg.events);
+            if (!pg.more) break;
+            const last = pg.events[pg.events.len - 1];
+            after = .{ .at = last.at, .pid = last.pid, .seq = last.seq };
+            try testing.expect(pages < 10);
+        }
+        try testing.expectEqual(all.len, got.items.len);
+        for (all, got.items) |x, y| {
+            try testing.expectEqual(x.at, y.at);
+            try testing.expectEqual(x.seq, y.seq);
+        }
+    };
+    // Within the window: after the deploy, to 3,000 — the two Swaps, then no more.
+    const first = (try idx.poolHistory(a, &svc, tp, null, 3_000, null, 1, null)).events[0];
+    const pg = try idx.poolHistory(a, &svc, tp, null, 3_000, null, 2, .{ .at = first.at, .pid = first.pid, .seq = first.seq });
+    try testing.expectEqualStrings("ss", try kinds(a, pg.events));
+    try testing.expect(!pg.more);
 }

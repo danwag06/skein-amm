@@ -21,7 +21,7 @@
 //!   live pool;
 //! - P4 `/positions?pool=`, P5 `/fees/validator?id=`, P6 `/fees/commission?pkh=`: the lookup's
 //!   `{poolIds}`, `{validatorIdentityKeys}`, `{commissionPkhs}` answers as JSON;
-//! - (0.40.0) `/pools/at?t=<ms>` and `/pools/history?from=&to=&pool=&limit=`: the pool history
+//! - (0.40.0) `/pools/at?t=<ms>` and `/pools/history?from=&to=&pool=&limit=&after=`: the pool history
 //!   (`historyRead`);
 //! - P7 `/terms`: the validator's terms and the market's, in one (`termsJson`);
 //! - P9 `/tx?id=`: a transaction's BEEF (`imm` when proven);
@@ -528,6 +528,23 @@ fn writeEvent(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
     try jw.endObject();
 }
 
+/// `/pools/history`'s cursor text (0.40.0): hex of `at (u64 BE) ‖ poolId (36) ‖ seq (u64 BE)` (52
+/// bytes, 104 hex characters), opaque to a client.
+pub fn eventCursorText(a: Allocator, c: idx.EventCursor) ![]const u8 {
+    var b: [52]u8 = undefined;
+    std.mem.writeInt(u64, b[0..8], c.at, .big);
+    @memcpy(b[8..44], &c.pid);
+    std.mem.writeInt(u64, b[44..52], c.seq, .big);
+    return hexAlloc(a, &b);
+}
+
+pub fn parseEventCursor(text: []const u8) ?idx.EventCursor {
+    if (text.len != 104) return null;
+    var b: [52]u8 = undefined;
+    _ = std.fmt.hexToBytes(&b, text) catch return null;
+    return .{ .at = std.mem.readInt(u64, b[0..8], .big), .pid = b[8..44].*, .seq = std.mem.readInt(u64, b[44..52], .big) };
+}
+
 /// A query's `pool` parameter (0.40.0): one pool id `<txid>_<vout>`, as its outpoint key; null absent.
 fn poolParam(a: Allocator, q: []const u8) !?[36]u8 {
     const text = (try queryParam(a, q, "pool")) orelse return null;
@@ -645,7 +662,7 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, _: *Chain, placed: *w.sto
             try jw.endArray();
         },
         .poolsHistory => {
-            const bad = "want ?from=<ms>&to=<ms>&pool=<txid>_<vout>&limit=<n≤500>";
+            const bad = "want ?from=<ms>&to=<ms>&pool=<txid>_<vout>&limit=<n≤500>&after=<cursor>";
             const from = intParam(a, q, "from") catch return httpError(a, 400, bad);
             const to = intParam(a, q, "to") catch return httpError(a, 400, bad);
             const one = poolParam(a, q) catch return httpError(a, 400, bad);
@@ -654,15 +671,19 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, _: *Chain, placed: *w.sto
                 if (n == 0 or n > idx.max_events) return httpError(a, 400, bad);
                 limit = @intCast(n);
             }
+            const after: ?idx.EventCursor = if (try queryParam(a, q, "after")) |c| parseEventCursor(c) orelse return httpError(a, 400, bad) else null;
+            const page = try idx.poolHistory(a, svc, tp, from, to, one, limit, after);
             try jw.beginObject();
             try jw.objectField("events");
             try jw.beginArray();
-            for (try idx.poolHistory(a, svc, tp, from, to, one, limit)) |ev| try writeEvent(a, &jw, ev.rec);
+            for (page.events) |ev| try writeEvent(a, &jw, ev.rec);
             try jw.endArray();
-            // Paging (`before`, `next`): not built — the brief leaves its direction open (a page of an
-            // oldest-first list, a `before` cursor). `next` is null.
+            // Forward paging: the last row's position when more rows remain in the window, else null.
             try jw.objectField("next");
-            try jw.write(null);
+            if (page.more) {
+                const last = page.events[page.events.len - 1];
+                try jw.write(try eventCursorText(a, .{ .at = last.at, .pid = last.pid, .seq = last.seq }));
+            } else try jw.write(null);
             try jw.endObject();
         },
     }

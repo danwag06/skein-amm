@@ -527,14 +527,14 @@ David Case, 2026-11-05 (agent-env plans/swap-balance-build-2026-11-05.md §0 ite
 id is its deploy's outpoint, assigned by the pool lookup and copied forward at each admitted Swap;
 the LP public key is a field on the pool and a lookup key nowhere. The lookup keeps the raw history
 in the core index: one EVENT per deploy, Swap, close and rescind (`history`: `tp ‖ poolId ‖ at ‖
-swaps`; `closes`: `tp ‖ at ‖ poolId` for the ends), each stamped with the admitting step's time; a
+seq`, seq the pool's swap count for a deploy or a Swap and the swap count + 1 for a close or a rescind, so an end sorts after the last Swap at any time; `closes`: `tp ‖ at ‖ poolId` for the ends), each stamped with the admitting step's time; a
 Swap's event is its trade row. Nothing derived is stored; the reads read only the window asked for
 (skein-sdk 0.13.0's `Map.range` and `Map.floor`).
 
 | route | answer |
 |---|---|
 | `GET /@<token>/amm/pools/at?t=<ms>` | `[{poolId, outpoint, bsvReserve, tokenReserve, lpPubKey, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}]`: every pool listed at `t` (candidates the live pools and the `closes` from `t` on; each pool's row its last event at or before `t`, a deploy's or a Swap's; a close or rescind there, or no event yet, no row), in pool id order; cache `state` |
-| `GET /@<token>/amm/pools/history?from=&to=&pool=&limit=` | `{events: [<event>], next: null}`: the events with `from ≤ at < to` (both optional) of one pool (`pool=<txid>_<vout>`) or of every pool the window touches, oldest first (time, then pool id, then swaps), `limit` 1 to 500 (default 500; the oldest kept); an event `{kind, txid, poolId, outpoint?, bsvReserve?, tokenReserve?, lpPubKey, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}`, a Swap's also `{side, amountIn, amountOut, feeLp, feeValidator, feeCommission, commissionPkh, payoutPkh}`; paging (`before`, `next`) NOT built; cache `state` |
+| `GET /@<token>/amm/pools/history?from=&to=&pool=&limit=&after=` | `{events: [<event>], next}`: the events with `from ≤ at < to` (both optional) of one pool (`pool=<txid>_<vout>`) or of every pool the window touches, oldest first (time, then pool id, then event sequence), `limit` 1 to 500 (default 500); forward paging: `after=<cursor>` the rows strictly after that position, `next` the last returned row's cursor (opaque: 104 hex characters, `at (u64 BE) ‖ poolId (36) ‖ seq (u64 BE)`) when more rows remain in the window, else null; an event `{kind, txid, poolId, outpoint?, bsvReserve?, tokenReserve?, lpPubKey, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}`, a Swap's also `{side, amountIn, amountOut, feeLp, feeValidator, feeCommission, commissionPkh, payoutPkh}`; cache `state` |
 
 ## Interfaces
 

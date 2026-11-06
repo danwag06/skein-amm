@@ -75,8 +75,8 @@ pub const service_name = "ls_amm";
 /// validatorIdentityKey}` (`at` the admitting step's time in ms; the outpoint and reserves the pool's
 /// after the event, none for a close); a Swap's carries its trade fields too (`lp`, `validator`,
 /// `commission`, `bsvIn`, `commissionPkh`, `side`, `amountIn`, `amountOut`, `payoutPkh`): ONE record
-/// linked from `history`, `fees` and `trades`. `history`: `tp ‖ poolId ‖ at (u64 BE) ‖ swaps (u64
-/// BE) → <event>`; `closes`: `tp ‖ at (u64 BE) ‖ poolId → <event>` for a close or a rescind;
+/// linked from `history`, `fees` and `trades`. `history`: `tp ‖ poolId ‖ at (u64 BE) ‖ seq (u64
+/// BE) → <event>` (seq the event sequence: the swap count, + 1 for a close or a rescind); `closes`: `tp ‖ at (u64 BE) ‖ poolId → <event>` for a close or a rescind;
 /// `trades`: `tp ‖ at (u64 BE) ‖ swap txid → <the Swap's event>`. A rejection removes every row its
 /// transaction wrote. Nothing derived is stored.
 pub const maps = [_][]const u8{ "pools", "byValidator", "spentPools", "beat", "fees", "byCommission", "rescinded", "byPool", "trades", "history", "closes" };
@@ -339,9 +339,17 @@ fn tradeKey(a: Allocator, tp: []const u8, at: u64, txid: [32]u8) ![]u8 {
     return cat(a, &.{ tp, &be64(at), &txid });
 }
 
-/// `history`'s key: `tp ‖ poolId ‖ at (u64 BE) ‖ swaps (u64 BE)`.
-fn historyKey(a: Allocator, tp: []const u8, pid: []const u8, at: u64, swaps: u64) ![]u8 {
-    return cat(a, &.{ tp, pid, &be64(at), &be64(swaps) });
+/// `history`'s key: `tp ‖ poolId ‖ at (u64 BE) ‖ seq (u64 BE)`, `seq` the pool's EVENT sequence: a
+/// deploy's or a Swap's the pool's swap count (0 the deploy, n the n-th Swap), a close's or a
+/// rescind's the swap count + 1 (`eventSeq`), so an end sorts after the pool's last Swap and never
+/// shares its key, whatever the time.
+fn historyKey(a: Allocator, tp: []const u8, pid: []const u8, at: u64, seq: u64) ![]u8 {
+    return cat(a, &.{ tp, pid, &be64(at), &be64(seq) });
+}
+
+/// An event's sequence (`historyKey`): the pool's swap count, + 1 for an end (close, rescind).
+fn eventSeq(swaps: u64, ends: bool) u64 {
+    return swaps + @intFromBool(ends);
 }
 
 /// `closes`' key: `tp ‖ at (u64 BE) ‖ poolId`.
@@ -386,7 +394,7 @@ fn eventFields(a: Allocator, kind: []const u8, pf: PoolFields, txid: [32]u8, wit
 
 /// An event record (`cid`) under `history`, and (a close or a rescind) under `closes`.
 fn linkEvent(a: Allocator, svc: *Service, tp: []const u8, pf: PoolFields, cid: []const u8, ends: bool) !void {
-    try svc.map("history").putLink(try historyKey(a, tp, &pf.pool_id, now_ms, pf.swaps), cid);
+    try svc.map("history").putLink(try historyKey(a, tp, &pf.pool_id, now_ms, eventSeq(pf.swaps, ends)), cid);
     if (ends) try svc.map("closes").putLink(try closesKey(a, tp, now_ms, &pf.pool_id), cid);
 }
 
@@ -1194,43 +1202,61 @@ pub fn poolsAt(a: Allocator, svc: *Service, tp: []const u8, t: u64) ![]const Val
     return out.items;
 }
 
-/// One event as read: its record and its key's parts.
-pub const Event = struct { pid: [36]u8, at: u64, swaps: u64, rec: Value };
+/// One event as read: its record and its key's parts (`seq` the event sequence, `historyKey`).
+pub const Event = struct { pid: [36]u8, at: u64, seq: u64, rec: Value };
+
+/// A position in `/pools/history`'s order (time, pool id, event sequence): the `after` cursor.
+pub const EventCursor = struct { at: u64, pid: [36]u8, seq: u64 };
+
+fn eventLt(x: EventCursor, y: EventCursor) bool {
+    if (x.at != y.at) return x.at < y.at;
+    return switch (std.mem.order(u8, &x.pid, &y.pid)) {
+        .lt => true,
+        .gt => false,
+        .eq => x.seq < y.seq,
+    };
+}
+
+fn posOf(e: Event) EventCursor {
+    return .{ .at = e.at, .pid = e.pid, .seq = e.seq };
+}
+
+/// A `/pools/history` page: its events, and whether more rows remain in the window after them.
+pub const HistoryPage = struct { events: []const Event, more: bool };
 
 /// The most events one `/pools/history` read answers.
 pub const max_events = 500;
 
 /// `/pools/history`: the events with `from ≤ at < to` (null: unbounded) of one pool (`pool_id`) or
 /// of every pool the window can touch (`poolsSince(from)`), each pool's `history` range read, oldest
-/// first (time, then pool id, then swaps), `limit` at most (the oldest).
-pub fn poolHistory(a: Allocator, svc: *Service, tp: []const u8, from: ?u64, to: ?u64, pool_id: ?[36]u8, limit: usize) ![]const Event {
-    const ids: []const [36]u8 = if (pool_id) |p| try a.dupe([36]u8, &.{p}) else try poolsSince(a, svc, tp, from orelse 0);
+/// first (time, then pool id, then event sequence); forward paging: with `after`, only the rows
+/// strictly after that position; `limit` at most, `more` when rows remain past them.
+pub fn poolHistory(a: Allocator, svc: *Service, tp: []const u8, from: ?u64, to: ?u64, pool_id: ?[36]u8, limit: usize, after: ?EventCursor) !HistoryPage {
+    const start = @max(from orelse 0, if (after) |c| c.at else 0);
+    const ids: []const [36]u8 = if (pool_id) |p| try a.dupe([36]u8, &.{p}) else try poolsSince(a, svc, tp, start);
     var out: std.ArrayList(Event) = .empty;
     for (ids) |*pid| {
         const prefix = try cat(a, &.{ tp, pid });
-        const lo = try cat(a, &.{ prefix, &be64(from orelse 0) });
+        const lo = try cat(a, &.{ prefix, &be64(start) });
         const hi = if (to) |t| try cat(a, &.{ prefix, &be64(t) }) else try above(a, prefix);
         for (try svc.map("history").range(lo, hi)) |kv| {
             if (kv.key.len != prefix.len + 16 or kv.value != .cid) return error.BadIndex;
-            try out.append(a, .{
+            const ev: Event = .{
                 .pid = pid.*,
                 .at = std.mem.readInt(u64, kv.key[prefix.len..][0..8], .big),
-                .swaps = std.mem.readInt(u64, kv.key[prefix.len + 8 ..][0..8], .big),
+                .seq = std.mem.readInt(u64, kv.key[prefix.len + 8 ..][0..8], .big),
                 .rec = try svc.store.getValue(a, kv.value.cid),
-            });
+            };
+            if (after) |c| if (!eventLt(c, posOf(ev))) continue;
+            try out.append(a, ev);
         }
     }
     std.mem.sort(Event, out.items, {}, struct {
         fn f(_: void, x: Event, y: Event) bool {
-            if (x.at != y.at) return x.at < y.at;
-            return switch (std.mem.order(u8, &x.pid, &y.pid)) {
-                .lt => true,
-                .gt => false,
-                .eq => x.swaps < y.swaps,
-            };
+            return eventLt(posOf(x), posOf(y));
         }
     }.f);
-    return out.items[0..@min(out.items.len, limit)];
+    return .{ .events = out.items[0..@min(out.items.len, limit)], .more = out.items.len > limit };
 }
 
 /// The topic prefix (len ‖ topic) a token's rows are keyed under, from its token id.

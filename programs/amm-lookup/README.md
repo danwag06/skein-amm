@@ -89,7 +89,7 @@ order) ‖ vout, big-endian u32:
 | `spentPools` | `tp ‖ outpoint → record` (a CID link) | a checked pool a spend consumed, kept for `rejected` to give back and for `{outpoint}` to follow |
 | `fees` (0.33.0; 0.40.0 by pool id) | `tp ‖ poolId (36 bytes) ‖ swap txid → the Swap's event` (a CID link) | one row per Swap admitted, under its pool's id: the Swap's EVENT RECORD (below), carrying the trade's fields `{lp, validator, commission, bsvIn, commissionPkh, side, amountIn, amountOut, payoutPkh}`, the three fees in the input asset (src/pool.zig `feesOf`, the outputs where the relay's pair check finds them) |
 | `trades` (0.36.0) | `tp ‖ at (u64 BE, ms) ‖ swap txid → the same event` | every Swap admitted, in time order (`at` the admitting step's time); read by `/trades`, `/candles`, `/stats` |
-| `history` (0.40.0) | `tp ‖ poolId ‖ at (u64 BE) ‖ swaps (u64 BE) → event` | every deploy, Swap, close and rescind of a pool, in time order, rows at one time in the pool's swap order; read by `/pools/at`, `/pools/history`, `/trades?pool=` |
+| `history` (0.40.0) | `tp ‖ poolId ‖ at (u64 BE) ‖ seq (u64 BE) → event` | every deploy, Swap, close and rescind of a pool, in time order, rows at one time in event order (seq: the swap count for a deploy or a Swap, + 1 for a close or a rescind); read by `/pools/at`, `/pools/history`, `/trades?pool=` |
 | `closes` (0.40.0) | `tp ‖ at (u64 BE) ‖ poolId → the close's or rescind's event` | the pools' ends in time order: a read at `t` touches only the live pools and the pools closed from `t` on |
 | `byCommission` (0.33.0) | `commissionPkh (20 bytes) ‖ tp ‖ swap txid → the same fee row` | the Swaps that paid a commission (not 0) to that key hash |
 

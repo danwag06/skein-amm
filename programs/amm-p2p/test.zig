@@ -1832,7 +1832,25 @@ test "pool history reads (0.40.0): /pools/at?t= — every pool listed at t, its 
     try testing.expectEqual(@as(i64, 150), sw.get("feeLp").?.integer);
     try testing.expectEqual(@as(usize, 40), sw.get("payoutPkh").?.string.len);
     try testing.expectEqualStrings(vec.commission_pkh, sw.get("commissionPkh").?.string);
-    try testing.expectEqual(@as(usize, 1), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "limit=1", 0)))).object.get("events").?.array.items.len);
+    // Forward paging: limit=1 page by page through `next` (104 hex: at ‖ poolId ‖ seq) gives every event once, in order.
+    var seen: std.ArrayList([]const u8) = .empty;
+    var q: []const u8 = "limit=1";
+    var pages: usize = 0;
+    while (true) : (pages += 1) {
+        const pg = (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, q, 0)))).object;
+        const items = pg.get("events").?.array.items;
+        try testing.expectEqual(@as(usize, 1), items.len);
+        try seen.append(a, items[0].object.get("kind").?.string);
+        if (pg.get("next").? == .null) break;
+        const nx = pg.get("next").?.string;
+        try testing.expectEqual(@as(usize, 104), nx.len);
+        q = try std.fmt.allocPrint(a, "limit=1&after={s}", .{nx});
+        try testing.expect(pages < 5);
+    }
+    try testing.expectEqual(@as(usize, 3), seen.items.len);
+    try testing.expectEqualStrings("deploy", seen.items[0]);
+    try testing.expectEqualStrings("swap", seen.items[2]);
+    try testing.expectEqual(@as(u64, 400), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "after=zz", 0)));
     try testing.expectEqual(@as(usize, 3), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, try std.fmt.allocPrint(a, "from=7000&to=7001&pool={s}", .{try poolText(a)}), 0)))).object.get("events").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "pool=" ++ unknown_pool, 0)))).object.get("events").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "to=7000", 0)))).object.get("events").?.array.items.len);
