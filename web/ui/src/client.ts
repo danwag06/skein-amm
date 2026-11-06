@@ -1235,7 +1235,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
       const at = { leg: outpointText(leg.outpoint), amountIn: leg.amountIn, amountOut: leg.amountOut };
       progress({ phase: "relaying", ...at, filled: [...legs] });
       let outcome = await relayLeg(wallet, af, base, prepared, peerId);
-      if (outcome.status === "unknown" || outcome.status === "timeout") {
+      if (outcome.status === "unknown") {
         // (a) The overlay: what the leg spends.
         const spent = await readSpendsAll(swapBase, [outpointText(leg.outpoint), ...inputs.sats.map((r) => r.outpoint), ...inputs.tokens.map((r) => r.outpoint)], freshFetch).catch(() => [] as SpendAll[]);
         const ours = spent.find((x) => x.spentBy && x.outpoint !== outpointText(leg.outpoint));
@@ -1247,7 +1247,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
         if (spent.some((x) => x.spentBy && x.outpoint === outpointText(leg.outpoint))) continue;
         // (b) Once more to the same validator.
         outcome = await relayLeg(wallet, af, base, prepared, peerId);
-        if (outcome.status === "unknown" || outcome.status === "timeout") {
+        if (outcome.status === "unknown") {
           // (c) Race: the next leg to another pool with the same rows.
           pending.push({ prepared, leg, poolId: row.poolId });
           excluded.add(row.outpoint);
@@ -1294,7 +1294,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return out;
   }
 
-  /** One relay of a prepared leg (0.34.0: no browser note); a thrown error is no answer. */
+  /** One relay of a prepared leg (0.34.0: no browser note); a thrown error is no answer; 0.44.0: past `LEG_PATIENCE_MS` (swapFlow.ts), no answer. */
   function relayLeg(wallet: WalletInterface, af: Signed, base: string, prepared: PreparedSwap, peerId: string): Promise<SwapOutcome> {
     return relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", id: swapIdOf(prepared), reason: errText(e) }));
   }

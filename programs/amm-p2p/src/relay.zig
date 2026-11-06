@@ -26,12 +26,15 @@
 //! **The record** (one per swap, keyed by `id` = sha256 of the swap's bytes,
 //! the validator's slot still empty), in the app's state map `swaps`:
 //!
-//!   {kind: "amm-swap", id: <hex>, status: "pending" | "accepted" | "refused" | "timeout" | "failed",
-//!    funding: bytes, swap: bytes, pool: "<txid>_<vout>", validator: bytes(33), expires: ms,
+//!   {kind: "amm-swap", id: <hex>, status: "pending" | "accepted" | "refused" | "failed",
+//!    funding: bytes, swap: bytes, pool: "<txid>_<vout>", validator: bytes(33),
 //!    created: ms, updated: ms,
 //!    tx?: bytes, txid?: text                          accepted: the validator's signed swap
-//!    reason?: text, detail?: text, poolState?: map    refused (the validator's), timeout, failed
-//!    peer?, local?, dial?, stream?, thread?, request?} the relay's own: not in the answer
+//!    reason?: text, detail?: text, poolState?: map    refused (the validator's), failed
+//!    peer?, local?, call?, thread?, request?}          the relay's own: not in the answer
+//!
+//! (0.44.0) No `expires` and no `timeout`: the request carries no expiry and the relay keeps no
+//! deadline. A record written before 0.44.0 with `timeout` reads as `failed`.
 //!
 //! **The validator named** (0.4.0, shruggr/skein#120, David 2026-10-06): the
 //! caller names the validator, its identity key (`validator`) and its libp2p
@@ -40,23 +43,22 @@
 //! peer it was given, or — when `peerId` is this node's own (`Env.self_peer`)
 //! — hands the request to its own validator program in-VM (`local`).
 //!
-//! **The relay** (`advance`): a thread resting on the libp2p provider's
-//! answers to one dial (docs/MESSAGES.md "The providers", "Awaiting the
-//! answer"), bounded by `expires` (the waker, `deadline`):
+//! **The relay** (`advance`, 0.44.0): a thread resting on ONE `call` intention (skein 0.3.0,
+//! libp2p.zig `callIntention`): the host dials the peer, writes the request frame, waits on the
+//! open stream for the answer frame and answers the intention. No deadline, no retry here: the
+//! page's own re-ask is the retry (David 2026-11-06, D2/D3).
 //!
-//!   start                  emit dial {peer, protocol: /amm-validator/1/swap}; rest
-//!   {stream} (box dial)    emit send {stream, body: the package, naming the token's topic}; rest
-//!   {stream, body} (frame) the validator's answer: accepted | refused; emit close; done — or
+//!   start                  emit call {peer, protocol: /amm-validator/1/swap, body: the package,
+//!                          naming the token's topic}; rest on it
+//!   {…, body} (answered)   the validator's answer frame: accepted | refused; done — or
 //!                          (0.41.0) when it carries a `beef` (accepted: what the validator
 //!                          submitted to its own overlay; `pool_spent`: the newest pool's
-//!                          transaction), emit close and submit that BEEF to THIS instance's own
+//!                          transaction), submit that BEEF to THIS instance's own
 //!                          overlay (the token topic, the message amm-validator's submit.zig sends);
 //!                          rest on that submission
 //!   the overlay's answer   (0.41.0) the validator's answer applied: accepted | refused (a refusal
 //!                          by this overlay said in `detail`; the validator's verdict stands); done
-//!   closed | error         failed; done
-//!   woke at/after expires  timeout (close the stream if open); done — while the overlay has not
-//!                          answered (0.41.0): the validator's answer applied, `detail` saying so
+//!   {…, error}             failed `unreachable`, detail the host's error text; done
 //!
 //! **Local** (`advanceLocal`, `localAnswer`): the validator is this instance.
 //! A node does not dial itself, so the relay does what the front door does
@@ -67,8 +69,7 @@
 //! body}` (the reply: accepted | refused; done) or `{wait: true}` after
 //! awaiting its submission (the thread rests on it); stepped again by the
 //! engine's answer (`reply`) or the awaited thread at rest (`resolved`), the
-//! relay calls the handler again with it, as the front door does; woke
-//! at/after `expires`: timeout.
+//! relay calls the handler again with it, as the front door does.
 //!
 //! The package is the signed-message package the validator's protocol reads
 //! (amm-validator README, "A direct call"): `{message, body, topic}`, the mail
@@ -296,10 +297,9 @@ fn p2pkhHash(lock: []const u8) ?[]const u8 {
 }
 
 /// Check a pair before anything is written (`amm.swap.submit`'s first step).
-/// `now` is the step's clock; `validator` the identity the caller names.
-pub fn checkPair(a: Allocator, funding_bytes: []const u8, swap_bytes: []const u8, pool_text: []const u8, validator: []const u8, expires: u64, now: u64, commission: Commission) !Checked {
+/// `validator` is the identity the caller names.
+pub fn checkPair(a: Allocator, funding_bytes: []const u8, swap_bytes: []const u8, pool_text: []const u8, validator: []const u8, commission: Commission) !Checked {
     if (validator.len != 33 or (validator[0] != 2 and validator[0] != 3)) return refused("bad_validator", "an identity key: 33 bytes, compressed");
-    if (expires <= now) return refused("expired", null);
     const funding = given(a, funding_bytes) orelse return refused("bad_funding", "not a transaction, or a BEEF whose subject is one");
     const swap_g = given(a, swap_bytes) orelse return refused("bad_swap", "not a transaction");
     if (swap_g.beef != null) return refused("bad_swap", "the swap is the raw transaction");
@@ -566,16 +566,17 @@ pub const Status = enum {
     pending,
     accepted,
     refused,
-    timeout,
     failed,
 
     pub fn parse(s: []const u8) ?Status {
-        inline for (.{ Status.pending, Status.accepted, Status.refused, Status.timeout, Status.failed }) |x| if (eql(u8, s, @tagName(x))) return x;
+        inline for (.{ Status.pending, Status.accepted, Status.refused, Status.failed }) |x| if (eql(u8, s, @tagName(x))) return x;
+        // A record written before 0.44.0: its relay gave up on its own deadline, as a transport failure now.
+        if (eql(u8, s, "timeout")) return .failed;
         return null;
     }
     /// A record in this state may be submitted again (the relay never reached the validator's answer).
     pub fn retryable(s: Status) bool {
-        return s == .timeout or s == .failed;
+        return s == .failed;
     }
 };
 
@@ -591,16 +592,14 @@ pub const Record = struct {
     /// The pool: the outpoint spent.
     pool: []const u8,
     validator: [33]u8,
-    expires: u64,
     created: u64,
     updated: u64,
     /// The validator's peer ID (base58), as the caller named it (`peerId`).
     peer: ?[]const u8 = null,
     /// The peer is this node: the validator is this instance's own program, called in-VM.
     local: bool = false,
-    /// The dial message whose answers the relay thread awaits, and the stream once open.
-    dial: ?[]const u8 = null,
-    stream: ?u64 = null,
+    /// The `call` intention the relay thread awaits (its event's CID, 0.44.0).
+    call: ?[]const u8 = null,
     /// The relay thread (its origin), what a waiting `/call` request awaits.
     thread: ?[]const u8 = null,
     /// A message caller: answered by the relay thread when the record settles.
@@ -630,7 +629,6 @@ pub const Record = struct {
         try put(&es, a, r.kind.subjectKey(), .{ .bytes = r.swap });
         try put(&es, a, "pool", .{ .text = r.pool });
         try put(&es, a, "validator", .{ .bytes = try a.dupe(u8, &r.validator) });
-        try put(&es, a, "expires", .{ .uint = r.expires });
         try put(&es, a, "created", .{ .uint = r.created });
         try put(&es, a, "updated", .{ .uint = r.updated });
         if (r.tx) |x| try put(&es, a, "tx", .{ .bytes = x });
@@ -649,8 +647,7 @@ pub const Record = struct {
         try es.appendSlice(a, ans.map);
         if (r.peer) |x| try put(&es, a, "peer", .{ .text = x });
         if (r.local) try put(&es, a, "local", .{ .boolean = true });
-        if (r.dial) |x| try put(&es, a, "dial", .{ .cid = x });
-        if (r.stream) |x| try put(&es, a, "stream", .{ .uint = x });
+        if (r.call) |x| try put(&es, a, "call", .{ .cid = x });
         if (r.thread) |x| try put(&es, a, "thread", .{ .cid = x });
         if (r.reply) |x| try put(&es, a, "reply", .{ .bytes = x });
         if (r.submission) |x| try put(&es, a, "submission", .{ .cid = x });
@@ -673,13 +670,11 @@ pub const Record = struct {
             .swap = v.getBytes(kind.subjectKey()) orelse return error.BadRecord,
             .pool = v.getText("pool") orelse return error.BadRecord,
             .validator = val[0..33].*,
-            .expires = v.getUint("expires") orelse return error.BadRecord,
             .created = v.getUint("created") orelse return error.BadRecord,
             .updated = v.getUint("updated") orelse return error.BadRecord,
             .peer = v.getText("peer"),
             .local = v.getBool("local") orelse false,
-            .dial = v.getCid("dial"),
-            .stream = v.getUint("stream"),
+            .call = v.getCid("call"),
             .thread = v.getCid("thread"),
             .tx = v.getBytes("tx"),
             .txid = v.getText("txid"),
@@ -746,23 +741,20 @@ pub const Book = struct {
 
 // ---------------------------------------------------------------- the relay thread
 
-/// What stepped the relay thread: its launch, an answer to its dial (the
-/// libp2p provider's, libp2p.zig `dialAnswer`), or the deadline.
+/// What stepped the relay thread: its launch, the host's answer to its `call` intention
+/// (libp2p.zig `callAnswer`), or the engine's answer to its catch-up submission.
 pub const Input = union(enum) {
     start,
-    answer: libp2p.DialAnswer,
+    answer: libp2p.CallAnswer,
     /// The engine's answer to the submission of the validator's `beef` (0.41.0): `{fn: "submit",
     /// request, replyTo, result | error}`.
     overlay: Value,
-    woke,
 };
 
 pub const Effect = struct {
-    /// Requests for the libp2p provider, in order.
-    emits: []const libp2p.Request = &.{},
-    /// The index in `emits` of a new dial (its message CID becomes `dial`).
-    dial: ?usize = null,
-    /// Rest again on the dial's answers until `expires` (local: on what the validator awaited).
+    /// Emit the `call` intention with the package and rest on it (its event's CID becomes `call`).
+    emit_call: bool = false,
+    /// Rest again (on the call, the catch-up submission, or — local — what the validator awaited).
     rest: bool = false,
     /// Local: call this instance's validator program in-VM now (main.zig `callValidator`).
     call: bool = false,
@@ -820,45 +812,24 @@ fn settle(r: *Record, s: Status, reason: []const u8, detail: ?[]const u8) void {
     r.detail = detail;
 }
 
-/// One step of the relay thread over the record (the caller saves it, emits
-/// `emits` to the libp2p provider, sets `dial` from the dial's message, and
-/// rests or answers). `package` is the frame to send once the stream is open.
-pub fn advance(a: Allocator, r: *Record, in: Input, now: u64, pkg: ?[]const u8) !Effect {
+/// One step of the relay thread over the record (the caller saves it, emits the `call`
+/// intention with the package when `emit_call`, sets `call` from its event, and rests or answers).
+pub fn advance(a: Allocator, r: *Record, in: Input, now: u64) Effect {
     if (r.status != .pending) return .{ .done = true };
     r.updated = now;
-    var emits: std.ArrayList(libp2p.Request) = .empty;
     switch (in) {
-        .start => {
-            if (now >= r.expires) {
-                settle(r, .timeout, "expired", "before the validator was dialled");
-                return .{ .done = true };
-            }
-            try emits.append(a, try libp2p.dial(a, r.peer orelse return error.NoPeer, r.kind.protocol()));
-            r.stream = null;
-            return .{ .emits = emits.items, .dial = 0, .rest = true };
-        },
+        .start => return .{ .emit_call = true, .rest = true },
         .answer => |ans| switch (ans) {
-            .opened => |sid| {
-                r.stream = sid;
-                if (now >= r.expires) {
-                    settle(r, .timeout, "expired", "before the request was sent");
-                    try emits.append(a, try libp2p.close(a, sid));
-                    return .{ .emits = emits.items, .done = true };
-                }
-                try emits.append(a, try libp2p.send(a, sid, pkg orelse return error.NoPackage));
-                return .{ .emits = emits.items, .rest = true };
-            },
             .frame => |body| {
-                if (r.stream) |sid| try emits.append(a, try libp2p.close(a, sid));
                 // 0.41.0: the BEEF it carries goes into this instance's overlay first.
                 if (replyBeef(a, body)) |b| {
                     r.reply = body;
-                    return .{ .emits = emits.items, .catchup = b, .rest = true };
+                    return .{ .catchup = b, .rest = true };
                 }
                 applyReply(a, r, body);
-                return .{ .emits = emits.items, .done = true };
+                return .{ .done = true };
             },
-            .closed => |why| {
+            .failed => |why| {
                 settle(r, .failed, "unreachable", why);
                 return .{ .done = true };
             },
@@ -867,41 +838,18 @@ pub fn advance(a: Allocator, r: *Record, in: Input, now: u64, pkg: ?[]const u8) 
             caughtUp(a, r, ans);
             return .{ .done = true };
         },
-        .woke => {
-            if (now < r.expires) return .{ .rest = true };
-            if (r.reply) |body| {
-                // 0.41.0: the validator answered; this overlay did not take its BEEF in time.
-                applyReply(a, r, body);
-                if (r.status != .failed) r.detail = "this host's overlay did not answer before expires";
-                return .{ .done = true };
-            }
-            settle(r, .timeout, "no_answer", "the validator did not answer before expires");
-            if (r.stream) |sid| try emits.append(a, try libp2p.close(a, sid));
-            return .{ .emits = emits.items, .done = true };
-        },
     }
 }
 
-/// What stepped a local relay's thread: its launch, the engine's answer or the awaited thread at
-/// rest (`again`: the validator called again with it), or the deadline.
-pub const LocalInput = enum { start, again, woke };
+/// What stepped a local relay's thread: its launch, or the engine's answer or the awaited thread
+/// at rest (`again`: the validator called again with it).
+pub const LocalInput = enum { start, again };
 
-/// One step of a relay to this instance's own validator (`local`): call it, rest, or time out.
+/// One step of a relay to this instance's own validator (`local`): call it, or rest.
 pub fn advanceLocal(r: *Record, in: LocalInput, now: u64) Effect {
+    _ = in;
     if (r.status != .pending) return .{ .done = true };
     r.updated = now;
-    switch (in) {
-        .start => if (now >= r.expires) {
-            settle(r, .timeout, "expired", "before the validator was called");
-            return .{ .done = true };
-        },
-        .again => {},
-        .woke => {
-            if (now < r.expires) return .{ .rest = true };
-            settle(r, .timeout, "no_answer", "the validator did not answer before expires");
-            return .{ .done = true };
-        },
-    }
     return .{ .call = true };
 }
 
@@ -973,7 +921,7 @@ pub const Submitted = union(enum) {
     refused: Refusal,
 };
 
-/// amm.swap.submit `{funding, swap, pool, validator, peerId, expires}` (the args
+/// amm.swap.submit `{funding, swap, pool, validator, peerId}` (the args
 /// already checked against the declared shape): the record, or why not.
 /// Check first, write last: nothing is written for a refusal.
 pub fn submit(a: Allocator, env: Env, args: Value) !Submitted {
@@ -981,13 +929,12 @@ pub fn submit(a: Allocator, env: Env, args: Value) !Submitted {
     const swap = args.getBytes("swap") orelse return .{ .refused = .{ .reason = "bad_swap" } };
     const pool_text = args.getText("pool") orelse return .{ .refused = .{ .reason = "bad_pool" } };
     const validator = args.getBytes("validator") orelse return .{ .refused = .{ .reason = "bad_validator" } };
-    const expires = args.getUint("expires") orelse return .{ .refused = .{ .reason = "expired" } };
     const id = idOf(swap);
     if (try env.book.get(a, id)) |rec| {
         if (rec.status == .pending) return .{ .pending = rec };
         if (!rec.status.retryable()) return .{ .settled = rec };
     }
-    switch (try checkPair(a, funding, swap, pool_text, validator, expires, env.now, env.commission)) {
+    switch (try checkPair(a, funding, swap, pool_text, validator, env.commission)) {
         .refused => |r| return .{ .refused = r },
         .ok => {},
     }
@@ -998,7 +945,6 @@ pub fn submit(a: Allocator, env: Env, args: Value) !Submitted {
         .swap = swap,
         .pool = pool_text,
         .validator = validator[0..33].*,
-        .expires = expires,
         .created = env.now,
         .updated = env.now,
         .peer = peer,

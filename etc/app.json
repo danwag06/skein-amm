@@ -25,8 +25,7 @@
             "swap": "bytes",
             "pool": "string",
             "validator": "bytes",
-            "peerId": "string",
-            "expires": "ms"
+            "peerId": "string"
           },
           "answer": {
             "id": "string",
@@ -35,7 +34,6 @@
             "swap": "bytes",
             "pool": "string",
             "validator": "bytes",
-            "expires": "ms",
             "created": "ms",
             "updated": "ms",
             "tx?": "bytes",
@@ -57,7 +55,6 @@
             "swap": "bytes",
             "pool": "string",
             "validator": "bytes",
-            "expires": "ms",
             "created": "ms",
             "updated": "ms",
             "tx?": "bytes",

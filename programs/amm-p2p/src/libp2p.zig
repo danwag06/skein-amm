@@ -31,6 +31,14 @@
 //!   box send     {stream, body}     → {}
 //!   box close    {stream}           → {}
 //!
+//! (0.44.0) The relay's call to a validator is not these boxes: it is the host's `call`
+//! intention (skein 0.3.0, docs/MESSAGES.md "Intentions"): the step emits the event
+//! `{event: "call", peer, protocol, body}` and awaits it; the host dials the peer with the
+//! protocol, writes the one request frame, waits on the open stream for the one answer frame,
+//! closes, and answers the intention `{replyTo, request, from, body}` — or, the dial refused, the
+//! write failed, the stream ended without a frame, `{replyTo, request, error}` (`callAnswer`). The
+//! catch-up pass (main.zig `catchup`) still uses `dial` / `send` / `close`.
+//!
 //! The instance's own peer ID: main.zig `selfPeerId` (the signer's key, `peerIdOf`).
 const std = @import("std");
 const w = @import("chain");
@@ -155,6 +163,32 @@ pub fn close(a: Allocator, stream: u64) !Request {
     return .{ .box = "close", .body = .{ .map = try a.dupe(cbor.Entry, &.{
         .{ .key = "stream", .value = .{ .uint = stream } },
     }) } };
+}
+
+/// The `call` intention (skein 0.3.0): the event a step emits and awaits — one request frame
+/// `body` to `peer` (base58 peer ID) on `protocol`, the one answer frame back.
+pub fn callIntention(a: Allocator, peer: []const u8, protocol: []const u8, body: []const u8) !Value {
+    return .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "event", .value = .{ .text = "call" } },
+        .{ .key = "peer", .value = .{ .text = peer } },
+        .{ .key = "protocol", .value = .{ .text = protocol } },
+        .{ .key = "body", .value = .{ .bytes = body } },
+    }) };
+}
+
+/// The host's answer to a `call` intention: the answer frame, or why there is none.
+pub const CallAnswer = union(enum) {
+    /// `{replyTo, request, from, body}`: the peer's one answer frame.
+    frame: []const u8,
+    /// `{replyTo, request, error}`: the host's own transport observation (dial refused, protocol
+    /// not served, the write failed, the stream closed without a frame, the host restarted).
+    failed: []const u8,
+};
+
+pub fn callAnswer(body: Value) !CallAnswer {
+    if (body.getText("error")) |e| return .{ .failed = e };
+    if (body.getBytes("body")) |b| return .{ .frame = b };
+    return error.BadAnswer;
 }
 
 /// What the provider answered a dial with (the reply's box and body).

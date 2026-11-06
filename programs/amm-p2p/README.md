@@ -75,7 +75,7 @@ This section supersedes what the rest of this file says where they differ (0.3.0
 - **Gone from this program:** `validateLive`, the `amm-live` entries and their step, the last-seen map `live` (dropped from `amm/p2p` at the next commit), `liveness.judge` / `apply` / `live`, the consumer API `live`, and the relay's validator selection. `liveness.zig` keeps the beacon's body `{identityKey, peerId}`, the frame and its signature: the validator side, and what the page decodes. fn `live` (the http row `/live`, kept until the manifest's `reads[]` entries arrive, #135) answers 410.
 - **Upgrade from 0.3.x.** A state without `liveness: true` held `subscribe`s to `validateLive`: the first start or stop emits `unsubscribe` for each (a refused one is passed over), clears the set, then asks liveness as above (the result lists `unsubscribed`).
 - **The caller names the validator.** `amm.swap.submit`, `amm.pool.submit` and `amm.liquidity.submit` take `peerId` (text, the validator's libp2p peer ID) beside `validator` (`provides` in etc/app.json); missing, it is refused by the declared shape (`bad-args`); not a peer ID's text (empty, a space, a `/`), `bad_peer`. The relay looks at no liveness: the record keeps `peer` as given, and the relay thread dials it. `validator_offline` is gone.
-- **This node's own validator** (`local`). When `peerId` is this node's own (`selfPeerId`, the signer's `[2, "skein instance"]` / `libp2p:<handle>` key), the record is `local` and the relay does not dial (a node does not dial itself). It does what the front door does with a frame on `/amm-validator/1/<call>` (skein programs/frontdoor libp2p.zig `stepped`): it calls the route's handler, amm-validator's fn `swap` / `deploy` / `addLiquidity` (the app record's `programs["amm-validator"]`), in-VM from the relay thread's step, with `{transport: "local", protocol, body: <the same signed package>, match: {program, fn, app}}` (`callValidator`). `{verdict, body}` settles the record from the reply frame; `{wait: true}` means the handler sent its submission and awaited it in this step, so the thread rests on that (and on `expires`); stepped again by the engine's answer (`reply`) or the awaited thread at rest (`resolved`), the relay calls the handler again with it, as the front door does; a failed call is `failed` `validator_failed` (retryable); woken at `expires`, `timeout`. `relay.advanceLocal` / `localAnswer` are the pure steps (tested natively). amm-validator takes `transport: "local"` beside `libp2p`.
+- **This node's own validator** (`local`). When `peerId` is this node's own (`selfPeerId`, the signer's `[2, "skein instance"]` / `libp2p:<handle>` key), the record is `local` and the relay does not dial (a node does not dial itself). It does what the front door does with a frame on `/amm-validator/1/<call>` (skein programs/frontdoor libp2p.zig `stepped`): it calls the route's handler, amm-validator's fn `swap` / `deploy` / `addLiquidity` (the app record's `programs["amm-validator"]`), in-VM from the relay thread's step, with `{transport: "local", protocol, body: <the same signed package>, match: {program, fn, app}}` (`callValidator`). `{verdict, body}` settles the record from the reply frame; `{wait: true}` means the handler sent its submission and awaited it in this step, so the thread rests on that; stepped again by the engine's answer (`reply`) or the awaited thread at rest (`resolved`), the relay calls the handler again with it, as the front door does; a failed call is `failed` `validator_failed` (retryable). (0.44.0: no `expires`, no deadline.) `relay.advanceLocal` / `localAnswer` are the pure steps (tested natively). amm-validator takes `transport: "local"` beside `libp2p`.
 - **Catch-up peers** are the configured `ammP2p.peers` only (no map to add the validators heard from).
 
 ## 0.3.2 (one setting; validate gated by a row)
@@ -224,7 +224,7 @@ Declared in `etc/app.json` (`provides`, interface `amm.swap/1`), dispatched with
 
 ```
 amm.swap.submit   writes: true
-  args    {funding: bytes, swap: bytes, pool: string, validator: bytes, peerId: string, expires: ms}
+  args    {funding: bytes, swap: bytes, pool: string, validator: bytes, peerId: string}
   answer  the record (below)
 amm.swap.status   writes: false
   args    {id: string}
@@ -237,46 +237,51 @@ amm.swap.terms    writes: false
                                           before it builds the swap; and (0.16.0) this market's minimum commission, the
                                           record `amm/market` root sets (0 when unset): the pools the Swap page lists
 record    {id: string, status: string, funding: bytes, swap: bytes, pool: string, validator: bytes,
-           expires: ms, created: ms, updated: ms, tx?: bytes, txid?: string, reason?: string,
+           created: ms, updated: ms, tx?: bytes, txid?: string, reason?: string,
            detail?: string, poolState?: map}
 status    pending | accepted (tx: the validator's signed swap, txid) | refused (the validator's reason,
-          detail, poolState: its `pool`) | timeout (no answer by `expires`) | failed (the dial or the
-          stream failed, or the answer did not decode)
+          detail, poolState: its `pool`) | failed (the host's error for the call — dial refused, protocol
+          not served, the write failed, the stream closed without a frame, the host restarted — or the
+          answer did not decode)
 ```
+
+0.44.0: no `expires` and no `timeout` (an argument naming `expires` is refused `bad-args`; a record
+written before 0.44.0 with `timeout` reads as `failed`). The relay keeps no deadline; the page keeps
+its own patience per leg (web/ui `LEG_PATIENCE_MS`) and re-asks once.
 
 - `funding`: the funding transaction, raw or a BEEF (V1, V2, Atomic: `createAction`'s `tx`) whose subject it is. **Send the BEEF**: the validator's overlay verifies every unproven transaction's inputs against a parent in the BEEF or one it holds, so a raw funding transaction is refused there (`submit_refused`, `MissingInput`) unless the validator holds its parents.
 - `swap`: the raw swap. `id` is sha256 of these bytes (hex): the swap with the validator's slot empty.
-- `pool`: the pool outpoint `<txid>_<vout>`; `validator`: the pool's ValidatorIdentity (33 bytes); `expires`: ms since the epoch.
+- `pool`: the pool outpoint `<txid>_<vout>`; `validator`: the pool's ValidatorIdentity (33 bytes).
 
-**Checks** (`relay.checkPair`; a refusal is the function's error, `failed`, message `<reason>[: <detail>]`, and nothing is written): `bad_validator`, `expired`, `bad_funding`, `bad_swap`, `bad_pool`; `pool_not_input_0` (input 0 spends `pool`); `funding_not_spent` (another input spends an output of the funding transaction); `funding_unsigned`, `swap_unsigned` (an input with no unlocking script; the validator verifies the signatures); `not_a_swap`, `bad_call` (the pool call is Rúnar's `Swap(validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh, commissionPkh)`, 11 pushes, 20-byte pkhs), `signature_slot_not_empty`; `bad_outputs` (output 0 a pool, then the payout, the LP and validator fees when nonzero, the commission when the pool's CommissionBps of amountIn is nonzero: in the input asset — sats, or a 1-sat BRC-162 value output — to the call's commissionPkh, then at most one change output when `_changeAmount > 0`), `wrong_validator` (the continuation's ValidatorIdentity is not `validator`); `commission_missing` (the pool charges a commission and the call's commissionPkh is not ours, the derived key's hash, 0.16.0; before, config `commission.pkh` when set; a pool whose CommissionBps is 0 has no commission output and passes); then `bad_peer` (0.4.0: `peerId` is not a peer ID's text; the relay dials it, or calls its own validator when it is this node's).
+**Checks** (`relay.checkPair`; a refusal is the function's error, `failed`, message `<reason>[: <detail>]`, and nothing is written): `bad_validator`, `bad_funding`, `bad_swap`, `bad_pool`; `pool_not_input_0` (input 0 spends `pool`); `funding_not_spent` (another input spends an output of the funding transaction); `funding_unsigned`, `swap_unsigned` (an input with no unlocking script; the validator verifies the signatures); `not_a_swap`, `bad_call` (the pool call is Rúnar's `Swap(validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh, commissionPkh)`, 11 pushes, 20-byte pkhs), `signature_slot_not_empty`; `bad_outputs` (output 0 a pool, then the payout, the LP and validator fees when nonzero, the commission when the pool's CommissionBps of amountIn is nonzero: in the input asset — sats, or a 1-sat BRC-162 value output — to the call's commissionPkh, then at most one change output when `_changeAmount > 0`), `wrong_validator` (the continuation's ValidatorIdentity is not `validator`); `commission_missing` (the pool charges a commission and the call's commissionPkh is not ours, the derived key's hash, 0.16.0; before, config `commission.pkh` when set; a pool whose CommissionBps is 0 has no commission output and passes); then `bad_peer` (0.4.0: `peerId` is not a peer ID's text; the relay calls it, or calls its own validator when it is this node's).
 
-**Submit** records `{status: "pending", …}` under the app's head and launches the relay thread (this program, args `{kind: "amm-swap-relay", id}`). Over `/amm/call` the request waits on that thread (`{wait: true}`) and answers the settled record when it comes to rest; a message caller is answered by the relay thread with the settled record; an in-VM call gets the pending record. The same swap again answers its record (a `/call` waits on the relay while it is pending); one that timed out or failed is relayed again.
+**Submit** records `{status: "pending", …}` under the app's head and launches the relay thread (this program, args `{kind: "amm-swap-relay", id}`). Over `/amm/call` the request waits on that thread (`{wait: true}`) and answers the settled record when it comes to rest; a message caller is answered by the relay thread with the settled record; an in-VM call gets the pending record. The same swap again answers its record (a `/call` waits on the relay while it is pending); one that failed is relayed again (0.44.0: no `timeout`).
 
 ### The relay thread
 
 ```
-launched              emit dial {peer: the validator's peer ID (as the caller named it), protocol: "/amm-validator/1/swap"}
-                      to the libp2p provider; await it; deadline `expires`
-{stream} (box dial)   emit send {stream, body: the package}; rest again
-{stream, body} (frame) the validator's answer: {ok: true, tx, txid} → accepted; {ok: false, reason, detail?, pool?}
-                      → refused; emit close; answer the message caller — or (0.41.0) when it carries
-                      `beef` (accepted; pool_spent): emit close, send {fn: "submit", args: {beef,
+launched              (0.44.0) emit the intention {event: "call", peer: the validator's peer ID (as the
+                      caller named it), protocol: "/amm-validator/1/swap", body: the package}; await it.
+                      The host (skein 0.3.0) dials, writes the one frame, waits on the open stream for the
+                      one answer frame, closes, and answers {replyTo, request, from, body} | {replyTo,
+                      request, error}. No deadline, no retry: one attempt.
+{…, body}             the validator's answer: {ok: true, tx, txid} → accepted; {ok: false, reason, detail?, pool?}
+                      → refused; answer the message caller — or (0.41.0) when it carries
+                      `beef` (accepted; pool_spent): send {fn: "submit", args: {beef,
                       topics: [the token topic]}} to this instance in box `amm/submit` (amm-validator's
-                      submit.zig message), await it; deadline `expires`
+                      submit.zig message), await it
 the overlay's answer  (0.41.0) the validator's answer applied (accepted | refused); a rejection or
                       error there said in `detail` ("this host's overlay refused the validator's
                       transaction: …"), the verdict standing; answer the message caller
-{stream, closed} | {error}   failed (reason `unreachable`)
-woke at `expires`     timeout (close the stream if open); before it, rest again; while this
-                      overlay has not answered (0.41.0): the validator's answer applied, `detail`
-                      "this host's overlay did not answer before expires"
+{…, error}            failed (reason `unreachable`, detail the host's text); answer the message caller
+(a thread launched before 0.44.0: its dial's answer or its deadline settles it `failed`, "relayed before 0.44.0")
 ```
 
 So when the page hears `accepted` or `pool_spent` from a remote validator, its own host already
 lists the pool where the validator says it is (0.41.0, David 2026-11-05). A local validator (this
 instance) needs none of it: its submission is this overlay's.
 
-**The package** (the frame): the signed-message package amm-validator opens (its README, "A direct call"): `{message, body, topic}`, the mail record `{kind: "mail", op: "put", sender: this instance's identity, recipient: validator, box: "swap", body: <cid>, nonce: sha256("amm-swap-relay" ‖ id)[0..16], signature}` signed BRC-169's way through the `wallet` import (`createSignature`, `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone, over sha256 of the record without `signature`), and the body `{tx: <one V2 BEEF: the funding transaction's ancestry from its BEEF, the funding transaction (unproven), the swap>, pool}`. The pool's own ancestry is not sent: the validator holds the pool (it is its overlay). `topic` (0.31.0) is this instance's token topic `tm_color_<assetId>` (head `amm/token`'s `tokenId`, `names.overlayOf`), at the frame's top level outside the signed record: the validator's host runs several instances on one libp2p node and picks the one a stream is for by the first frame's `topic` (skein `src/host/p2p.ts` `streamHandle`); without it such a host answers `topic required` and the swap times out.
+**The package** (the frame): the signed-message package amm-validator opens (its README, "A direct call"): `{message, body, topic}`, the mail record `{kind: "mail", op: "put", sender: this instance's identity, recipient: validator, box: "swap", body: <cid>, nonce: sha256("amm-swap-relay" ‖ id)[0..16], signature}` signed BRC-169's way through the `wallet` import (`createSignature`, `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone, over sha256 of the record without `signature`), and the body `{tx: <one V2 BEEF: the funding transaction's ancestry from its BEEF, the funding transaction (unproven), the swap>, pool}`. The pool's own ancestry is not sent: the validator holds the pool (it is its overlay). `topic` (0.31.0) is this instance's token topic `tm_color_<assetId>` (head `amm/token`'s `tokenId`, `names.overlayOf`), at the frame's top level outside the signed record: the validator's host runs several instances on one libp2p node and picks the one a stream is for by the first frame's `topic` (skein `src/host/p2p.ts` `streamHandle`); without it such a host answers `topic required` and closes the stream (the call fails).
 
 ## The pool deploy through the relay (`amm.pool/1`) — gone in 0.11.0
 
@@ -402,7 +407,7 @@ The end-to-end runs below are amm-poc's (its deploy/README.md); this port is tes
 - **Run end to end once (2026-10-02, deploy/README.md "The relay round trip"):** amm2 relayed a swap against a pool amm3 validates; the record went pending → accepted in one `/amm/call` (456 ms), every advance under `amm/app`, amm3 broadcast the funding parent then the swap, both instances admitted it. Natively: the checks over pairs built from the fixtures, the BEEF, the package (verified with skein-sdk's `message.problem`, as the validator does), the record's lifecycle over faked provider answers, the dispatch by app.json. The VM path (the route's `{wait: true}` and `resolved`, the launched thread, the dial by peer ID, the `wallet` import signing under `[2, "metanet handles envelope"]`, advancing the head `amm/app`) needs a running instance.
 - **The SDK's dispatch helper answers in the step** (`app.serve`: the `/call` route answers at once, a message is answered at the end of its step). A function whose answer depends on later steps (a peer's reply) is outside it, so this program runs its own `/call` and message wrappers around `app.run` (the same checks, codes and answer shapes) with one addition: `amm.swap.submit` waits on its relay thread.
 - **No app record under a genesis-wired node**: the declarations come from `defaults.ammProvides` and the state is the head `amm/app`'s root itself (above).
-- **A timeout is not a refusal**: the validator may still answer (and submit) after `expires`; the record says `timeout`, and the late answer runs nothing.
+- **A failed call is not a refusal** (0.44.0): the host saw the stream end without an answer; the validator may have the swap. The page's no-answer path reads the overlay first.
 
 - **No first step.** The schedule cannot start itself (above): an install-time or start-time step for an app is not in skein's contract.
 - **Overlapping passes.** Each catch-up tick launches its own thread; a pass still resting when the next tick comes runs beside it (both ask, the first answer proves, the second finds nothing new). With the defaults a pass is bounded by `batch` × 3 peers × `replyTimeoutMs` = 9 min < `catchupSeconds`.

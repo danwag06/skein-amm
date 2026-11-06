@@ -470,7 +470,6 @@ fn expectRefusal(c: relay.Checked, reason: []const u8) !void {
 
 const ours: relay.Commission = .{ .pkh = commission_pkh };
 const t_now: u64 = 1_700_000_000_000;
-const t_expires: u64 = t_now + 60_000;
 
 test "relay: a pair from the fixtures (the funding transaction pays the swap's input exactly; the swap spends it, its commission paying us) is checked; each refusal" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -478,7 +477,7 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
     const a = arena.allocator();
     const p = try buildPair(a);
 
-    const ok = try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_expires, t_now, ours);
+    const ok = try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, ours);
     try testing.expect(ok == .ok);
     try testing.expectEqual(@as(u64, 20_000), ok.ok.call.amount_in);
     try testing.expect(ok.ok.call.bsv_in);
@@ -487,12 +486,12 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
     try testing.expectEqual(@as(i64, vec.lp_fee_bps), ok.ok.continuation.lp_fee_bps);
     try testing.expectEqual(@as(i64, vec.commission_bps), ok.ok.continuation.commission_bps);
     // Without a commission pkh configured, any commission payee passes.
-    try testing.expect(try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_expires, t_now, .{}) == .ok);
+    try testing.expect(try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, .{}) == .ok);
     const other = try buildPairWith(a, .{ .commission = .{0x22} ** 20 });
-    try testing.expect(try relay.checkPair(a, other.funding, other.swap, other.pool, &other.validator, t_expires, t_now, .{}) == .ok);
+    try testing.expect(try relay.checkPair(a, other.funding, other.swap, other.pool, &other.validator, .{}) == .ok);
 
     // Our commission: another's.
-    try expectRefusal(try relay.checkPair(a, other.funding, other.swap, other.pool, &other.validator, t_expires, t_now, ours), "commission_missing");
+    try expectRefusal(try relay.checkPair(a, other.funding, other.swap, other.pool, &other.validator, ours), "commission_missing");
     // A pool charging no commission has no commission output: our check passes.
     {
         var s = try Transaction.parse(a, other.swap);
@@ -505,53 +504,52 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
         zero[at] = 0x00;
         outs[0].locking_script = Script.init(zero);
         s.outputs = outs;
-        const c = try relay.checkPair(a, other.funding, try s.serialize(a), other.pool, &other.validator, t_expires, t_now, ours);
+        const c = try relay.checkPair(a, other.funding, try s.serialize(a), other.pool, &other.validator, ours);
         try testing.expect(c == .ok);
         try testing.expectEqual(@as(i64, 0), c.ok.continuation.commission_bps);
     }
 
     // The pair itself.
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_now, t_now, ours), "expired");
-    try expectRefusal(try relay.checkPair(a, "junk", p.swap, p.pool, &p.validator, t_expires, t_now, ours), "bad_funding");
-    try expectRefusal(try relay.checkPair(a, p.funding, "junk", p.pool, &p.validator, t_expires, t_now, ours), "bad_swap");
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, "nope", &p.validator, t_expires, t_now, ours), "bad_pool");
+    try expectRefusal(try relay.checkPair(a, "junk", p.swap, p.pool, &p.validator, ours), "bad_funding");
+    try expectRefusal(try relay.checkPair(a, p.funding, "junk", p.pool, &p.validator, ours), "bad_swap");
+    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, "nope", &p.validator, ours), "bad_pool");
     const wrong_pool = try std.fmt.allocPrint(a, "{s}_1", .{p.pool[0..64]});
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, wrong_pool, &p.validator, t_expires, t_now, ours), "pool_not_input_0");
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), p.swap, p.pool, &p.validator, t_expires, t_now, ours), "funding_not_spent");
+    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, wrong_pool, &p.validator, ours), "pool_not_input_0");
+    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), p.swap, p.pool, &p.validator, ours), "funding_not_spent");
     var other_key = p.validator;
     other_key[5] ^= 1;
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, &other_key, t_expires, t_now, ours), "wrong_validator");
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, p.validator[0..32], t_expires, t_now, ours), "bad_validator");
+    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, &other_key, ours), "wrong_validator");
+    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, p.validator[0..32], ours), "bad_validator");
 
     // Unsigned: the funding transaction's input, the swap's funding input.
     {
         const u = try buildPairWith(a, .{ .sign_funding = false });
-        try expectRefusal(try relay.checkPair(a, u.funding, u.swap, u.pool, &u.validator, t_expires, t_now, ours), "funding_unsigned");
+        try expectRefusal(try relay.checkPair(a, u.funding, u.swap, u.pool, &u.validator, ours), "funding_unsigned");
         var s = try Transaction.parse(a, p.swap);
         const ins = try a.dupe(bsvz.transaction.Input, s.inputs);
         ins[1].unlocking_script = Script.empty();
         s.inputs = ins;
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "swap_unsigned");
+        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, ours), "swap_unsigned");
     }
     // The fixture's own swap: signed by the validator already, and spending fund:1, not a funding output.
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.swap_bsv_in), p.pool, &p.validator, t_expires, t_now, .{}), "signature_slot_not_empty");
+    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.swap_bsv_in), p.pool, &p.validator, .{}), "signature_slot_not_empty");
     // An output past the contract's (a change output the call does not name).
     {
         var s = try Transaction.parse(a, p.swap);
         s.outputs = try std.mem.concat(a, bsvz.transaction.Output, &.{ s.outputs, &.{s.outputs[4]} });
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, ours), "bad_outputs");
         // The commission output dropped while the pool charges one.
         s.outputs = s.outputs[0..4];
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, ours), "bad_outputs");
         // The commission one sat short; paying another than the call names.
         const short = try a.dupe(bsvz.transaction.Output, (try Transaction.parse(a, p.swap)).outputs);
         short[4].satoshis -= 1;
         s.outputs = short;
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, ours), "bad_outputs");
         const elsewhere = try a.dupe(bsvz.transaction.Output, (try Transaction.parse(a, p.swap)).outputs);
         elsewhere[4].locking_script = Script.init(try p2pkhScript(a, &(.{0x22} ** 20)));
         s.outputs = elsewhere;
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, ours), "bad_outputs");
     }
     // The token change (0.40.0): named in the call (push 8, OP_5) with no output for it; then
     // with its output (after the commission) it passes; a tokenChangePkh not 20 bytes (push 7).
@@ -575,19 +573,19 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
             }
         };
         const named = try S.withPush(a, p.swap, 8, &.{0x55});
-        try expectRefusal(try relay.checkPair(a, p.funding, named, p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+        try expectRefusal(try relay.checkPair(a, p.funding, named, p.pool, &p.validator, ours), "bad_outputs");
         var s = try Transaction.parse(a, named);
         const pd = try Transaction.parse(a, unhex(a, vec.pool_deploy));
         const asset = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.id.?.txid;
         const ch = (try relay.parseSwapCall(a, s.inputs[0].unlocking_script.bytes)).?;
         s.outputs = try std.mem.concat(a, bsvz.transaction.Output, &.{ s.outputs, &.{.{ .satoshis = 1, .locking_script = Script.init(try pool_lib.payoutScript(a, asset, 5, ch.token_change_pkh[0..20].*, false)) }} });
-        const with = try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours);
+        const with = try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, ours);
         try testing.expect(with == .ok);
         try testing.expectEqual(@as(u64, 5), with.ok.call.token_change);
-        try expectRefusal(try relay.checkPair(a, p.funding, try S.withPush(a, p.swap, 7, &([_]u8{19} ++ [_]u8{0x55} ** 19)), p.pool, &p.validator, t_expires, t_now, ours), "bad_call");
+        try expectRefusal(try relay.checkPair(a, p.funding, try S.withPush(a, p.swap, 7, &([_]u8{19} ++ [_]u8{0x55} ** 19)), p.pool, &p.validator, ours), "bad_call");
     }
     // Not a swap: the Rescind fixture's pool input (0.13.0: the validator's, funded by fund:6).
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.rescind), try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.swap_tokens_in)))}), &p.validator, t_expires, t_now, .{}), "not_a_swap");
+    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.rescind), try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.swap_tokens_in)))}), &p.validator, .{}), "not_a_swap");
 }
 
 fn keySigner(a: Allocator, priv: [32]u8) !relay.Signer {
@@ -615,7 +613,7 @@ test "relay: the one BEEF (the funding transaction's ancestry, the funding trans
     defer arena.deinit();
     const a = arena.allocator();
     const p = try buildPair(a);
-    const pair = (try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
+    const pair = (try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, ours)).ok;
 
     // A raw funding transaction: [funding, swap].
     const b1 = try w.beef.parse(a, try relay.requestBeef(a, pair));
@@ -630,7 +628,7 @@ test "relay: the one BEEF (the funding transaction's ancestry, the funding trans
         .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
         .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
     }) });
-    const pair2 = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
+    const pair2 = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, ours)).ok;
     const b2 = try w.beef.parse(a, try relay.requestBeef(a, pair2));
     try testing.expectEqual(@as(usize, 3), b2.entries.len);
     try testing.expectEqualSlices(u8, &w.beef.txidOf(fund_raw), &b2.entries[0].txid);
@@ -644,7 +642,7 @@ test "relay: the one BEEF (the funding transaction's ancestry, the funding trans
         .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
         .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
     }) });
-    const pair3 = (try relay.checkPair(a, fback, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
+    const pair3 = (try relay.checkPair(a, fback, p.swap, p.pool, &p.validator, ours)).ok;
     const b3 = try w.beef.parse(a, try relay.requestBeef(a, pair3));
     try testing.expectEqual(@as(usize, 3), b3.entries.len);
     try testing.expectEqualSlices(u8, &w.beef.txidOf(fund_raw), &b3.entries[0].txid);
@@ -653,7 +651,7 @@ test "relay: the one BEEF (the funding transaction's ancestry, the funding trans
     try testing.expect(w.beef.parentsFirst(b3));
 
     // The package: a mail record signed by this instance (BRC-169), recipient the validator, box `swap`.
-    const rec: relay.Record = .{ .id = relay.idOf(p.swap), .funding = fbeef, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now };
+    const rec: relay.Record = .{ .id = relay.idOf(p.swap), .funding = fbeef, .swap = p.swap, .pool = p.pool, .validator = p.validator, .created = t_now, .updated = t_now };
     const signer = try keySigner(a, relay_priv);
     const topic = try names.overlayOf(a, "ab" ** 32 ++ "_0");
     try testing.expectEqualStrings("tm_color_" ++ "ab" ** 32 ++ "_0", topic);
@@ -683,47 +681,44 @@ fn frameOf(a: Allocator, v: Value) ![]const u8 {
     return cbor.encode(a, v);
 }
 
-test "relay: the record's lifecycle over the libp2p provider's answers — accepted, refused (with the pool's state), timeout, failed — kept in the app's state" {
+test "relay (0.44.0): the record's lifecycle over the host's answer to one `call` intention — accepted, refused (with the pool's state), failed — kept in the app's state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ms = w.store.MemStore.init(testing.allocator);
     defer ms.deinit();
     const p = try buildPair(a);
-    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
+    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
 
-    // pending → dial → opened (send the package) → the frame {ok: true} → accepted, the stream closed.
+    // pending → emit the call and rest → the host's answer {body: {ok: true}} → accepted.
     {
         var r = fresh;
-        const start = try relay.advance(a, &r, .start, t_now, null);
-        try testing.expect(start.rest and !start.done);
-        try testing.expectEqual(@as(?usize, 0), start.dial);
-        try testing.expectEqualStrings("dial", start.emits[0].box);
-        try testing.expectEqualStrings(relay.swap_protocol, start.emits[0].body.getText("protocol").?);
-        try testing.expectEqualStrings(fresh.peer.?, start.emits[0].body.getText("peer").?);
-        const opened = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now + 10, "the package");
-        try testing.expect(opened.rest and !opened.done);
-        try testing.expectEqualStrings("send", opened.emits[0].box);
-        try testing.expectEqualStrings("the package", opened.emits[0].body.getBytes("body").?);
-        try testing.expectEqual(@as(?u64, 7), r.stream);
+        const start = relay.advance(a, &r, .start, t_now);
+        try testing.expect(start.emit_call and start.rest and !start.done);
+        // The intention the step emits (main.zig): {event: "call", peer, protocol, body: the package}.
+        const ev = try libp2p.callIntention(a, r.peer.?, r.kind.protocol(), "the package");
+        try testing.expectEqualStrings("call", ev.getText("event").?);
+        try testing.expectEqualStrings(relay.swap_protocol, ev.getText("protocol").?);
+        try testing.expectEqualStrings(fresh.peer.?, ev.getText("peer").?);
+        try testing.expectEqualStrings("the package", ev.getBytes("body").?);
+        try testing.expectEqual(@as(usize, 4), ev.map.len);
         const signed = "the signed swap";
-        const done = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
+        const done = relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
             .{ .key = "ok", .value = .{ .boolean = true } },
             .{ .key = "tx", .value = .{ .bytes = signed } },
             .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
-        } }) } }, t_now + 20, null);
-        try testing.expect(done.done);
-        try testing.expectEqualStrings("close", done.emits[0].box);
+        } }) } }, t_now + 20);
+        try testing.expect(done.done and !done.emit_call);
         try testing.expectEqual(relay.Status.accepted, r.status);
         try testing.expectEqualStrings(signed, r.tx.?);
         try testing.expectEqual(t_now + 20, r.updated);
         // Settled: nothing more happens to it.
-        try testing.expect((try relay.advance(a, &r, .woke, t_expires + 1, null)).done);
+        try testing.expect(relay.advance(a, &r, .{ .answer = .{ .failed = "late" } }, t_now + 30).done);
         try testing.expectEqual(relay.Status.accepted, r.status);
 
         // Kept under the app's state, read back as stored; the answer leaves out the relay's own fields.
         var book = try relay.Book.load(a, ms.store(), null);
-        r.dial = &w.store.hashCid(.tx, .{1} ** 32);
+        r.call = &w.store.hashCid(.tx, .{1} ** 32);
         r.thread = &w.store.hashCid(.tx, .{2} ** 32);
         r.request = .{ .message = &w.store.hashCid(.tx, .{3} ** 32), .sender = &p.validator };
         try book.put(a, r);
@@ -733,30 +728,29 @@ test "relay: the record's lifecycle over the libp2p provider's answers — accep
         const back = (try again.get(a, r.id)).?;
         try testing.expectEqual(relay.Status.accepted, back.status);
         try testing.expectEqualSlices(u8, p.funding, back.funding);
-        try testing.expectEqual(@as(?u64, 7), back.stream);
+        try testing.expectEqualSlices(u8, r.call.?, back.call.?);
         try testing.expectEqualSlices(u8, r.thread.?, back.thread.?);
         try testing.expectEqualSlices(u8, &p.validator, back.request.?.sender);
         const ans = readBack(a, try back.answer(a));
         try testing.expectEqualStrings("accepted", ans.getText("status").?);
         try testing.expectEqualStrings(&relay.idText(r.id), ans.getText("id").?);
         try testing.expectEqualStrings(signed, ans.getBytes("tx").?);
-        try testing.expect(ans.get("thread") == null and ans.get("dial") == null and ans.get("request") == null and ans.get("peer") == null);
+        try testing.expect(ans.get("thread") == null and ans.get("call") == null and ans.get("expires") == null and ans.get("request") == null and ans.get("peer") == null);
         try testing.expect((try again.get(a, relay.idOf(p.funding))) == null);
     }
 
     // The validator refuses: refused, with its reason and the pool's newest state.
     {
         var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 8 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
+        _ = relay.advance(a, &r, .start, t_now);
+        const fx = relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
             .{ .key = "ok", .value = .{ .boolean = false } },
             .{ .key = "reason", .value = .{ .text = "pool_spent" } },
             .{ .key = "pool", .value = .{ .map = &.{
                 .{ .key = "outpoint", .value = .{ .text = "cd" ** 32 ++ "_0" } },
                 .{ .key = "bsvReserve", .value = .{ .uint = 1_019_930 } },
             } } },
-        } }) } }, t_now + 5, null);
+        } }) } }, t_now + 5);
         try testing.expect(fx.done);
         try testing.expectEqual(relay.Status.refused, r.status);
         try testing.expectEqualStrings("pool_spent", r.reason.?);
@@ -764,43 +758,26 @@ test "relay: the record's lifecycle over the libp2p provider's answers — accep
         try testing.expectEqual(@as(u64, 1_019_930), ans.get("poolState").?.getUint("bsvReserve").?);
     }
 
-    // No answer by `expires`: woken early it rests again; at `expires`, timeout, the stream closed.
+    // The host answers the call with an error (the dial refused, the stream closed without a frame,
+    // the host restarted): failed `unreachable` at once, the host's text the detail, retryable. A
+    // garbled frame: failed.
     {
         var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 9 } }, t_now, "pkg");
-        const early = try relay.advance(a, &r, .woke, t_expires - 1, null);
-        try testing.expect(early.rest and !early.done);
-        try testing.expectEqual(relay.Status.pending, r.status);
-        const late = try relay.advance(a, &r, .woke, t_expires, null);
-        try testing.expect(late.done);
-        try testing.expectEqual(relay.Status.timeout, r.status);
-        try testing.expectEqualStrings("close", late.emits[0].box);
-        try testing.expect(relay.Status.timeout.retryable());
-        // Launched after it expired: no dial at all.
-        var r2 = fresh;
-        const fx = try relay.advance(a, &r2, .start, t_expires, null);
-        try testing.expect(fx.done and fx.emits.len == 0);
-        try testing.expectEqual(relay.Status.timeout, r2.status);
-    }
-
-    // The dial fails, or the stream ends without a frame: failed (retryable). A garbled frame: failed.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        try testing.expect((try relay.advance(a, &r, .{ .answer = .{ .closed = "dial failed: no route" } }, t_now, null)).done);
+        _ = relay.advance(a, &r, .start, t_now);
+        try testing.expect(relay.advance(a, &r, .{ .answer = .{ .failed = "the stream closed without a frame" } }, t_now).done);
         try testing.expectEqual(relay.Status.failed, r.status);
         try testing.expectEqualStrings("unreachable", r.reason.?);
+        try testing.expectEqualStrings("the stream closed without a frame", r.detail.?);
+        try testing.expect(r.status.retryable());
         var r2 = fresh;
-        _ = try relay.advance(a, &r2, .start, t_now, null);
-        _ = try relay.advance(a, &r2, .{ .answer = .{ .opened = 1 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r2, .{ .answer = .{ .frame = "\xff" } }, t_now, null);
+        _ = relay.advance(a, &r2, .start, t_now);
+        _ = relay.advance(a, &r2, .{ .answer = .{ .frame = "\xff" } }, t_now);
         try testing.expectEqual(relay.Status.failed, r2.status);
         try testing.expectEqualStrings("bad_reply", r2.reason.?);
     }
 }
 
-test "relay: the validator named (0.4.0) — submit dials the peer given; this node's own peer is handed to its own validator program in-VM: wait, called again, answered; failed; timeout" {
+test "relay: the validator named (0.4.0) — submit calls the peer given; this node's own peer is handed to its own validator program in-VM: wait, called again, answered; failed" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -812,16 +789,14 @@ test "relay: the validator named (0.4.0) — submit dials the peer given; this n
     var dummy: u8 = 0;
     const args = try fromSdk(a, try submitArgs(a, p, null));
 
-    // Another node's peer named: recorded as given, not local; the relay dials it.
+    // Another node's peer named: recorded as given, not local; the relay calls it.
     test_env.self_peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9";
     const env: relay.Env = .{ .book = &book, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = test_env.self_peer, .launchFn = testLaunch };
     var r = (try relay.submit(a, env, args)).launched;
     try testing.expectEqualStrings(named_peer, r.peer.?);
     try testing.expect(!r.local);
-    const start = try relay.advance(a, &r, .start, t_now, null);
-    try testing.expectEqualStrings("dial", start.emits[0].box);
-    try testing.expectEqualStrings(named_peer, start.emits[0].body.getText("peer").?);
-    try testing.expectEqualStrings(relay.swap_protocol, start.emits[0].body.getText("protocol").?);
+    const start = relay.advance(a, &r, .start, t_now);
+    try testing.expect(start.emit_call);
     // Unknown self (no handle): never local.
     try testing.expect(!relay.isSelf(.{ .book = &book, .now = t_now, .commission = ours, .ctx = &dummy, .launchFn = testLaunch }, named_peer));
 
@@ -839,7 +814,7 @@ test "relay: the validator named (0.4.0) — submit dials the peer given; this n
     {
         var l = fresh;
         const fx = relay.advanceLocal(&l, .start, t_now);
-        try testing.expect(fx.call and !fx.done and fx.emits.len == 0 and fx.dial == null);
+        try testing.expect(fx.call and !fx.done and !fx.emit_call);
         const waiting = relay.localAnswer(a, &l, readBack(a, .{ .map = &.{.{ .key = "wait", .value = .{ .boolean = true } }} }), "");
         try testing.expect(waiting.rest and !waiting.done);
         try testing.expectEqual(relay.Status.pending, l.status);
@@ -855,7 +830,7 @@ test "relay: the validator named (0.4.0) — submit dials the peer given; this n
                 .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
             } }) } },
         } }), "");
-        try testing.expect(done.done and done.emits.len == 0);
+        try testing.expect(done.done and !done.emit_call);
         try testing.expectEqual(relay.Status.accepted, l.status);
         try testing.expectEqualStrings(signed, l.tx.?);
         // Settled: nothing more.
@@ -889,22 +864,9 @@ test "relay: the validator named (0.4.0) — submit dials the peer given; this n
         _ = relay.localAnswer(a, &l2, readBack(a, .{ .map = &.{.{ .key = "verdict", .value = .{ .text = "accept" } }} }), "");
         try testing.expectEqualStrings("bad_reply", l2.reason.?);
     }
-    // Woken before `expires`: rest; at `expires`: timeout. Launched after it: timeout, no call.
-    {
-        var l = fresh;
-        _ = relay.advanceLocal(&l, .start, t_now);
-        try testing.expect(relay.advanceLocal(&l, .woke, t_expires - 1).rest);
-        const late = relay.advanceLocal(&l, .woke, t_expires);
-        try testing.expect(late.done and !late.call);
-        try testing.expectEqual(relay.Status.timeout, l.status);
-        var l2 = fresh;
-        const fx = relay.advanceLocal(&l2, .start, t_expires);
-        try testing.expect(fx.done and !fx.call);
-        try testing.expectEqual(relay.Status.timeout, l2.status);
-    }
 }
 
-test "relay (0.43.0): two swaps relayed at once to this node's own validator on one pool — both wait (the first on its submission, the second on the first's lock); the first accepted; the second, called again when the first's thread rests, refused pool_spent with the pool's new state; a waiter past expires times out without a call" {
+test "relay (0.43.0): two swaps relayed at once to this node's own validator on one pool — both wait (the first on its submission, the second on the first's lock); the first accepted; the second, called again when the first's thread rests, refused pool_spent with the pool's new state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -949,10 +911,8 @@ test "relay (0.43.0): two swaps relayed at once to this node's own validator on 
     try testing.expectEqual(relay.Status.refused, second.status);
     try testing.expectEqualStrings("pool_spent", second.reason.?);
     try testing.expectEqualStrings(newer, second.pool_state.?.getText("outpoint").?);
-    // The third, still waiting when its deadline comes: timeout, the validator not called.
-    const late = relay.advanceLocal(&third, .woke, t_expires);
-    try testing.expect(late.done and !late.call);
-    try testing.expectEqual(relay.Status.timeout, third.status);
+    // The third: still pending; no deadline ends it (0.44.0), the first's thread at rest steps it.
+    try testing.expectEqual(relay.Status.pending, third.status);
 }
 
 // --- the dispatch, by the app's manifest (app/etc/app.json), with the functions over memory ---
@@ -1025,7 +985,6 @@ fn submitArgs(a: Allocator, p: Pair, extra: ?cbor.Entry) !scbor.Value {
         .{ .key = "pool", .value = .{ .text = p.pool } },
         .{ .key = "validator", .value = .{ .bytes = &p.validator } },
         .{ .key = "peerId", .value = .{ .text = named_peer } },
-        .{ .key = "expires", .value = .{ .uint = t_expires } },
     });
     if (extra) |e| try es.append(a, e);
     return toSdk(a, .{ .map = es.items });
@@ -1085,6 +1044,8 @@ test "relay: dispatch by the manifest (app/etc/app.json, amm.swap/1) — submit 
     // The declared shapes: a missing arg, an extra one, a wrong type.
     try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_status, .{ .map = &.{} }, null), .@"bad-args", "args.id: missing");
     try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, .{ .key = "fee", .value = .{ .uint = 1 } }), null), .@"bad-args", "args.fee: not in the shape");
+    // 0.44.0: the request carries no expiry.
+    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, .{ .key = "expires", .value = .{ .uint = t_now + 15_000 } }), null), .@"bad-args", "args.expires: not in the shape");
     const bad = try a.dupe(cbor.Entry, (try fromSdk(a, try submitArgs(a, p, null))).map);
     for (bad) |*e| if (eql(u8, e.key, "pool")) {
         e.value = .{ .uint = 0 };
@@ -1129,13 +1090,47 @@ test "relay: dispatch by the manifest (app/etc/app.json, amm.swap/1) — submit 
     try targs.put("pool", scbor.string(p.pool));
     try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_terms, targs.value(), null), .@"bad-args", "args.pool: not in the shape");
 
-    // A swap that timed out is relayed again.
+    // A swap that failed in transport is relayed again (0.44.0: no `timeout`).
     var r = (try book.get(a, relay.idOf(p.swap))).?;
-    r.status = .timeout;
+    r.status = .failed;
     try book.put(a, r);
     _ = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, null), null);
     try testing.expectEqual(@as(usize, 2), test_env.launched);
     try testing.expectEqual(relay.Status.pending, (try book.get(a, relay.idOf(p.swap))).?.status);
+}
+
+test "relay (0.44.0): the host's answer to a `call` — the frame, or the error; a record written before 0.44.0 (`timeout`, `expires`, `dial`, `stream`) reads as failed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ans: Value = .{ .map = &.{
+        .{ .key = "replyTo", .value = .{ .cid = &w.store.hashCid(.tx, .{1} ** 32) } },
+        .{ .key = "from", .value = .{ .bytes = "peer" } },
+        .{ .key = "body", .value = .{ .bytes = "frame" } },
+    } };
+    try testing.expectEqualStrings("frame", (try libp2p.callAnswer(ans)).frame);
+    try testing.expectEqualStrings("the host restarted", (try libp2p.callAnswer(.{ .map = &.{.{ .key = "error", .value = .{ .text = "the host restarted" } }} })).failed);
+    try testing.expectError(error.BadAnswer, libp2p.callAnswer(.{ .map = &.{} }));
+    try testing.expectEqual(relay.Status.failed, relay.Status.parse("timeout").?);
+    try testing.expect(relay.Status.parse("expired") == null);
+    const old = readBack(a, .{ .map = &.{
+        .{ .key = "kind", .value = .{ .text = relay.Kind.swap.recordKind() } },
+        .{ .key = "id", .value = .{ .text = "ab" ** 32 } },
+        .{ .key = "status", .value = .{ .text = "timeout" } },
+        .{ .key = "funding", .value = .{ .bytes = "f" } },
+        .{ .key = "swap", .value = .{ .bytes = "s" } },
+        .{ .key = "pool", .value = .{ .text = "cd" ** 32 ++ "_0" } },
+        .{ .key = "validator", .value = .{ .bytes = &([_]u8{2} ** 33) } },
+        .{ .key = "expires", .value = .{ .uint = t_now } },
+        .{ .key = "created", .value = .{ .uint = t_now } },
+        .{ .key = "updated", .value = .{ .uint = t_now } },
+        .{ .key = "dial", .value = .{ .cid = &w.store.hashCid(.tx, .{2} ** 32) } },
+        .{ .key = "stream", .value = .{ .uint = 3 } },
+    } });
+    const r = try relay.Record.of(old);
+    try testing.expectEqual(relay.Status.failed, r.status);
+    try testing.expect(r.call == null);
+    try testing.expect((readBack(a, try r.value(a))).get("expires") == null);
 }
 
 test "the relay's head is the app's root head <app>/app (skein-sdk 0.3.0 app.headOf)" {
@@ -2064,7 +2059,7 @@ test "relay (0.40.1): a swap spending outputs of two unrelated transactions, bot
         .{ .txid = w.beef.txidOf(p.other), .format = .raw, .raw = p.other },
         .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
     }) });
-    const pair = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
+    const pair = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, ours)).ok;
     try testing.expectEqualSlices(u8, &w.beef.txidOf(p.funding), &pair.funding.txid);
     const req = try w.beef.parse(a, try relay.requestBeef(a, pair));
     try testing.expectEqual(@as(usize, 4), req.entries.len); // fund, the other source, the funding, the swap
@@ -2103,7 +2098,7 @@ test "relay (0.40.1): a swap spending outputs of two unrelated transactions, bot
         .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
         .{ .txid = w.beef.txidOf(q.funding), .format = .raw, .raw = q.funding },
     }) });
-    const qpair = (try relay.checkPair(a, qbeef, q.swap, q.pool, &q.validator, t_expires, t_now, ours)).ok;
+    const qpair = (try relay.checkPair(a, qbeef, q.swap, q.pool, &q.validator, ours)).ok;
     const qb = try w.beef.parse(a, try relay.requestBeef(a, qpair));
     try testing.expectEqual(@as(usize, 3), qb.entries.len);
     try testing.expect(qb.find(w.beef.txidOf(unhex(a, vec.token_deploy))) == null);
@@ -2134,14 +2129,14 @@ test "pool events (0.41.0): each emitted event's row is the `/pools/history` row
     try testing.expectEqualStrings(want.items, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "", 0)));
 }
 
-test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refused pool_spent — goes into this instance's overlay first: the record stays pending, the submission awaited; settled only on that overlay's answer (a refusal there said in `detail`, the verdict standing) or, past expires, with the validator's answer; an answer without one settles at once" {
+test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refused pool_spent — goes into this instance's overlay first: the record stays pending, the submission awaited; settled only on that overlay's answer (a refusal there said in `detail`, the verdict standing); an answer without one settles at once" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ms = w.store.MemStore.init(testing.allocator);
     defer ms.deinit();
     const p = try buildPair(a);
-    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
+    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
     const beef_bytes = "the validator's BEEF";
     const accepted = try frameOf(a, .{ .map = &.{
         .{ .key = "ok", .value = .{ .boolean = true } },
@@ -2168,11 +2163,9 @@ test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refu
     // answer and the submission round-trip in the stored record (not in the answer).
     {
         var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now + 10, null);
+        _ = relay.advance(a, &r, .start, t_now);
+        const fx = relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now + 10);
         try testing.expect(fx.rest and !fx.done);
-        try testing.expectEqualStrings("close", fx.emits[0].box);
         try testing.expectEqualStrings(beef_bytes, fx.catchup.?);
         try testing.expectEqual(relay.Status.pending, r.status);
         try testing.expect(r.tx == null);
@@ -2185,11 +2178,9 @@ test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refu
         try testing.expectEqualSlices(u8, r.submission.?, back.submission.?);
         const pend = readBack(a, try back.answer(a));
         try testing.expect(pend.get("reply") == null and pend.get("submission") == null);
-        // Woken before expires: it rests on.
-        try testing.expect((try relay.advance(a, &back, .woke, t_now + 20, null)).rest);
         // This overlay admitted it: accepted now, the validator's transaction, no detail.
-        const done = try relay.advance(a, &back, .{ .overlay = admitted }, t_now + 30, null);
-        try testing.expect(done.done and done.emits.len == 0);
+        const done = relay.advance(a, &back, .{ .overlay = admitted }, t_now + 30);
+        try testing.expect(done.done and !done.emit_call);
         try testing.expectEqual(relay.Status.accepted, back.status);
         try testing.expectEqualStrings("the signed swap", back.tx.?);
         try testing.expect(back.detail == null);
@@ -2197,46 +2188,32 @@ test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refu
     // This overlay refuses it: the validator's verdict stands, `detail` says so.
     {
         var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now, null);
-        _ = try relay.advance(a, &r, .{ .overlay = rejected }, t_now, null);
+        _ = relay.advance(a, &r, .start, t_now);
+        _ = relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now);
+        _ = relay.advance(a, &r, .{ .overlay = rejected }, t_now);
         try testing.expectEqual(relay.Status.accepted, r.status);
         try testing.expectEqualStrings("this host's overlay refused the validator's transaction: NotAdmitted", r.detail.?);
     }
     // pool_spent with a BEEF: pending until this overlay answers, then refused with the pool's state.
     {
         var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now, null);
+        _ = relay.advance(a, &r, .start, t_now);
+        const fx = relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now);
         try testing.expect(!fx.done and fx.catchup != null);
         try testing.expectEqual(relay.Status.pending, r.status);
-        _ = try relay.advance(a, &r, .{ .overlay = admitted }, t_now, null);
+        _ = relay.advance(a, &r, .{ .overlay = admitted }, t_now);
         try testing.expectEqual(relay.Status.refused, r.status);
         try testing.expectEqualStrings("pool_spent", r.reason.?);
         try testing.expect(r.pool_state != null);
     }
-    // No answer from this overlay by expires: the validator's answer, `detail` saying so.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now, null);
-        const late = try relay.advance(a, &r, .woke, t_expires, null);
-        try testing.expect(late.done);
-        try testing.expectEqual(relay.Status.refused, r.status);
-        try testing.expectEqualStrings("this host's overlay did not answer before expires", r.detail.?);
-    }
     // An answer with no BEEF (any other refusal): settled at once, as before.
     {
         var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
+        _ = relay.advance(a, &r, .start, t_now);
+        const fx = relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
             .{ .key = "ok", .value = .{ .boolean = false } },
             .{ .key = "reason", .value = .{ .text = "below_minimum" } },
-        } }) } }, t_now, null);
+        } }) } }, t_now);
         try testing.expect(fx.done and fx.catchup == null);
         try testing.expectEqual(relay.Status.refused, r.status);
     }

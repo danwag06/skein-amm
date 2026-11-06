@@ -599,10 +599,11 @@ the instance itself) and, as an event route, the libp2p routes' admits.
 action) and the swap, and the validator the caller names —
 `validator` (its identity key) and `peerId` (its libp2p peer ID, text, 0.4.0)
 — checks the pair, records it under `amm/app` and relays it to that
-validator: it dials `peerId` over libp2p, or, when `peerId` is its own
+validator: it calls `peerId` over libp2p (0.44.0: one `call` intention its host
+carries — dial, one frame out, one frame in), or, when `peerId` is its own
 node's, calls its own `amm-validator` in-VM with the same package (a node
 does not dial itself). It looks at no liveness. The record settles
-`accepted`, `refused`, `timeout` or `failed` (amm-p2p README "The
+`accepted`, `refused` or `failed` (amm-p2p README "The
 marketplace relay").
 
 `amm.pool.affirm` is not relayed: amm-p2p packages the request (box

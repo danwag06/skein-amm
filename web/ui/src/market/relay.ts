@@ -5,10 +5,11 @@
  * AMM app's box, hosted by programs/amm-p2p:
  *
  *   amm.swap.terms   (reads)   {} → {commissionPkh: bytes(20) | null, minCommissionBps}
- *   amm.swap.submit  (writes)  {funding, swap, pool, validator, peerId, expires} → the record
+ *   amm.swap.submit  (writes)  {funding, swap, pool, validator, peerId} → the record
  *                              (0.34.0, D15: the host holds the request until the relay thread
  *                              rests, so the answer is the settled record; past the host's bound,
- *                              503: no answer yet)
+ *                              503: no answer yet; 0.44.0: no `expires` — the relay keeps no
+ *                              deadline, the page its own patience per leg, swapFlow.ts)
  *   amm.swap.status  (reads)   {id} → the record (0.34.0: the pages read it plain, `GET
  *                              <base>/swaps?id=`, src/lib/overlay.ts `readSwap`, behind "Check again")
  *
@@ -27,18 +28,21 @@
  *              funding against parents in the BEEF); 0.29.0: the transaction
  *              of the leg's `amm-swap` sats output, the swap's input 1
  *   swap       bytes: the raw swap, the validator's slot `OP_0`
- *   pool       text `<txid>_<vout>`; validator bytes(33); expires unix ms
+ *   pool       text `<txid>_<vout>`; validator bytes(33)
  *   peerId     text: the validator's libp2p peer ID, from the pools route's row
  *              (`validatorPeerId`, 0.34.0: the host joined it from the beat): the
- *              relay dials it (or, when it is the relay's own node, hands the
- *              swap to its own validator program); it looks at no liveness
+ *              relay calls it (0.44.0: one `call` intention its host carries over
+ *              libp2p), or, when it is the relay's own node, hands the swap to its
+ *              own validator program; it looks at no liveness
  *
  * record (programs/amm-p2p relay.zig `Record.answer`; id = sha256 of the swap, hex):
- *   {id, status: "pending" | "accepted" | "refused" | "timeout" | "failed", pool, expires, …,
+ *   {id, status: "pending" | "accepted" | "refused" | "failed", pool, …,
  *    tx?, txid?            accepted: the validator's signed swap
- *    reason?, detail?,     refused / timeout / failed
+ *    reason?, detail?,     refused / failed
  *    poolState?}           refused: the pool's current state (the validator's)
- * "failed" is the relay's transport failure (retryable by submitting again):
+ * "failed" is the relay's transport failure (retryable by submitting again; 0.44.0: the host's
+ * answer to the relay's call — the dial refused, the stream closed without a frame, the host
+ * restarted):
  * the validator may or may not have the swap, so the page treats it as no
  * answer, not as a refusal.
  *
@@ -68,7 +72,7 @@ export interface SwapTerms {
 
 /** What the relay needs of `AuthFetch` (and what the tests fake). */
 export interface AuthFetchLike {
-  fetch(url: string, config?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<Pick<Response, "status" | "text">>;
+  fetch(url: string, config?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<Pick<Response, "status" | "text">>;
 }
 
 export interface SwapSubmit {
@@ -80,17 +84,14 @@ export interface SwapSubmit {
   pool: string;
   /** The pool's validator identity key (hex; sent as 33 bytes). */
   validator: string;
-  /** The validator's libp2p peer ID (text), as the liveness read gave it: what the relay dials. */
+  /** The validator's libp2p peer ID (text), as the liveness read gave it: what the relay calls. */
   peerId: string;
-  /** Unix ms after which the relay gives up. */
-  expires: number;
 }
 
 export type SwapRecord =
   | { id: string; status: "pending" }
   | { id: string; status: "accepted"; tx: number[]; txid: string }
   | { id: string; status: "refused"; reason: string; pool?: PoolState }
-  | { id: string; status: "timeout" }
   | { id: string; status: "failed"; reason: string };
 
 export class RelayError extends Error {
@@ -127,18 +128,50 @@ export function callUrl(base: string): string {
 export function submitBody(s: SwapSubmit): { fn: string; args: Record<string, unknown> } {
   return {
     fn: SWAP_SUBMIT_FN,
-    args: { funding: dagBytes(s.funding), swap: dagBytes(s.swap), pool: s.pool, validator: dagBytes(Utils.toArray(s.validator, "hex")), peerId: s.peerId, expires: s.expires },
+    args: { funding: dagBytes(s.funding), swap: dagBytes(s.swap), pool: s.pool, validator: dagBytes(Utils.toArray(s.validator, "hex")), peerId: s.peerId },
   };
 }
 
-/** One `{fn, args}` call on the app's `/call` route. Throws `RelayError` on an error answer. */
-export async function callApp(af: AuthFetchLike, base: string, fn: string, args: unknown): Promise<unknown> {
-  const res = await af.fetch(callUrl(base), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ fn, args }),
+/** Thrown when `signal` ends the wait for an answer (the page's patience, swapFlow.ts). */
+export class RelayAborted extends Error {
+  constructor() {
+    super("the page stopped waiting for the relay's answer");
+    this.name = "RelayAborted";
+  }
+}
+
+/** `p`, or a `RelayAborted` rejection as soon as `signal` aborts (a fetch that ignores the signal is left behind, its answer unread). */
+function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(new RelayAborted());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new RelayAborted());
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
   });
-  const text = await res.text();
+}
+
+/** One `{fn, args}` call on the app's `/call` route. Throws `RelayError` on an error answer, `RelayAborted` when `signal` aborts first. */
+export async function callApp(af: AuthFetchLike, base: string, fn: string, args: unknown, signal?: AbortSignal): Promise<unknown> {
+  const res = await abortable(
+    af.fetch(callUrl(base), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fn, args }),
+      ...(signal ? { signal } : {}),
+    }),
+    signal,
+  );
+  const text = await abortable(res.text(), signal);
   let answer: { fn?: unknown; result?: unknown; error?: { code?: unknown; message?: unknown } } | null = null;
   try {
     answer = JSON.parse(text);
@@ -195,7 +228,6 @@ export function parseSwapRecord(x: unknown): SwapRecord {
   if (!r || typeof id !== "string") throw new Error(`relay: not a swap record: ${JSON.stringify(x)?.slice(0, 200)}`);
   switch (status) {
     case "pending":
-    case "timeout":
       return { id, status };
     case "failed":
       return { id, status, reason: (typeof r.reason === "string" ? r.reason : "failed") + (typeof r.detail === "string" && r.detail ? `: ${r.detail}` : "") };
@@ -230,9 +262,9 @@ export async function swapTerms(af: AuthFetchLike, base: string): Promise<SwapTe
   return parseSwapTerms(await callApp(af, base, SWAP_TERMS_FN, {}));
 }
 
-export async function submitSwap(af: AuthFetchLike, base: string, s: SwapSubmit): Promise<SwapRecord> {
+export async function submitSwap(af: AuthFetchLike, base: string, s: SwapSubmit, signal?: AbortSignal): Promise<SwapRecord> {
   const { fn, args } = submitBody(s);
-  return parseSwapRecord(await callApp(af, base, fn, args));
+  return parseSwapRecord(await callApp(af, base, fn, args, signal));
 }
 
 export async function swapStatus(af: AuthFetchLike, base: string, id: string): Promise<SwapRecord> {

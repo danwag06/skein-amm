@@ -6,7 +6,7 @@
  * the planned amount, no funding transaction), the swap's inputs validated
  * with `Spend` (sats in and tokens in, over the amm-topic fixture pools), the
  * relay's call shape and status polling, acceptance (internalize, no
- * relinquish) and refusal / timeout (nothing to undo).
+ * relinquish) and refusal / no answer (nothing to undo).
  */
 import { colorReceiptInstructions } from "@1sat/actions";
 import { colorProtocolID } from "@bsv/color-permission-module";
@@ -41,7 +41,7 @@ import {
   type TokenInput,
 } from "../src/market/swapAction";
 import { dagBytes, parseSwapTerms, readBytes, swapTerms, toPoolState, type AuthFetchLike } from "../src/market/relay";
-import { relaySwap, swapIdOf } from "../src/market/swapFlow";
+import { LEG_PATIENCE_MS, relaySwap, swapIdOf } from "../src/market/swapFlow";
 import topics from "./fixtures/instance-v2/listTopicManagers.json";
 import lookupAll from "./fixtures/instance-v2/lookup-all.json";
 import beefAnswer from "./fixtures/instance-v2/lookup-outpoint-beef.json";
@@ -404,7 +404,7 @@ describe("the leg's sats (0.40.0: the staged rows that cover it, largest first; 
     expect(prepared.satsInputs).toEqual([satsInput]);
     expect(prepared.funding.txid).toBe(satsInput.txid);
     expect(Beef.fromBinary(prepared.funding.atomicBeef).atomicTxid).toBe(satsInput.txid);
-    expect(prepared.expires).toBe(1_000 + 15_000); // 0.34.0 (D15): SWAP_TTL_MS 15 s
+    expect("expires" in prepared).toBe(false); // 0.44.0: the request carries no expiry
     expect(calls[3]!.args).toMatchObject({ protocolID: [2, "amm swap"], keyID: satsInput.keyID, counterparty: "self" });
     // The order's key input: the first leg's own first sats input.
     expect(prepared.order).toBe(satsInput.outpoint);
@@ -650,7 +650,7 @@ function fakeRelay(answer: (fn: string, args: Record<string, unknown>, n: number
 const ok = (fn: string, result: unknown) => ({ status: 200, body: { fn, result } });
 
 describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until the relay rests)", () => {
-  it("submits {funding (the first sats row's transaction), swap, pool, validator, expires} as DAG-JSON bytes; the held answer is the settled record (0.34.0, D15: no poll); accepts: internalize (basket insertion); no relinquishOutput", async () => {
+  it("submits {funding (the first sats row's transaction), swap, pool, validator, peerId} as DAG-JSON bytes (0.44.0: no expires); the held answer is the settled record (0.34.0, D15: no poll); accepts: internalize (basket insertion); no relinquishOutput", async () => {
     const { wallet, calls, prepared, vkey } = await satsIn();
     let final: Transaction | undefined;
     const { af, calls: http } = fakeRelay(async (fn, args) => {
@@ -667,7 +667,6 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
       pool: `${poolDeploy.id("hex")}_0`,
       validator: dagBytes(Utils.toArray(v.identity, "hex")),
       peerId: PEER,
-      expires: 16_000, // 0.34.0 (D15): 15 s after the leg was prepared
     });
     expect((http[0]!.body.args.funding as { "/": { bytes: string } })["/"].bytes).not.toMatch(/=/);
     expect(Beef.fromBinary(readBytes(http[0]!.body.args.funding)!).atomicTxid).toBe(prepared.funding.txid);
@@ -750,14 +749,44 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
     expect(quote(req.request, liveFor([v.identity]), 0).plan.legs.map((l) => l.outpoint)).toEqual([wirePool.outpoint]);
   });
 
-  it("timeout: nothing to undo; a pending record (the host let go before the relay rested): no answer yet, its id kept", async () => {
+  it("a pending record (the host let go before the relay rested): no answer yet, its id kept; a failed record (the host's error for the relay's call): no answer, not a refusal; `timeout` is no status (0.44.0)", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const pending = fakeRelay((fn) => ok(fn, { id: ID, status: "pending" }));
     expect(await relaySwap({ wallet, authFetch: pending.af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "no answer yet" });
     expect(pending.calls).toHaveLength(1);
+    const failed = fakeRelay((fn) => ok(fn, { id: ID, status: "failed", reason: "unreachable", detail: "dial refused" }));
+    expect(await relaySwap({ wallet, authFetch: failed.af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "the relay could not reach the validator (unreachable: dial refused)" });
     const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "timeout" }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "timeout", id: ID });
+    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: swapIdOf(prepared), reason: 'no answer yet: amm.swap.submit: relay: unknown swap status "timeout"' });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
+  });
+
+  it("0.44.0: the page's patience per leg — a relay that does not answer within it is no answer yet, its signal aborted, a late answer not acted on (nothing internalized); LEG_PATIENCE_MS is 15 s", async () => {
+    expect(LEG_PATIENCE_MS).toBe(15_000);
+    const { wallet, calls, prepared, vkey } = await satsIn();
+    let signal: AbortSignal | undefined;
+    let answerLate: (() => void) | undefined;
+    const slow: AuthFetchLike = {
+      fetch: (_url, config) => {
+        signal = config?.signal;
+        // A fetch that ignores the signal (as the SDK's AuthFetch does), answering accepted later.
+        return new Promise((resolve) => {
+          answerLate = () => {
+            void validatorSigns(prepared, prepared.swap.toBinary(), vkey).then((final) =>
+              resolve({ status: 200, text: async () => JSON.stringify({ fn: "amm.swap.submit", result: { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") } }) }),
+            );
+          };
+        });
+      },
+    };
+    const t0 = Date.now();
+    const o = await relaySwap({ wallet, authFetch: slow, base: "http://x/amm", patienceMs: 50 }, prepared, PEER);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(45);
+    expect(o).toEqual({ status: "unknown", id: swapIdOf(prepared), reason: "no answer yet: no answer within 0.05 s" });
+    expect(signal?.aborted).toBe(true);
+    answerLate!();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 
   it("an error answer to submit (the instance does not serve the function): nothing recorded, nothing to undo", async () => {

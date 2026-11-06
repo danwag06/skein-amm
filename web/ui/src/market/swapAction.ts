@@ -52,11 +52,6 @@ import { SWAP_BASKET, SWAP_PROTOCOL, newReceivingKey, receiptOutput, swapInstruc
 
 /** A P2PKH unlocking script's upper bound: push(DER ≤ 72 + sighash byte) + push(33-byte key). */
 export const P2PKH_UNLOCK_LENGTH = 108;
-/**
- * How long the relay may take (the swap's `expires`): 15 s (0.34.0, D15, David Case 2026-11-04;
- * was 120 s, a 10-05 builder number): the held submit returns inside it.
- */
-export const SWAP_TTL_MS = 15_000;
 
 const toHex = (b: number[]) => Utils.toHex(b);
 
@@ -439,8 +434,6 @@ export interface PrepareSwapInput extends PlanLegInput {
   last: boolean;
   /** The swap basket's source transactions: the rows' (default: `amm-swap`'s, from the wallet). */
   holdingBeef?: Beef;
-  now?: number;
-  ttlMs?: number;
 }
 
 export type SwapPayout =
@@ -454,7 +447,6 @@ export interface PreparedSwap {
   pool: string;
   validator: string;
   bsvIn: boolean;
-  expires: number;
   plan: CallPlan;
   /** The order's key input (`<txid>.<vout>`): what the payout keys are derived from. */
   order: string;
@@ -631,7 +623,6 @@ export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
     pool: i.leg.outpoint,
     validator: i.pool.validatorIdentityKey,
     bsvIn,
-    expires: (i.now ?? Date.now()) + (i.ttlMs ?? SWAP_TTL_MS),
     plan,
     order,
     last: i.last,

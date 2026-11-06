@@ -55,8 +55,8 @@
 //!                                                     gates it): {minCommissionBps} sets, null clears, the head
 //!                                                     `amm/market`; answered to root in that box
 //!   thread  {kind: "amm-swap-relay" | "amm-pool-relay", id}   the relay (launched by a submit): a thread resting on
-//!                                                     the libp2p provider's answers to its dial of the validator
-//!                                                     the caller named, or (that validator is this node) on
+//!                                                     the host's answer to its `call` intention to the validator
+//!                                                     the caller named (0.44.0), or (that validator is this node) on
 //!                                                     what its own validator program awaited, called in-VM
 //!   message {kind: "amm-p2p-tick", job: "catchup", name, due}   from the cron provider (skein#69): a catch-up
 //!                                                     pass (a thread resting on the libp2p provider's answers
@@ -447,6 +447,13 @@ fn emit(a: Allocator, to: []const u8, box: []const u8, body: Value) ![]const u8 
         .{ .key = "box", .value = .{ .text = box } },
         .{ .key = "body", .value = .{ .bytes = try cbor.encode(a, body) } },
     }) });
+    return vm.result(a, vm.sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
+}
+
+/// Emit an event record (an intention: `{event: "call", …}`, skein 0.3.0) → its CID, what the step
+/// awaits. It goes out when the step ends without error.
+fn emitEvent(a: Allocator, ev: Value) ![]const u8 {
+    const msg = try cbor.encode(a, ev);
     return vm.result(a, vm.sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
 }
 
@@ -1045,11 +1052,11 @@ fn envLaunch(_: *anyopaque, a: Allocator, kind: relay.Kind, id: [32]u8) anyerror
     return env_call.launch(try selfProgram(a, ctx.in), targs);
 }
 
-/// amm.swap.submit {funding, swap, pool, validator, peerId, expires} (relay.zig
+/// amm.swap.submit {funding, swap, pool, validator, peerId} (relay.zig
 /// `submit`): check, record `pending` under the app's head,
 /// launch the relay thread → the record. The same request again answers its
-/// record (a `/call` waits on its relay while it is pending); one that timed
-/// out or failed in transport is relayed again.
+/// record (a `/call` waits on its relay while it is pending); one that
+/// failed in transport is relayed again.
 fn submit(c: *app.Call, kind: relay.Kind) !scbor.Value {
     const a = c.a;
     const in = ctx.in;
@@ -1247,8 +1254,8 @@ fn signer() relay.Signer {
 }
 
 /// One step of the relay thread {kind: "amm-swap-relay" | "amm-pool-relay",
-/// id}: launched, or stepped again by the libp2p provider's answer to its
-/// dial or by the deadline at `expires` (relay.zig `advance`).
+/// id}: launched, or stepped again by the host's answer to its `call` intention (0.44.0) or by
+/// this instance's overlay answering the catch-up submission (relay.zig `advance`).
 fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
     const s = vm.store();
     const idb = args.getBytes("id") orelse return error.BadInput;
@@ -1264,35 +1271,39 @@ fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
     if (rec.local) return localRelayStep(a, in, kind, id, now, &h, &book, &rec);
 
     var input: relay.Input = .start;
-    var pkg: ?[]const u8 = null;
-    if (in.get("reply")) |r| if (r == .map) {
+    const reply: ?Value = if (in.get("reply")) |r| (if (r == .map) r else null) else null;
+    if (reply) |r| {
         const reply_to = r.getCid("replyTo") orelse "";
         // 0.41.0: this instance's overlay answering the submission of the validator's BEEF.
         if (rec.submission) |m| if (eql(u8, reply_to, m)) {
             input = .{ .overlay = try s.getValue(a, r.getCid("body") orelse return error.BadInput) };
         };
         if (input == .start) {
-            if (rec.submission != null or rec.dial == null or !eql(u8, reply_to, rec.dial.?)) {
-                // Not the answer awaited (a late one): rest again.
-                if (rec.submission orelse rec.dial) |d| try vm.awaitRecord(d);
-                try vm.deadline(@intCast(rec.expires));
-                _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{.{ .key = "late", .value = .{ .boolean = true } }}));
-                return;
-            }
-            const body = try s.getValue(a, r.getCid("body") orelse return error.BadInput);
-            input = .{ .answer = libp2p.dialAnswer(r.getText("box") orelse "", body) catch .{ .closed = "BadAnswer" } };
-            if (input.answer == .opened and rec.status == .pending) pkg = try relay.packageFor(a, signer(), rec, try tokenTopic(a));
+            if (rec.submission == null) if (rec.call) |c| if (eql(u8, reply_to, c)) {
+                const body = try s.getValue(a, r.getCid("body") orelse return error.BadInput);
+                input = .{ .answer = libp2p.callAnswer(body) catch .{ .failed = "the host's answer to the call is not {body} or {error}" } };
+            };
         }
-    };
-    if (input == .start and (in.getBool("woke") orelse false)) input = .woke;
+    }
+    if (input == .start and (reply != null or (in.getBool("woke") orelse false))) {
+        if (rec.status == .pending and rec.call == null and rec.submission == null) {
+            // A thread launched before 0.44.0 (its dial's answer, or its deadline): no call to rest on.
+            rec.status = .failed;
+            rec.reason = "unreachable";
+            rec.detail = "relayed before 0.44.0";
+            rec.updated = now;
+            return relayFinish(a, kind, id, &h, &book, &rec, .{ .done = true });
+        }
+        // Not the answer awaited (a late one): rest again on what is.
+        if (rec.status == .pending) if (rec.submission orelse rec.call) |d| try vm.awaitRecord(d);
+        _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{.{ .key = "late", .value = .{ .boolean = true } }}));
+        return;
+    }
 
-    var fx = try relay.advance(a, &rec, input, now, pkg);
-    const lp = try providerKey(a, "libp2p");
-    for (fx.emits, 0..) |req, i| {
-        const m = try emit(a, lp, req.box, req.body);
-        if (fx.dial) |di| if (di == i) {
-            rec.dial = m;
-        };
+    var fx = relay.advance(a, &rec, input, now);
+    if (fx.emit_call) {
+        const pkg = try relay.packageFor(a, signer(), rec, try tokenTopic(a));
+        rec.call = try emitEvent(a, try libp2p.callIntention(a, rec.peer orelse return error.NoPeer, rec.kind.protocol(), pkg));
     }
     if (fx.catchup) |b| {
         // 0.41.0: the validator's BEEF into this instance's own overlay — the message amm-validator's
@@ -1307,17 +1318,19 @@ fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
             fx.done = true;
         }
     }
-    try book.put(a, rec);
-    try h.save(a, &book);
-    if (fx.rest) {
-        try vm.awaitRecord(rec.submission orelse rec.dial orelse return error.NoDial);
-        try vm.deadline(@intCast(rec.expires));
-    }
+    if (fx.rest) try vm.awaitRecord(rec.submission orelse rec.call orelse return error.NoCall);
+    return relayFinish(a, kind, id, &h, &book, &rec, fx);
+}
+
+/// Save the record, answer a message caller when it settled, and end the step.
+fn relayFinish(a: Allocator, kind: relay.Kind, id: [32]u8, h: *AppHead, book: *relay.Book, rec: *relay.Record, fx: relay.Effect) !void {
+    try book.put(a, rec.*);
+    try h.save(a, book);
     var sent = false;
     if (fx.done) if (rec.request) |q| {
         sent = try answerSender(a, q.sender, try relay.answerMessage(a, kind.submitFn(), q.message, try rec.answer(a)));
     };
-    _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{
+    _ = try vm.finish(a, vm.store(), try resultRecord(a, "relay", &.{
         .{ .key = "relay", .value = .{ .text = kind.relayKind() } },
         .{ .key = "id", .value = .{ .text = try a.dupe(u8, &relay.idText(id)) } },
         .{ .key = "status", .value = .{ .text = @tagName(rec.status) } },
@@ -1330,14 +1343,24 @@ fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
 /// frame on `/amm-validator/1/<call>` (skein programs/frontdoor libp2p.zig `stepped`) — it calls the
 /// route's handler, amm-validator's fn, in-VM from this step with the same package as the frame's
 /// body (`callValidator`). The handler's `{wait: true}` means it awaited its submission in this
-/// step, so this thread rests on that (and the deadline at `expires`); stepped again by the
+/// step, so this thread rests on that; stepped again by the
 /// engine's answer (`reply`) or the awaited thread at rest (`resolved`), it calls the handler again
 /// with it. `{verdict, body}` is the reply frame: the record settles (relay.zig `localAnswer`).
 fn localRelayStep(a: Allocator, in: Value, kind: relay.Kind, id: [32]u8, now: u64, h: *AppHead, book: *relay.Book, rec: *relay.Record) !void {
     const s = vm.store();
     const reply: ?Value = if (in.get("reply")) |r| (if (r == .map) r else null) else null;
     const resolved = in.get("resolved");
-    const input: relay.LocalInput = if (reply != null or resolved != null) .again else if (in.getBool("woke") orelse false) .woke else .start;
+    if (reply == null and resolved == null and (in.getBool("woke") orelse false)) {
+        // A thread launched before 0.44.0, woken by its deadline: nothing calls the validator again.
+        if (rec.status == .pending) {
+            rec.status = .failed;
+            rec.reason = "validator_failed";
+            rec.detail = "relayed before 0.44.0";
+            rec.updated = now;
+        }
+        return relayFinish(a, kind, id, h, book, rec, .{ .done = true });
+    }
+    const input: relay.LocalInput = if (reply != null or resolved != null) .again else .start;
     var fx = relay.advanceLocal(rec, input, now);
     if (fx.call) {
         const pkg = try relay.packageFor(a, signer(), rec.*, try tokenTopic(a));
@@ -1350,7 +1373,6 @@ fn localRelayStep(a: Allocator, in: Value, kind: relay.Kind, id: [32]u8, now: u6
     }
     try book.put(a, rec.*);
     try h.save(a, book);
-    if (fx.rest) try vm.deadline(@intCast(rec.expires));
     var sent = false;
     if (fx.done) if (rec.request) |q| {
         sent = try answerSender(a, q.sender, try relay.answerMessage(a, kind.submitFn(), q.message, try rec.answer(a)));

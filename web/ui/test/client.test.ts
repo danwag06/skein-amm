@@ -72,7 +72,8 @@ describe("the shared names (D10)", () => {
     expect(pkg.LP_KEY_MARK).toBe(" · amm-lp ");
     expect(pkg.POOL_DEPLOY_LABEL).toBe("amm-pool-deploy");
     expect([pkg.POOL_TAG, pkg.POOL_OP]).toEqual(["amm-pool", "amm-pool"]);
-    expect(pkg.SWAP_TTL_MS).toBe(15_000);
+    expect(pkg.LEG_PATIENCE_MS).toBe(15_000);
+    expect("SWAP_TTL_MS" in pkg).toBe(false);
     expect(pkg.DEFAULT_FEE_RATE_SATS_PER_KB).toBe(100);
     for (const fn of [pkg.transferPlanLabels, pkg.newReceivingKey, pkg.receiptOutput, pkg.swapInstructions, pkg.swapSatsInstructions, pkg.poolCustomInstructions, pkg.lpKeyDescription, pkg.lpKeyIdOfDescription, pkg.isPoolRow, pkg.createClient]) expect(typeof fn).toBe("function");
     expect(pkg.transferPlanLabels(T).some((l) => l.startsWith("p color plan"))).toBe(true);
