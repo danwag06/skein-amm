@@ -160,6 +160,20 @@ export interface Defaults {
   /** 0.40.0: `minLegSats` present when the defaults set one. */
   terms?: { lpFeeBps: number; validatorFeeBps: number; commissionBps: number; minLegSats?: number };
   market?: { minCommissionBps: number };
+  /** 0.42.0 (open-exchange 0.15.0): the price in sats to enable a token on `POST /amm/enable`, present when the admin set one. */
+  enablePriceSats?: number;
+}
+
+/** The exchange's wallet (0.42.0, open-exchange 0.15.0; `GET <swap>/wallet`, the host's read of swap's wallet): its sats and coin count. */
+export interface ExchangeWallet {
+  sats: number;
+  outputs: number;
+}
+
+/** `GET <swap>/wallet`: `{sats, outputs}`. */
+export async function readWallet(base: string, fetchFn: typeof fetch = fetch): Promise<ExchangeWallet> {
+  const a = (await getJson(`${base}/wallet`, fetchFn)) as Record<string, unknown> | null;
+  return { sats: typeof a?.sats === "number" ? a.sats : 0, outputs: typeof a?.outputs === "number" ? a.outputs : 0 };
 }
 
 /** Discovery (`GET <swap>/discovery`): root's last decision, on or off, and since when (ms); the host starts or stops the discovery instance. */
@@ -182,5 +196,6 @@ export async function readDefaults(base: string, fetchFn: typeof fetch = fetch):
   if (t && typeof t.lpFeeBps === "number" && typeof t.validatorFeeBps === "number" && typeof t.commissionBps === "number") out.terms = { lpFeeBps: t.lpFeeBps, validatorFeeBps: t.validatorFeeBps, commissionBps: t.commissionBps, ...(typeof t.minLegSats === "number" && t.minLegSats > 0 ? { minLegSats: t.minLegSats } : {}) };
   const m = a?.market as Record<string, unknown> | undefined;
   if (m && typeof m.minCommissionBps === "number") out.market = { minCommissionBps: m.minCommissionBps };
+  if (typeof a?.enablePriceSats === "number" && a.enablePriceSats > 0) out.enablePriceSats = a.enablePriceSats;
   return out;
 }

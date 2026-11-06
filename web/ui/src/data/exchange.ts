@@ -146,6 +146,8 @@ export const setDefaultMarket: AmmClient["setDefaultMarket"] = (...a: Parameters
 export const clearDefaultMarket: AmmClient["clearDefaultMarket"] = (...a: Parameters<AmmClient["clearDefaultMarket"]>) => (client.clearDefaultMarket as (...x: unknown[]) => ReturnType<AmmClient["clearDefaultMarket"]>)(...a);
 export const discoveryState: AmmClient["discoveryState"] = (...a: Parameters<AmmClient["discoveryState"]>) => (client.discoveryState as (...x: unknown[]) => ReturnType<AmmClient["discoveryState"]>)(...a);
 export const setDiscovery: AmmClient["setDiscovery"] = (...a: Parameters<AmmClient["setDiscovery"]>) => (client.setDiscovery as (...x: unknown[]) => ReturnType<AmmClient["setDiscovery"]>)(...a);
+export const setEnablePrice: AmmClient["setEnablePrice"] = (...a: Parameters<AmmClient["setEnablePrice"]>) => (client.setEnablePrice as (...x: unknown[]) => ReturnType<AmmClient["setEnablePrice"]>)(...a);
+export const exchangeWallet: AmmClient["exchangeWallet"] = (...a: Parameters<AmmClient["exchangeWallet"]>) => (client.exchangeWallet as (...x: unknown[]) => ReturnType<AmmClient["exchangeWallet"]>)(...a);
 
 // ---------------------------------------------------------------------------
 // Session
@@ -356,6 +358,7 @@ export const useWalletSats = (enabled: boolean) => useData(walletSats, [], enabl
 export const useRegisteredTokens = (enabled: boolean) => useData(registeredTokens, [], enabled);
 export const useDefaults = (enabled: boolean) => useData(defaults, [], enabled);
 export const useDiscovery = (enabled: boolean) => useData(discoveryState, [], enabled);
+export const useExchangeWallet = (enabled: boolean) => useData(exchangeWallet, [], enabled);
 export const useClaimStatus = (enabled: boolean) => useData(claimStatus, [], enabled);
 export const useTokensToEnable = (enabled: boolean) => useData(tokensToEnable, [], enabled);
 

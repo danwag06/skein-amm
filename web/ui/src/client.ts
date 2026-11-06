@@ -91,7 +91,7 @@ import {
   type PoolEventMessage,
   type SignedFetch,
 } from "./lib/overlay.js";
-import { authFetchPerInstance, instanceBase, readDefaults, readDiscovery, readTokens, sendMessage, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "./lib/skein.js";
+import { authFetchPerInstance, instanceBase, readDefaults, readDiscovery, readTokens, readWallet, sendMessage, type Defaults, type Discovery, type EnabledToken, type ExchangeWallet, type ListedToken } from "./lib/skein.js";
 import { depthOf } from "./market/prices.js";
 import { buildPlanRequest, legMinerFeeSats, quote as planQuote } from "./market/plan.js";
 import { validatorStatus } from "./market/view.js";
@@ -392,7 +392,7 @@ export interface RegisteredToken {
   status: EnabledToken["status"];
 }
 
-export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer, Candle, CandleSeries, CandleTf, Holders, PoolAt, PoolHistoryPage, SpendAll, TokenPosition, TokenStats, Trade, TradesPage };
+export type { EnabledToken, Defaults, Discovery, ExchangeWallet, PoolRow, PoolsAnswer, Candle, CandleSeries, CandleTf, Holders, PoolAt, PoolHistoryPage, SpendAll, TokenPosition, TokenStats, Trade, TradesPage };
 export type { PoolEvent, PoolEventMessage, PoolRevert } from "./lib/overlay.js";
 export type { Price } from "./lib/overlay.js";
 export { parsePoolEventMessage } from "./lib/overlay.js";
@@ -1760,6 +1760,24 @@ function makeClient(opts: ClientOptions, s: Shared) {
     await sendDefaults({ market: null });
   }
 
+  /**
+   * Sets the price to enable a token (0.42.0, open-exchange 0.15.0): the admin's `{fn: "price", args: {sats}}`
+   * to swap's `<app>/admin`; the host sets it as the price of `POST /amm/enable` (any signed sender enables a
+   * token for it). `null` turns the paid enable off. Refused here unless a whole number of sats, 1 or more.
+   */
+  async function setEnablePrice(sats: number | null): Promise<void> {
+    if (sats !== null && (!Number.isSafeInteger(sats) || sats < 1)) throw new Error("sats: a whole number, 1 or more (or null: off)");
+    const { signedFor } = needWallet();
+    const me = await swapIdentity();
+    await sendMessage(signedFor(swapBase), swapBase, me, `${app()}/admin`, { fn: "price", args: { sats } });
+    emit();
+  }
+
+  /** The exchange's wallet (0.42.0, open-exchange 0.15.0; `GET <swap>/wallet`, the host's read): the sats swap's wallet holds and its coin count. */
+  async function exchangeWallet(): Promise<ExchangeWallet> {
+    return readWallet(swapBase, ff);
+  }
+
   /** The discovery instance's record (0.18.0, shruggr/skein#137; `GET <config>/discovery`): `{on: false}` until root turns it on. */
   async function discoveryState(): Promise<Discovery> {
     return readDiscovery(swapBase, ff);
@@ -1846,5 +1864,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     clearDefaultMarket: guard(clearDefaultMarket),
     discoveryState: guard(discoveryState),
     setDiscovery: guard(setDiscovery),
+    setEnablePrice: guard(setEnablePrice),
+    exchangeWallet: guard(exchangeWallet),
   };
 }

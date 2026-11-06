@@ -15,6 +15,9 @@
  * lookup names are derived from the token id.
  * Discovery: one switch, root's `discovery {on}` — the 1Color discovery topic
  * `tm_color` served by an instance of its own, started or stopped by the host.
+ * The price to enable a token (0.42.0, open-exchange 0.15.0): one field, root's `price {sats}`
+ * (empty: off, only the admin enables); any signed sender may then enable a token on
+ * `POST /amm/enable` for it. The exchange's wallet: the sats it holds (`GET <swap>/wallet`).
  */
 import { useEffect, useState } from "react";
 import { shortTokenId } from "../lib/tokenId";
@@ -27,17 +30,20 @@ import {
   setDefaultMarket,
   setDefaultTerms,
   setDiscovery,
+  setEnablePrice,
   setTokenTerms,
   tokenTerms,
   useClaimStatus,
   useDefaults,
   useDiscovery,
+  useExchangeWallet,
   useRegisteredTokens,
   useTokensToEnable,
   type Data,
   type Defaults,
   type Discovery,
   type EnableCandidate,
+  type ExchangeWallet,
   type EnableSent,
   type RegisteredToken,
   type Session,
@@ -399,6 +405,88 @@ function DefaultMarketCard({ defaults }: { defaults: Data<Defaults> }) {
   );
 }
 
+/** The price field's text (0.42.0): empty is off (null); else a whole number of sats, 1 or more; undefined when it is neither. */
+export function priceSats(text: string): number | null | undefined {
+  const t = text.trim();
+  if (t === "") return null;
+  if (!/^\d+$/.test(t)) return undefined;
+  const n = Number(t);
+  return Number.isSafeInteger(n) && n >= 1 ? n : undefined;
+}
+
+/** What the price record says (0.42.0). */
+export function enablePriceText(sats: number | undefined): string {
+  return sats ? `Anyone with a wallet can enable a token for ${sats} sats. Only you can disable it.` : "Off: only you enable tokens.";
+}
+
+/** The price to enable a token (0.42.0, root only): one field; empty turns it off. */
+function EnablePriceCard({ defaults }: { defaults: Data<Defaults> }) {
+  const [price, setPrice] = useState("");
+  const [error, busy, run] = useAct();
+  const [done, setDone] = useState<string | null>(null);
+  const want = priceSats(price);
+  return (
+    <form
+      className="panel stack-sm"
+      aria-labelledby="price-h"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (want === undefined) return;
+        setDone(null);
+        run(async () => {
+          await setEnablePrice(want);
+          setDone(want === null ? "Sent: the paid enable is off once the exchange takes it." : `Sent: the price is ${want} sats once the exchange takes it.`);
+          defaults.reload();
+        });
+      }}
+    >
+      <h2 id="price-h" className="h2">
+        Price to enable a token
+      </h2>
+      {defaults.data === null ? (
+        <p className="muted">{defaults.error ? `Could not read the defaults: ${defaults.error}` : "Reading the defaults…"}</p>
+      ) : (
+        <p className="fg2">{enablePriceText(defaults.data.enablePriceSats)}</p>
+      )}
+      <div className="row row-wrap">
+        <div className="field">
+          <label htmlFor="enable-price">Price to enable a token (sats)</label>
+          <input id="enable-price" inputMode="numeric" value={price} onChange={(e) => setPrice(e.target.value)} aria-invalid={want === undefined || undefined} />
+        </div>
+      </div>
+      <div className="row row-wrap">
+        <button type="submit" className="btn btn-primary" disabled={busy || want === undefined}>
+          {busy ? "Sending…" : "Set price"}
+        </button>
+      </div>
+      <span className="help">Empty turns it off. A token enabled this way gets the default terms. A token you disabled can only be enabled again by you.</span>
+      {error && <Notice kind="bad">Could not send: {error}</Notice>}
+      {done && <Notice kind="ok">{done}</Notice>}
+    </form>
+  );
+}
+
+/** The exchange's wallet line (0.42.0). */
+export function exchangeWalletText(w: ExchangeWallet): string {
+  return `Exchange wallet: ${w.sats} sats`;
+}
+
+/** The exchange's wallet (0.42.0, root only): what the paid enables paid into it. */
+function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
+  return (
+    <section className="panel stack-sm" aria-labelledby="wallet-h">
+      <h2 id="wallet-h" className="h2">
+        Exchange wallet
+      </h2>
+      {wallet.data === null ? (
+        <p className="muted">{wallet.error ? `Could not read the exchange's wallet: ${wallet.error}` : "Reading the exchange's wallet…"}</p>
+      ) : (
+        <p className="fg2">{exchangeWalletText(wallet.data)}</p>
+      )}
+    </section>
+  );
+}
+
 /** What the discovery record says, in a few words. */
 export function discoveryText(d: Discovery): string {
   return d.on
@@ -619,6 +707,7 @@ export function Settings({ session, root }: { session: Session; root: boolean })
   const reg = useRegisteredTokens(connected && root);
   const defs = useDefaults(connected && root);
   const disc = useDiscovery(connected && root);
+  const wallet = useExchangeWallet(connected && root);
   const claim = useClaimStatus(connected);
   const unclaimed = claim.data?.claimed === false;
   return (
@@ -640,6 +729,8 @@ export function Settings({ session, root }: { session: Session; root: boolean })
           {unclaimed && <ClaimSection />}
           <DefaultTermsCard defaults={defs} />
           <DefaultMarketCard defaults={defs} />
+          <EnablePriceCard defaults={defs} />
+          <ExchangeWalletCard wallet={wallet} />
           <DiscoveryCard discovery={disc} />
           <EnableCard discovery={disc} />
           <section className="panel stack-sm" aria-labelledby="regd-h">

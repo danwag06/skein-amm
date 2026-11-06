@@ -29,6 +29,8 @@ import {
   hasTerms,
   setDefaultMarket,
   setDefaultTerms,
+  setEnablePrice,
+  exchangeWallet,
   setTokenTerms,
   tokenTerms,
   setDiscovery,
@@ -99,6 +101,8 @@ interface Instance {
   /** The swap instance's enable list (`/amm/tokens`). */
   enabled: Record<string, unknown>[];
   defaults: Record<string, unknown>;
+  /** 0.42.0: the host's read of swap's wallet (`/amm/wallet`). */
+  wallet: Record<string, unknown>;
   discovery: Record<string, unknown>;
   /** The host's pools routes (P1, P2): each token's listed pools (the host filtered them). */
   pools: Record<string, unknown[]>;
@@ -138,6 +142,7 @@ function instance(): Instance {
   return {
     enabled: [enabledRow(TOKEN, "TST", 0, 2)],
     defaults: {},
+    wallet: { sats: 0, outputs: 0 },
     discovery: { on: false },
     pools: { [TOKEN]: [wirePool(poolDeploy.id("hex"), v.pool0)] },
     stats: { [TOKEN]: statsRow(TOKEN, { sats: v.pool0.bsv, tokens: v.pool0.tokens }, 1) },
@@ -188,6 +193,7 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     const path = u.pathname.replace(/^\/amm/, "");
     if (path === "/tokens") return json(inst.enabled);
     if (path === "/defaults") return json(inst.defaults);
+    if (path === "/wallet") return json(inst.wallet);
     if (path === "/discovery") return json(inst.discovery);
     if (path === "/admin") return json({});
     if (path === "/pools") return json(inst.enabled.filter((t) => t.status === "enabled").flatMap((t) => (inst.pools[String(t.tokenId)] ?? []).map((p) => ({ tokenId: t.tokenId, ...(p as object) }))));
@@ -591,6 +597,25 @@ describe("exchange.ts, wired", () => {
     for (const bad of [{ lpBps: 30.5, validatorBps: 5, commissionBps: 0 }, { lpBps: -1, validatorBps: 5, commissionBps: 0 }, { lpBps: 30, validatorBps: 10_001, commissionBps: 0 }])
       await expect(setDefaultTerms(bad)).rejects.toThrow(/0 to 10000/);
     expect(inst.sent).toHaveLength(4);
+  });
+
+  it("setEnablePrice (0.42.0): the admin's {fn: price, args: {sats}} to swap's <app>/admin, null = off; bad values refused before anything is sent; enablePriceSats on the defaults; exchangeWallet = GET /amm/wallet", async () => {
+    inst.defaults = { enablePriceSats: null };
+    expect(await defaults()).toEqual({});
+    inst.defaults = { enablePriceSats: 2000 };
+    expect(await defaults()).toEqual({ enablePriceSats: 2000 });
+    await expect(setEnablePrice(2000)).rejects.toThrow(/Connect a wallet/);
+    connect();
+    await setEnablePrice(2000);
+    await setEnablePrice(null);
+    const msgs = inst.sent.map((x) => x.body.message as { recipient: Uint8Array; messageBox: string; body: Uint8Array });
+    expect(msgs.map((m) => `${Utils.toHex(Array.from(m.recipient))} ${m.messageBox}`)).toEqual([`${SKEIN} amm/admin`, `${SKEIN} amm/admin`]);
+    expect(msgs.map((m) => decode(m.body))).toEqual([{ fn: "price", args: { sats: 2000 } }, { fn: "price", args: { sats: null } }]);
+    for (const bad of [0, -5, 1.5]) await expect(setEnablePrice(bad)).rejects.toThrow(/whole number/);
+    expect(inst.sent).toHaveLength(2);
+    inst.wallet = { sats: 2000, outputs: 1 };
+    expect(await exchangeWallet()).toEqual({ sats: 2000, outputs: 1 });
+    expect(inst.requests.at(-1)).toBe("GET /amm/wallet");
   });
 
   it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {

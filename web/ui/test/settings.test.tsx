@@ -13,7 +13,7 @@ vi.mock("../src/data/exchange", async (orig) => ({ ...(await orig<typeof import(
 
 const { enableCandidates } = await import("../src/data/exchange");
 const { shortTokenId } = await import("../src/lib/tokenId");
-const { DISCOVERY_OFF_TEXT, EnableList, NOTHING_TO_ENABLE_TEXT, enableSentText } = await import("../src/ox/Settings");
+const { DISCOVERY_OFF_TEXT, EnableList, NOTHING_TO_ENABLE_TEXT, enableSentText, enablePriceText, exchangeWalletText, priceSats } = await import("../src/ox/Settings");
 
 const A = `${"a1".repeat(32)}_0`;
 const B = `${"b1".repeat(32)}_0`;
@@ -124,5 +124,19 @@ describe("Settings: a token's own terms (0.35.0)", () => {
     expect(html).toContain("Minimum leg (sats)");
     expect(html).toContain(">Save<");
     expect(html).toContain(">Market only<");
+  });
+});
+
+describe("Settings: the price to enable a token and the exchange's wallet (0.42.0)", () => {
+  it("the price field: empty is off (null); a whole number of sats, 1 or more; anything else refused (undefined)", () => {
+    expect(priceSats("")).toBeNull();
+    expect(priceSats("  ")).toBeNull();
+    expect(priceSats("2000")).toBe(2000);
+    for (const bad of ["0", "1.5", "-3", "abc"]) expect(priceSats(bad)).toBeUndefined();
+  });
+  it("the texts", () => {
+    expect(enablePriceText(undefined)).toBe("Off: only you enable tokens.");
+    expect(enablePriceText(2000)).toBe("Anyone with a wallet can enable a token for 2000 sats. Only you can disable it.");
+    expect(exchangeWalletText({ sats: 2000, outputs: 1 })).toBe("Exchange wallet: 2000 sats");
   });
 });

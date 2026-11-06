@@ -43,6 +43,9 @@ describe("the swap instance's reads", () => {
     const d = { terms: { lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 }, market: { minCommissionBps: 1 } };
     expect(await readDefaults(CONFIG, answering(d))).toEqual(d);
     expect(await readDefaults(CONFIG, answering({ terms: { lpFeeBps: 30 } }))).toEqual({});
+    // 0.42.0: the price to enable a token, when set.
+    expect(await readDefaults(CONFIG, answering({ enablePriceSats: null }))).toEqual({});
+    expect(await readDefaults(CONFIG, answering({ enablePriceSats: 2000 }))).toEqual({ enablePriceSats: 2000 });
   });
 
   it("readDiscovery: GET <swap>/discovery — {on, since}; {on: false} with none or another shape", async () => {
