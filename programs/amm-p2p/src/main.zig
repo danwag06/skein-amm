@@ -90,6 +90,7 @@ const schedule = @import("schedule.zig");
 const proofs = @import("proofs.zig");
 const views = @import("views.zig");
 const relay = @import("relay.zig");
+const amm_submit = @import("amm_submit");
 const terms = @import("terms");
 const reads = @import("reads.zig");
 const lookup = @import("lookup");
@@ -1266,20 +1267,26 @@ fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
     var pkg: ?[]const u8 = null;
     if (in.get("reply")) |r| if (r == .map) {
         const reply_to = r.getCid("replyTo") orelse "";
-        if (rec.dial == null or !eql(u8, reply_to, rec.dial.?)) {
-            // Not this dial's answer (a late one): rest again.
-            if (rec.dial) |d| try vm.awaitRecord(d);
-            try vm.deadline(@intCast(rec.expires));
-            _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{.{ .key = "late", .value = .{ .boolean = true } }}));
-            return;
+        // 0.41.0: this instance's overlay answering the submission of the validator's BEEF.
+        if (rec.submission) |m| if (eql(u8, reply_to, m)) {
+            input = .{ .overlay = try s.getValue(a, r.getCid("body") orelse return error.BadInput) };
+        };
+        if (input == .start) {
+            if (rec.submission != null or rec.dial == null or !eql(u8, reply_to, rec.dial.?)) {
+                // Not the answer awaited (a late one): rest again.
+                if (rec.submission orelse rec.dial) |d| try vm.awaitRecord(d);
+                try vm.deadline(@intCast(rec.expires));
+                _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{.{ .key = "late", .value = .{ .boolean = true } }}));
+                return;
+            }
+            const body = try s.getValue(a, r.getCid("body") orelse return error.BadInput);
+            input = .{ .answer = libp2p.dialAnswer(r.getText("box") orelse "", body) catch .{ .closed = "BadAnswer" } };
+            if (input.answer == .opened and rec.status == .pending) pkg = try relay.packageFor(a, signer(), rec, try tokenTopic(a));
         }
-        const body = try s.getValue(a, r.getCid("body") orelse return error.BadInput);
-        input = .{ .answer = libp2p.dialAnswer(r.getText("box") orelse "", body) catch .{ .closed = "BadAnswer" } };
-        if (input.answer == .opened and rec.status == .pending) pkg = try relay.packageFor(a, signer(), rec, try tokenTopic(a));
     };
     if (input == .start and (in.getBool("woke") orelse false)) input = .woke;
 
-    const fx = try relay.advance(a, &rec, input, now, pkg);
+    var fx = try relay.advance(a, &rec, input, now, pkg);
     const lp = try providerKey(a, "libp2p");
     for (fx.emits, 0..) |req, i| {
         const m = try emit(a, lp, req.box, req.body);
@@ -1287,10 +1294,23 @@ fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
             rec.dial = m;
         };
     }
+    if (fx.catchup) |b| {
+        // 0.41.0: the validator's BEEF into this instance's own overlay — the message amm-validator's
+        // submit.zig sends, from this instance to itself in the submissions box, for the token's
+        // topic — and the thread rests on that submission's first answer.
+        if (try tokenTopic(a)) |topic| {
+            const me = (in.get("self") orelse return error.NoSelf).getBytes("identity") orelse return error.NoSelf;
+            rec.submission = try vm.send(a, me, try amm_submit.box(a, relay.app_name), try amm_submit.body(a, b, topic));
+        } else {
+            relay.applyReply(a, &rec, rec.reply.?);
+            fx.rest = false;
+            fx.done = true;
+        }
+    }
     try book.put(a, rec);
     try h.save(a, &book);
     if (fx.rest) {
-        try vm.awaitRecord(rec.dial orelse return error.NoDial);
+        try vm.awaitRecord(rec.submission orelse rec.dial orelse return error.NoDial);
         try vm.deadline(@intCast(rec.expires));
     }
     var sent = false;

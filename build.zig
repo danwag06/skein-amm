@@ -45,6 +45,9 @@ const Mods = struct {
     /// amm-lookup's index (0.34.0, programs/amm-lookup/src/index.zig): amm-p2p's read routes answer
     /// from the lookup's own answers (P3-P6), the same code, over the same index.
     amm_lookup: *std.Build.Module,
+    /// amm-validator's submission message (0.41.0, programs/amm-validator/src/submit.zig): amm-p2p's
+    /// relay submits the validator's answered BEEF to its own overlay with the same message.
+    amm_submit: *std.Build.Module,
     /// skein-overlay's engine sources (src/state.zig, src/submit.zig, src/engine_vm.zig, …), which
     /// it does not export as modules: the validator submits through the engine's own
     /// `submit.route` and reads its state, as amm-poc did with skein-overlay 0.2.0.
@@ -106,7 +109,14 @@ fn mods(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
             .{ .name = "1color", .module = color },
         },
     });
+    const amm_submit = b.createModule(.{
+        .root_source_file = b.path("programs/amm-validator/src/submit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "chain", .module = chain }},
+    });
     return .{
+        .amm_submit = amm_submit,
         .chain = chain,
         .wallet = sdk.module("wallet"),
         .message = sdk.module("message"),
@@ -160,6 +170,7 @@ fn imports(b: *std.Build, m: Mods, program: []const u8) []const std.Build.Module
         .{ .name = "skein_overlay", .module = m.engine },
         .{ .name = "lookup", .module = m.lookup },
         .{ .name = "amm_lookup", .module = m.amm_lookup },
+        .{ .name = "amm_submit", .module = m.amm_submit },
     };
     return std.mem.concat(b.allocator, std.Build.Module.Import, &.{ &common, more }) catch @panic("OOM");
 }

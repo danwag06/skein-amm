@@ -1560,3 +1560,158 @@ test "pool history (0.40.0): forward paging — a window larger than the limit, 
     try testing.expectEqualStrings("ss", try kinds(a, pg.events));
     try testing.expect(!pg.more);
 }
+
+// ---------------------------------------------------------------- pool events (0.41.0)
+
+/// The pool events the hooks asked for since the last call (`Service.emit`), cleared.
+fn takeEvents(svc: *lookup.Service) []const Value {
+    const out = svc.events.items;
+    svc.events = .empty;
+    return out;
+}
+
+/// An emitted pool event: `{event: "pool", topic: "ls_amm_<tokenId>", tokenId, row}`; → its row.
+fn poolEvent(e: *Env, ev: Value) !Value {
+    try testing.expectEqualStrings("pool", ev.getText("event").?);
+    try testing.expectEqualStrings(e.token, ev.getText("tokenId").?);
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "ls_amm_{s}", .{e.token}), ev.getText("topic").?);
+    return ev.get("row").?;
+}
+
+/// No bytes anywhere in a row: text and numbers only.
+fn plainRow(row: Value) !void {
+    for (row.map) |en| switch (en.value) {
+        .text, .uint, .nint => {},
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+/// The row an event carries is the row `/pools/history` reads (`eventRow` of the history record), byte
+/// for byte (dag-cbor).
+fn sameAsHistory(a: Allocator, svc: *lookup.Service, tp: []const u8, pid: [36]u8, i: usize, row: Value) !void {
+    const evs = try histOf(a, svc, tp, null, null, pid, 500);
+    try testing.expectEqualSlices(u8, try cbor.encode(a, try idx.eventRow(a, evs[i].rec)), try cbor.encode(a, row));
+}
+
+test "pool events (0.41.0): one event per history row written — deploy, swap, close, rescind — its row the history row; a rejection of each, one revert per pool with the pool after the undo (none for a deploy)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try Env.init(a);
+    defer e.deinit();
+    var svc = try e.svc(a);
+    const tp = try w.store.nameKey(a, e.topic, &.{});
+    const f = e.f;
+    const pid = poolId(e);
+    const pid_text = try poolIdText(a, e);
+
+    // The deploy: one event, kind deploy, the row as /pools/history reads it.
+    idx.now_ms = 100;
+    try e.admit(a, &svc, "pool_deploy", null, &.{ 0, 1, 2 }, &.{0});
+    var evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    var row = try poolEvent(e, evs[0]);
+    try plainRow(row);
+    try testing.expectEqualStrings("deploy", row.getText("kind").?);
+    try testing.expectEqualStrings(pid_text, row.getText("poolId").?);
+    try testing.expectEqualStrings(pid_text, row.getText("outpoint").?);
+    try testing.expectEqualStrings(&w.header.toHex(f.txid("pool_deploy")), row.getText("txid").?);
+    try testing.expectEqual(@as(u64, 100), row.getUint("at").?);
+    try testing.expectEqual(@as(u64, 0), row.getUint("swaps").?);
+    try sameAsHistory(a, &svc, tp, pid, 0, row);
+
+    // A Swap: one event (its `spent` writes none: the pool continues), kind swap with the trade fields.
+    idx.now_ms = 1_000;
+    try e.admit(a, &svc, "swap_bsv_in", null, &.{ 0, 1 }, &.{0});
+    try idx.spent(a, &svc, e.topic, .{ .txid = f.txid("pool_deploy"), .vout = 0 }, try ltx(a, f.txid("swap_bsv_in"), f.tx("swap_bsv_in")));
+    evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try plainRow(row);
+    try testing.expectEqualStrings("swap", row.getText("kind").?);
+    try testing.expectEqualStrings("buy", row.getText("side").?);
+    try testing.expectEqual(@as(u64, 1), row.getUint("swaps").?);
+    try testing.expect(row.getText("payoutPkh") != null and row.getText("commissionPkh") != null and row.getUint("amountOut") != null);
+    try sameAsHistory(a, &svc, tp, pid, 1, row);
+    idx.now_ms = 2_000;
+    try e.admit(a, &svc, "swap_tokens_in", null, &.{ 0, 2, 3, 4 }, &.{ 0, 1 });
+    try idx.spent(a, &svc, e.topic, .{ .txid = f.txid("swap_bsv_in"), .vout = 0 }, try ltx(a, f.txid("swap_tokens_in"), f.tx("swap_tokens_in")));
+    evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expectEqualStrings("sell", (try poolEvent(e, evs[0])).getText("side").?);
+
+    // A close: one event, no outpoint, no reserves.
+    const cl = try ltx(a, f.txid("close"), f.tx("close"));
+    idx.now_ms = 3_000;
+    try idx.admitted(a, &svc, e.topic, cl, &.{1}, &.{0});
+    try idx.spent(a, &svc, e.topic, .{ .txid = f.txid("swap_tokens_in"), .vout = 0 }, cl);
+    evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try testing.expectEqualStrings("close", row.getText("kind").?);
+    try testing.expect(row.get("outpoint") == null and row.get("bsvReserve") == null);
+    try sameAsHistory(a, &svc, tp, pid, 3, row);
+
+    // The close rejected: one revert, the pool as it stands after the undo — live again at the last
+    // Swap's output, its reserves and swap count; `at` the step's time.
+    idx.now_ms = 3_500;
+    try idx.rejected(a, &svc, e.topic, cl);
+    evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try plainRow(row);
+    try testing.expectEqualStrings("revert", row.getText("kind").?);
+    try testing.expectEqualStrings(&w.header.toHex(f.txid("close")), row.getText("txid").?);
+    try testing.expectEqualStrings(pid_text, row.getText("poolId").?);
+    try testing.expectEqualStrings(try opStr(a, f.txid("swap_tokens_in"), 0), row.getText("outpoint").?);
+    try testing.expectEqual(@as(u64, 2), row.getUint("swaps").?);
+    try testing.expectEqual(@as(u64, 3_500), row.getUint("at").?);
+    const live = try recordAt(a, &svc, tp, "pools", f.txid("swap_tokens_in"));
+    try testing.expectEqual(live.getUint("bsvReserve").?, row.getUint("bsvReserve").?);
+    try testing.expectEqual(live.getUint("tokenReserve").?, row.getUint("tokenReserve").?);
+    try testing.expect(row.getText("lpPubKey") != null and row.getText("validatorIdentityKey") != null and row.get("commissionBps") != null);
+
+    // A Swap rejected: one revert (its continuation gone, the pool it spent live again).
+    try idx.rejected(a, &svc, e.topic, try ltx(a, f.txid("swap_tokens_in"), f.tx("swap_tokens_in")));
+    evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try testing.expectEqualStrings("revert", row.getText("kind").?);
+    try testing.expectEqualStrings(try opStr(a, f.txid("swap_bsv_in"), 0), row.getText("outpoint").?);
+    try testing.expectEqual(@as(u64, 1), row.getUint("swaps").?);
+
+    // The deploy rejected (its Swap first): the last revert has no pool left — kind, txid, poolId, at only.
+    try idx.rejected(a, &svc, e.topic, try ltx(a, f.txid("swap_bsv_in"), f.tx("swap_bsv_in")));
+    _ = takeEvents(&svc);
+    try idx.rejected(a, &svc, e.topic, try ltx(a, f.txid("pool_deploy"), f.tx("pool_deploy")));
+    evs = takeEvents(&svc);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try testing.expectEqualStrings("revert", row.getText("kind").?);
+    try testing.expectEqual(@as(usize, 4), row.map.len);
+    try testing.expectEqualStrings(pid_text, row.getText("poolId").?);
+    try testing.expectEqualStrings(&w.header.toHex(f.txid("pool_deploy")), row.getText("txid").?);
+
+    // A Rescind (a fresh index): one rescind event (none from its `spent`); rejected, one revert with
+    // the pool live again.
+    var svc2 = try e.svc(a);
+    try threeEvents(a, e, &svc2, 100, 1_000, 2_000);
+    _ = takeEvents(&svc2);
+    const rs = try ltx(a, f.txid("rescind"), f.tx("rescind"));
+    idx.now_ms = 3_000;
+    try idx.admitted(a, &svc2, e.topic, rs, &.{0}, &.{0});
+    try idx.spent(a, &svc2, e.topic, .{ .txid = f.txid("swap_tokens_in"), .vout = 0 }, rs);
+    evs = takeEvents(&svc2);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try testing.expectEqualStrings("rescind", row.getText("kind").?);
+    try testing.expectEqualStrings(try opStr(a, f.txid("rescind"), 0), row.getText("outpoint").?);
+    try sameAsHistory(a, &svc2, tp, pid, 3, row);
+    try idx.rejected(a, &svc2, e.topic, rs);
+    evs = takeEvents(&svc2);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    row = try poolEvent(e, evs[0]);
+    try testing.expectEqualStrings("revert", row.getText("kind").?);
+    try testing.expectEqualStrings(try opStr(a, f.txid("swap_tokens_in"), 0), row.getText("outpoint").?);
+}

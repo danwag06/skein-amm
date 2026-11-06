@@ -392,17 +392,127 @@ fn eventFields(a: Allocator, kind: []const u8, pf: PoolFields, txid: [32]u8, wit
     return es;
 }
 
-/// An event record (`cid`) under `history`, and (a close or a rescind) under `closes`.
-fn linkEvent(a: Allocator, svc: *Service, tp: []const u8, pf: PoolFields, cid: []const u8, ends: bool) !void {
+/// An event record (`cid`) under `history`, and (a close or a rescind) under `closes`; and (0.41.0)
+/// the pool event emitted with the row just written (`emitPool`).
+fn linkEvent(a: Allocator, svc: *Service, topic: []const u8, tp: []const u8, pf: PoolFields, cid: []const u8, ends: bool) !void {
     try svc.map("history").putLink(try historyKey(a, tp, &pf.pool_id, now_ms, eventSeq(pf.swaps, ends)), cid);
     if (ends) try svc.map("closes").putLink(try closesKey(a, tp, now_ms, &pf.pool_id), cid);
+    try emitPool(a, svc, topic, try eventRow(a, try svc.store.getValue(a, cid)));
 }
 
 /// An event that is not a Swap (deploy, close, rescind): written and linked.
-fn putEvent(a: Allocator, svc: *Service, tp: []const u8, kind: []const u8, pf: PoolFields, txid: [32]u8, with_output: bool) !void {
+fn putEvent(a: Allocator, svc: *Service, topic: []const u8, tp: []const u8, kind: []const u8, pf: PoolFields, txid: [32]u8, with_output: bool) !void {
     const es = try eventFields(a, kind, pf, txid, with_output);
     const ends = !std.mem.eql(u8, kind, "deploy");
-    try linkEvent(a, svc, tp, pf, try svc.store.putValue(a, .{ .map = es.items }), ends);
+    try linkEvent(a, svc, topic, tp, pf, try svc.store.putValue(a, .{ .map = es.items }), ends);
+}
+
+// ---------------------------------------------------------------- the pool events (0.41.0)
+
+/// The event name and the lookup service prefix of the pool events (0.41.0, David Case 2026-11-05):
+/// ONE event, ONE topic per token (`ls_amm_<tokenId>`) for every kind; the kind is the row's.
+pub const pool_event = "pool";
+pub const lookup_prefix = "ls_amm_";
+
+/// The pool event the lookup asks the engine to emit (skein-overlay 0.20.4 `Service.emit`): `{event:
+/// "pool", topic: "ls_amm_<tokenId>", tokenId: "<txid>_<vout>", row}`, `row` the history row as
+/// `/pools/history` answers it (`eventRow`), or a revert's (`revertRow`). A topic that is not a
+/// token's emits nothing.
+fn emitPool(a: Allocator, svc: *Service, topic: []const u8, row: Value) !void {
+    const id = names.tokenIdOf(topic) orelse return;
+    var buf: [names.max_suffix_len]u8 = undefined;
+    const token = try a.dupe(u8, names.tokenIdText(&buf, id));
+    try svc.emit(.{ .map = try a.dupe(Entry, &.{
+        .{ .key = "event", .value = .{ .text = pool_event } },
+        .{ .key = "topic", .value = .{ .text = try cat(a, &.{ lookup_prefix, token }) } },
+        .{ .key = "tokenId", .value = .{ .text = token } },
+        .{ .key = "row", .value = row },
+    }) });
+}
+
+/// A record's integer field as stored (the fee rates are dag-cbor ints, either sign).
+fn intField(rec: Value, key: []const u8) !Value {
+    const v = rec.get(key) orelse return error.BadIndex;
+    return switch (v) {
+        .uint, .nint => v,
+        else => error.BadIndex,
+    };
+}
+
+/// A pool's fields as the history rows carry them (text and numbers only): `poolId`, then (when the
+/// record has an outpoint) `outpoint`, `bsvReserve`, `tokenReserve`, then `lpPubKey`, the three
+/// rates, `validatorIdentityKey`, `at`, `swaps`.
+fn poolRowFields(a: Allocator, es: *std.ArrayList(Entry), r: Value) !void {
+    try es.append(a, .{ .key = "poolId", .value = .{ .text = try poolIdText(a, r.getBytes("poolId") orelse return error.BadIndex) } });
+    if (r.getBytes("outpoint")) |op| try es.appendSlice(a, &.{
+        .{ .key = "outpoint", .value = .{ .text = try poolIdText(a, op) } },
+        .{ .key = "bsvReserve", .value = .{ .uint = r.getUint("bsvReserve") orelse return error.BadIndex } },
+        .{ .key = "tokenReserve", .value = .{ .uint = r.getUint("tokenReserve") orelse return error.BadIndex } },
+    });
+    try es.appendSlice(a, &.{
+        .{ .key = "lpPubKey", .value = .{ .text = try hexOf(a, r.getBytes("lpPubKey") orelse return error.BadIndex) } },
+        .{ .key = "liquidityFeeBps", .value = try intField(r, "liquidityFeeBps") },
+        .{ .key = "validationFeeBps", .value = try intField(r, "validationFeeBps") },
+        .{ .key = "commissionBps", .value = try intField(r, "commissionBps") },
+        .{ .key = "validatorIdentityKey", .value = .{ .text = try hexOf(a, r.getBytes("validatorIdentityKey") orelse return error.BadIndex) } },
+        .{ .key = "at", .value = .{ .uint = r.getUint("at") orelse return error.BadIndex } },
+        .{ .key = "swaps", .value = .{ .uint = r.getUint("swaps") orelse return error.BadIndex } },
+    });
+}
+
+/// A `/pools/at` row (0.40.0; one reader since 0.41.0): the pool's fields (`poolRowFields`).
+pub fn poolAtRow(a: Allocator, r: Value) !Value {
+    var es: std.ArrayList(Entry) = .empty;
+    try poolRowFields(a, &es, r);
+    return .{ .map = es.items };
+}
+
+/// THE history row (0.41.0: one reader for `/pools/history` and the pool event): `{kind, txid,
+/// poolId, outpoint?, bsvReserve?, tokenReserve?, lpPubKey, liquidityFeeBps, validationFeeBps,
+/// commissionBps, validatorIdentityKey, at, swaps}`, a Swap's with its trade's fields too: `side,
+/// amountIn, amountOut, feeLp, feeValidator, feeCommission, commissionPkh, payoutPkh`. Text and
+/// numbers only, no bytes.
+pub fn eventRow(a: Allocator, r: Value) !Value {
+    var es: std.ArrayList(Entry) = .empty;
+    const kind = r.getText("kind") orelse return error.BadIndex;
+    try es.appendSlice(a, &.{
+        .{ .key = "kind", .value = .{ .text = kind } },
+        .{ .key = "txid", .value = .{ .text = try a.dupe(u8, &w.header.toHex(try bytesN(32, r, "txid"))) } },
+    });
+    try poolRowFields(a, &es, r);
+    if (std.mem.eql(u8, kind, "swap")) {
+        try es.append(a, .{ .key = "side", .value = .{ .text = r.getText("side") orelse return error.BadIndex } });
+        inline for (.{ .{ "amountIn", "amountIn" }, .{ "amountOut", "amountOut" }, .{ "feeLp", "lp" }, .{ "feeValidator", "validator" }, .{ "feeCommission", "commission" } }) |f|
+            try es.append(a, .{ .key = f[0], .value = .{ .uint = r.getUint(f[1]) orelse return error.BadIndex } });
+        try es.appendSlice(a, &.{
+            .{ .key = "commissionPkh", .value = .{ .text = try hexOf(a, r.getBytes("commissionPkh") orelse return error.BadIndex) } },
+            .{ .key = "payoutPkh", .value = .{ .text = try hexOf(a, r.getBytes("payoutPkh") orelse return error.BadIndex) } },
+        });
+    }
+    return .{ .map = es.items };
+}
+
+/// A revert's row (0.41.0): `{kind: "revert", txid: <the rejected transaction>, poolId, …, at: <the
+/// step's time>}` — with the pool as it stands after the undo (`live`, its listed record: its
+/// outpoint, reserves, `lpPubKey`, rates, `validatorIdentityKey`, `swaps`), or none of those when the
+/// pool no longer exists.
+fn revertRow(a: Allocator, txid: [32]u8, pid: [36]u8, live: ?Value) !Value {
+    var es: std.ArrayList(Entry) = .empty;
+    try es.appendSlice(a, &.{
+        .{ .key = "kind", .value = .{ .text = "revert" } },
+        .{ .key = "txid", .value = .{ .text = try a.dupe(u8, &w.header.toHex(txid)) } },
+    });
+    const rec = live orelse {
+        try es.appendSlice(a, &.{
+            .{ .key = "poolId", .value = .{ .text = try poolIdText(a, &pid) } },
+            .{ .key = "at", .value = .{ .uint = now_ms } },
+        });
+        return .{ .map = es.items };
+    };
+    const pf = try fieldsOf(rec);
+    const fields = try eventFields(a, "revert", pf, txid, true);
+    try poolRowFields(a, &es, .{ .map = fields.items });
+    return .{ .map = es.items };
 }
 
 /// The Swap `tx` (its pool input `input`, its continuation `cont` at output 0 with the pool's id and
@@ -413,7 +523,7 @@ fn putEvent(a: Allocator, svc: *Service, tp: []const u8, kind: []const u8, pf: P
 /// `userPkh`) — under `fees` (`tp ‖ poolId ‖ txid`), `trades` (time) and `history`, and (a
 /// commission not 0) its membership under the commission's key hash. A Swap whose fee outputs are
 /// not the contract's writes nothing.
-fn putTrade(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, input: usize, cont: PoolFields, was: Value) !void {
+fn putTrade(a: Allocator, svc: *Service, topic: []const u8, tp: []const u8, tx: lookup.Tx, input: usize, cont: PoolFields, was: Value) !void {
     const f = (try pool.feesOf(a, tx.tx, input)) orelse return;
     const call = (try pool.parseSwapCall(a, tx.tx.inputs[input].unlocking_script.bytes)) orelse return;
     const before = if (f.bsv_in) was.getUint("tokenReserve") orelse return error.BadIndex else was.getUint("bsvReserve") orelse return error.BadIndex;
@@ -440,7 +550,7 @@ fn putTrade(a: Allocator, svc: *Service, tp: []const u8, tx: lookup.Tx, input: u
     const rec = try svc.store.putValue(a, .{ .map = es.items });
     try svc.map("fees").putLink(fkey, rec);
     try svc.map("trades").putLink(try tradeKey(a, tp, now_ms, tx.txid), rec);
-    try linkEvent(a, svc, tp, cont, rec, false);
+    try linkEvent(a, svc, topic, tp, cont, rec, false);
     if (f.commission > 0) try svc.map("byCommission").putLink(try commissionKey(a, &f.commission_pkh, tp, tx.txid), rec);
 }
 
@@ -494,7 +604,7 @@ pub fn admitted(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx, o
             pf.pool_id = try poolIdOf(was);
             pf.swaps = was.getUint("swaps") orelse return error.BadIndex;
             try svc.map("rescinded").putLink(try cat(a, &.{ tp, &pf.pool_id }), try svc.store.putValue(a, try recordValue(a, pf)));
-            try putEvent(a, svc, tp, "rescind", pf, tx.txid, true);
+            try putEvent(a, svc, topic, tp, "rescind", pf, tx.txid, true);
             continue;
         };
         const why = (try listedAt(a, svc, tp, tx, vout)) orelse continue;
@@ -505,14 +615,14 @@ pub fn admitted(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx, o
                 const was = try svc.store.getValue(a, (try svc.map("pools").link(try poolKey(a, tp, op.txid.bytes, op.index))).?);
                 pf.pool_id = try poolIdOf(was);
                 pf.swaps = (was.getUint("swaps") orelse return error.BadIndex) + 1;
-                try putTrade(a, svc, tp, tx, i, pf, was);
+                try putTrade(a, svc, topic, tp, tx, i, pf, was);
             },
             .deploy => {
                 // A re-admission (a dupe hook call): its earlier event row goes.
                 if (try svc.map("pools").link(try poolKey(a, tp, tx.txid, vout))) |old| if ((try svc.store.getValue(a, old)).getUint("admittedAt")) |at0| {
                     _ = try svc.map("history").remove(try historyKey(a, tp, &pf.pool_id, at0, 0));
                 };
-                try putEvent(a, svc, tp, "deploy", pf, tx.txid, true);
+                try putEvent(a, svc, topic, tp, "deploy", pf, tx.txid, true);
             },
         }
         try putPool(a, svc, tp, pf);
@@ -540,7 +650,7 @@ pub fn spent(a: Allocator, svc: *Service, topic: []const u8, outpoint: lookup.Ou
             std.mem.eql(u8, (try svc.store.getValue(a, r)).getBytes("txid") orelse "", &spender.txid)
         else
             false;
-        if (!continued and !rescinded) try putEvent(a, svc, tp, "close", pf, spender.txid, false);
+        if (!continued and !rescinded) try putEvent(a, svc, topic, tp, "close", pf, spender.txid, false);
     }
     try beatIfChanged(a, svc);
 }
@@ -556,6 +666,9 @@ pub fn spent(a: Allocator, svc: *Service, topic: []const u8, outpoint: lookup.Ou
 /// the rescinded record), from `history` and `closes`.
 pub fn rejected(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx) anyerror!void {
     const tp = try topicPrefix(a, topic);
+    // 0.41.0: the pools whose rows `tx` wrote, in order, each with its listed record after the undo
+    // (the pool input given back), for the revert events.
+    var touched: std.ArrayList(struct { pid: [36]u8, live: ?Value }) = .empty;
     try removeTrade(a, svc, tp, tx);
     for (0..tx.tx.outputs.len) |vout| {
         const key = try poolKey(a, tp, tx.txid, @intCast(vout));
@@ -568,6 +681,7 @@ pub fn rejected(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx) a
             _ = try svc.map("byValidator").remove(try identityKey(a, try identityOf(a, svc, cid), tp, tx.txid, @intCast(vout)));
             _ = try svc.map("byPool").remove(try byPoolKey(a, tp, &pid, tx.txid, @intCast(vout)));
             if (rec.getUint("admittedAt")) |at| _ = try svc.map("history").remove(try historyKey(a, tp, &pid, at, rec.getUint("swaps") orelse 0));
+            try touch(a, &touched, pid, null);
         }
     }
     for (tx.tx.inputs) |in| {
@@ -587,8 +701,20 @@ pub fn rejected(a: Allocator, svc: *Service, topic: []const u8, tx: lookup.Tx) a
         };
         _ = try svc.map("spentPools").remove(key);
         try linkPool(a, svc, tp, txid, vout, cid);
+        try touch(a, &touched, pid, try svc.store.getValue(a, cid));
     }
+    for (touched.items) |t| try emitPool(a, svc, topic, try revertRow(a, tx.txid, t.pid, t.live));
     try beatIfChanged(a, svc);
+}
+
+/// `pid` among the pools a rejection touched (`rejected`): once each, in order; a pool given back
+/// (`live`) keeps that record.
+fn touch(a: Allocator, list: anytype, pid: [36]u8, live: ?Value) !void {
+    for (list.items) |*t| if (std.mem.eql(u8, &t.pid, &pid)) {
+        if (live != null) t.live = live;
+        return;
+    };
+    try list.append(a, .{ .pid = pid, .live = live });
 }
 
 // ---------------------------------------------------------------- the beat (0.12.0)

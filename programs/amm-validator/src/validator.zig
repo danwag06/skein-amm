@@ -237,9 +237,13 @@ pub const Reply = union(enum) {
     /// An affirmation (0.13.0): `signature` (DER), the `validator_pub_key` it is by and the
     /// `nonce` that key is keyed by; the deploy's pool state carries all three. Nothing is
     /// submitted.
-    ok: struct { tx: ?[]const u8 = null, txid: ?[32]u8 = null, submission: ?Submission = null, signature: ?[]const u8 = null, validator_pub_key: ?[33]u8 = null, nonce: ?[32]u8 = null },
-    /// `txid`: the signed transaction's, when the refusal is about it (after signing).
-    refused: struct { reason: Reason, detail: ?[]const u8 = null, newest: ?Newest = null, txid: ?[32]u8 = null },
+    /// `beef` (0.41.0): with an admitted spend, the BEEF this validator submitted to its own overlay
+    /// (submit.zig `submissionBeef`), so the relaying host admits it too.
+    ok: struct { tx: ?[]const u8 = null, txid: ?[32]u8 = null, submission: ?Submission = null, signature: ?[]const u8 = null, validator_pub_key: ?[33]u8 = null, nonce: ?[32]u8 = null, beef: ?[]const u8 = null },
+    /// `txid`: the signed transaction's, when the refusal is about it (after signing). `beef`
+    /// (0.41.0): with `pool_spent`, the BEEF of the newest pool output's transaction back to proven
+    /// ones (`state.beefFor`), so the relaying host catches up from it.
+    refused: struct { reason: Reason, detail: ?[]const u8 = null, newest: ?Newest = null, txid: ?[32]u8 = null, beef: ?[]const u8 = null },
 };
 
 fn refuse(reason: Reason, detail: ?[]const u8) Reply {

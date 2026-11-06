@@ -451,83 +451,6 @@ pub fn parseCursor(text: []const u8) ?idx.Cursor {
     return .{ .at = std.mem.readInt(u64, b[0..8], .big), .txid = b[8..].* };
 }
 
-/// A signed integer field of a record (the fee rates are written as dag-cbor ints).
-fn intField(rec: Value, key: []const u8) !i64 {
-    return switch (rec.get(key) orelse return error.BadIndex) {
-        .uint => |n| std.math.cast(i64, n) orelse error.BadIndex,
-        .nint => |n| -1 - (std.math.cast(i64, n) orelse return error.BadIndex),
-        else => error.BadIndex,
-    };
-}
-
-/// An outpoint key (36 bytes) as `<txid>_<vout>`.
-fn outpointText(a: Allocator, key: []const u8) ![]const u8 {
-    return idx.poolIdText(a, key);
-}
-
-/// The fields every pool row of the history reads carries (0.40.0): `poolId`, `outpoint` (when the
-/// event has one), the reserves, `lpPubKey`, the three rates, `validatorIdentityKey`, `at`, `swaps`.
-fn writePoolFields(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
-    try jw.objectField("poolId");
-    try jw.write(try idx.poolIdText(a, r.getBytes("poolId") orelse return error.BadIndex));
-    if (r.getBytes("outpoint")) |op| {
-        try jw.objectField("outpoint");
-        try jw.write(try outpointText(a, op));
-        try jw.objectField("bsvReserve");
-        try jw.write(r.getUint("bsvReserve") orelse return error.BadIndex);
-        try jw.objectField("tokenReserve");
-        try jw.write(r.getUint("tokenReserve") orelse return error.BadIndex);
-    }
-    try jw.objectField("lpPubKey");
-    try jw.write(try hexAlloc(a, r.getBytes("lpPubKey") orelse return error.BadIndex));
-    inline for (.{ "liquidityFeeBps", "validationFeeBps", "commissionBps" }) |f| {
-        try jw.objectField(f);
-        try jw.write(try intField(r, f));
-    }
-    try jw.objectField("validatorIdentityKey");
-    try jw.write(try hexAlloc(a, r.getBytes("validatorIdentityKey") orelse return error.BadIndex));
-    try jw.objectField("at");
-    try jw.write(r.getUint("at") orelse return error.BadIndex);
-    try jw.objectField("swaps");
-    try jw.write(r.getUint("swaps") orelse return error.BadIndex);
-}
-
-/// A `/pools/at` row (0.40.0): `{poolId, outpoint, bsvReserve, tokenReserve, lpPubKey,
-/// liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}` — the pool's
-/// state after its last event at or before `t`.
-fn writePoolAt(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
-    try jw.beginObject();
-    try writePoolFields(a, jw, r);
-    try jw.endObject();
-}
-
-/// A `/pools/history` event (0.40.0): `{kind, txid, poolId, outpoint?, bsvReserve?, tokenReserve?,
-/// lpPubKey, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}`, a
-/// Swap's with its trade's fields too: `side, amountIn, amountOut, feeLp, feeValidator,
-/// feeCommission, commissionPkh, payoutPkh`.
-fn writeEvent(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
-    try jw.beginObject();
-    try jw.objectField("kind");
-    const kind = r.getText("kind") orelse return error.BadIndex;
-    try jw.write(kind);
-    try jw.objectField("txid");
-    try jw.write(&w.header.toHex((r.getBytes("txid") orelse return error.BadIndex)[0..32].*));
-    try writePoolFields(a, jw, r);
-    if (eql(u8, kind, "swap")) {
-        try jw.objectField("side");
-        try jw.write(r.getText("side") orelse return error.BadIndex);
-        inline for (.{ .{ "amountIn", "amountIn" }, .{ "amountOut", "amountOut" }, .{ "feeLp", "lp" }, .{ "feeValidator", "validator" }, .{ "feeCommission", "commission" } }) |f| {
-            try jw.objectField(f[0]);
-            try jw.write(r.getUint(f[1]) orelse return error.BadIndex);
-        }
-        try jw.objectField("commissionPkh");
-        try jw.write(try hexAlloc(a, r.getBytes("commissionPkh") orelse return error.BadIndex));
-        try jw.objectField("payoutPkh");
-        try jw.write(try hexAlloc(a, r.getBytes("payoutPkh") orelse return error.BadIndex));
-    }
-    try jw.endObject();
-}
-
 /// `/pools/history`'s cursor text (0.40.0): hex of `at (u64 BE) ‖ poolId (36) ‖ seq (u64 BE)` (52
 /// bytes, 104 hex characters), opaque to a client.
 pub fn eventCursorText(a: Allocator, c: idx.EventCursor) ![]const u8 {
@@ -658,7 +581,9 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, _: *Chain, placed: *w.sto
             const bad = "want ?t=<ms>";
             const t = (intParam(a, q, "t") catch return httpError(a, 400, bad)) orelse return httpError(a, 400, bad);
             try jw.beginArray();
-            for (try idx.poolsAt(a, svc, tp, t)) |r| try writePoolAt(a, &jw, r);
+            // A `/pools/at` row: `{poolId, outpoint, bsvReserve, tokenReserve, lpPubKey, the three
+            // rates, validatorIdentityKey, at, swaps}` (amm-lookup `poolAtRow`).
+            for (try idx.poolsAt(a, svc, tp, t)) |r| try writeValue(&jw, try idx.poolAtRow(a, r));
             try jw.endArray();
         },
         .poolsHistory => {
@@ -676,7 +601,8 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, _: *Chain, placed: *w.sto
             try jw.beginObject();
             try jw.objectField("events");
             try jw.beginArray();
-            for (page.events) |ev| try writeEvent(a, &jw, ev.rec);
+            // THE history row (amm-lookup `eventRow`): the pool event's `row` is the same (0.41.0).
+            for (page.events) |ev| try writeValue(&jw, try idx.eventRow(a, ev.rec));
             try jw.endArray();
             // Forward paging: the last row's position when more rows remain in the window, else null.
             try jw.objectField("next");

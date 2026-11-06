@@ -2106,3 +2106,64 @@ test "no terms (0.15.0): a market only — a swap and an affirm refused not_vali
     try testing.expectEqualStrings(terms.no_terms, ra.refused.detail.?);
     try testing.expectEqual(@as(usize, 0), g.oracle.calls);
 }
+
+test "answers carry the BEEF (0.41.0): accepted — the BEEF the validator submitted to its own overlay; refused pool_spent — the newest pool output's transaction back to proven ones; each passes the door's check (chain.spv.verify, nothing known)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const m = try Mined.init(a, &ms);
+    const want = m.f.raw("swap_bsv_in");
+    const sreq = try m.swapRequest(a);
+    const served = try m.respond(a, sreq);
+    try testing.expect(served.reply == .ok);
+    // Signed, not yet admitted: no BEEF on the reply (the submission carries it).
+    try testing.expect(served.reply.ok.beef == null);
+    const ev = readBack(a, try m.node.launched(served));
+    _ = try m.node.step(ev);
+    _ = try m.node.status(ev, "RECEIVED");
+
+    // Accepted: `beef` = what was submitted, byte for byte; the door verifies it; the swap its subject.
+    const ok = try m.fromSubmit(a, .swap, try spendBody(a, sreq, m.pool_op), m.node.sent.last());
+    try testing.expect(ok == .ok);
+    try testing.expectEqualSlices(u8, served.next.submit.beef, ok.ok.beef.?);
+    _ = try doorVerify(a, m, ok.ok.beef.?);
+    try testing.expectEqualSlices(u8, &txidOf(want), &(try w.beef.parse(a, ok.ok.beef.?)).subject().?);
+    const okb = readBack(a, try messages.replyValue(a, ok));
+    try testing.expectEqual(true, okb.getBool("ok").?);
+    try testing.expectEqualSlices(u8, ok.ok.beef.?, okb.getBytes("beef").?);
+
+    // Another taker's request for the pool the swap spent: pool_spent, the newest state and its BEEF.
+    const stale = try withUnlocking(a, try request(a, want, 0), 1, &.{0x00});
+    const r = try m.respond(a, stale);
+    try expectRefused(r.reply, .pool_spent);
+    const live = r.reply.refused.newest.?.live;
+    try testing.expect(live.outpoint.eql(.{ .txid = txidOf(want), .vout = 0 }));
+    const nb = r.reply.refused.beef.?;
+    const parsed = try w.beef.parse(a, nb);
+    try testing.expectEqualSlices(u8, &txidOf(want), &parsed.subject().?);
+    try testing.expect(parsed.find(txidOf(m.f.raw("pool_deploy"))) != null);
+    _ = try doorVerify(a, m, nb);
+    const rb = readBack(a, try messages.replyValue(a, r.reply));
+    try testing.expectEqualStrings("pool_spent", rb.getText("reason").?);
+    try testing.expectEqualSlices(u8, nb, rb.getBytes("beef").?);
+    try testing.expect(rb.get("pool") != null);
+
+    // Another host (holding the mined pool deploy only, not the swap): each BEEF through its own
+    // overlay's submit is admitted, and its newest state of the pool is where the validator says.
+    for ([_][]const u8{ nb, ok.ok.beef.? }) |b| {
+        var ms2 = w.store.MemStore.init(testing.allocator);
+        defer ms2.deinit();
+        const m2 = try Mined.init(a, &ms2);
+        const before = try validator.newest(a, (try m2.deps()).view, m2.topic, m2.pool_op);
+        try testing.expect(before.?.live.outpoint.eql(m2.pool_op));
+        const routed = try ov.submit.route(a, m2.node.caller(), try m2.node.state(), m2.node.in, .{ .bytes = b }, &.{m2.topic}, null, null);
+        const ev2 = routed.admit.event;
+        _ = try m2.node.step(ev2);
+        const got = try m2.node.status(ev2, "RECEIVED");
+        try testing.expect(got.admitted);
+        const after = try validator.newest(a, (try m2.deps()).view, m2.topic, m2.pool_op);
+        try testing.expect(after.?.live.outpoint.eql(live.outpoint));
+    }
+}

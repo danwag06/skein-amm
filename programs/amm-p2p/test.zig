@@ -2057,3 +2057,136 @@ test "relay (0.40.1): a swap spending outputs of two unrelated transactions, bot
     try testing.expectEqual(@as(usize, 3), qb.entries.len);
     try testing.expect(qb.find(w.beef.txidOf(unhex(a, vec.token_deploy))) == null);
 }
+
+test "pool events (0.41.0): each emitted event's row is the `/pools/history` row byte for byte — the route's JSON is the events' rows' JSON in order" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    amm_idx.now_ms = 7_000;
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const maps = try w.store.Maps.create(a, e.ms.store());
+    var placed = maps.map(null);
+    // The deploy and the two Swaps ReadEnv admitted: three pool events, in order.
+    const evs = e.svc.events.items;
+    try testing.expectEqual(@as(usize, 3), evs.len);
+    var want: std.ArrayList(u8) = .empty;
+    try want.appendSlice(a, "{\"events\":[");
+    for (evs, 0..) |ev, i| {
+        try testing.expectEqualStrings("pool", ev.getText("event").?);
+        try testing.expectEqualStrings(try std.fmt.allocPrint(a, "ls_amm_{s}", .{e.token}), ev.getText("topic").?);
+        try testing.expectEqualStrings(e.token, ev.getText("tokenId").?);
+        if (i > 0) try want.append(a, ',');
+        try want.appendSlice(a, try reads.valueJson(a, ev.get("row").?));
+    }
+    try want.appendSlice(a, "],\"next\":null}");
+    try testing.expectEqualStrings(want.items, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "", 0)));
+}
+
+test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refused pool_spent — goes into this instance's overlay first: the record stays pending, the submission awaited; settled only on that overlay's answer (a refusal there said in `detail`, the verdict standing) or, past expires, with the validator's answer; an answer without one settles at once" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const p = try buildPair(a);
+    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
+    const beef_bytes = "the validator's BEEF";
+    const accepted = try frameOf(a, .{ .map = &.{
+        .{ .key = "ok", .value = .{ .boolean = true } },
+        .{ .key = "tx", .value = .{ .bytes = "the signed swap" } },
+        .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
+        .{ .key = "beef", .value = .{ .bytes = beef_bytes } },
+    } });
+    const spent = try frameOf(a, .{ .map = &.{
+        .{ .key = "ok", .value = .{ .boolean = false } },
+        .{ .key = "reason", .value = .{ .text = "pool_spent" } },
+        .{ .key = "pool", .value = .{ .map = &.{.{ .key = "outpoint", .value = .{ .text = "cd" ** 32 ++ "_0" } }} } },
+        .{ .key = "beef", .value = .{ .bytes = beef_bytes } },
+    } });
+    const admitted: Value = .{ .map = &.{
+        .{ .key = "fn", .value = .{ .text = "submit" } },
+        .{ .key = "result", .value = .{ .map = &.{.{ .key = "state", .value = .{ .text = "admitted" } }} } },
+    } };
+    const rejected: Value = .{ .map = &.{
+        .{ .key = "fn", .value = .{ .text = "submit" } },
+        .{ .key = "result", .value = .{ .map = &.{ .{ .key = "state", .value = .{ .text = "rejected" } }, .{ .key = "reason", .value = .{ .text = "NotAdmitted" } } } } },
+    } };
+
+    // Accepted with a BEEF: the stream closed, the BEEF handed out to submit, still pending; the kept
+    // answer and the submission round-trip in the stored record (not in the answer).
+    {
+        var r = fresh;
+        _ = try relay.advance(a, &r, .start, t_now, null);
+        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
+        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now + 10, null);
+        try testing.expect(fx.rest and !fx.done);
+        try testing.expectEqualStrings("close", fx.emits[0].box);
+        try testing.expectEqualStrings(beef_bytes, fx.catchup.?);
+        try testing.expectEqual(relay.Status.pending, r.status);
+        try testing.expect(r.tx == null);
+        r.submission = &w.store.hashCid(.tx, .{4} ** 32);
+        var book = try relay.Book.load(a, ms.store(), null);
+        try book.put(a, r);
+        var again = try relay.Book.load(a, ms.store(), readBack(a, try book.state(a)));
+        var back = (try again.get(a, r.id)).?;
+        try testing.expectEqualSlices(u8, accepted, back.reply.?);
+        try testing.expectEqualSlices(u8, r.submission.?, back.submission.?);
+        const pend = readBack(a, try back.answer(a));
+        try testing.expect(pend.get("reply") == null and pend.get("submission") == null);
+        // Woken before expires: it rests on.
+        try testing.expect((try relay.advance(a, &back, .woke, t_now + 20, null)).rest);
+        // This overlay admitted it: accepted now, the validator's transaction, no detail.
+        const done = try relay.advance(a, &back, .{ .overlay = admitted }, t_now + 30, null);
+        try testing.expect(done.done and done.emits.len == 0);
+        try testing.expectEqual(relay.Status.accepted, back.status);
+        try testing.expectEqualStrings("the signed swap", back.tx.?);
+        try testing.expect(back.detail == null);
+    }
+    // This overlay refuses it: the validator's verdict stands, `detail` says so.
+    {
+        var r = fresh;
+        _ = try relay.advance(a, &r, .start, t_now, null);
+        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
+        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now, null);
+        _ = try relay.advance(a, &r, .{ .overlay = rejected }, t_now, null);
+        try testing.expectEqual(relay.Status.accepted, r.status);
+        try testing.expectEqualStrings("this host's overlay refused the validator's transaction: NotAdmitted", r.detail.?);
+    }
+    // pool_spent with a BEEF: pending until this overlay answers, then refused with the pool's state.
+    {
+        var r = fresh;
+        _ = try relay.advance(a, &r, .start, t_now, null);
+        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
+        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now, null);
+        try testing.expect(!fx.done and fx.catchup != null);
+        try testing.expectEqual(relay.Status.pending, r.status);
+        _ = try relay.advance(a, &r, .{ .overlay = admitted }, t_now, null);
+        try testing.expectEqual(relay.Status.refused, r.status);
+        try testing.expectEqualStrings("pool_spent", r.reason.?);
+        try testing.expect(r.pool_state != null);
+    }
+    // No answer from this overlay by expires: the validator's answer, `detail` saying so.
+    {
+        var r = fresh;
+        _ = try relay.advance(a, &r, .start, t_now, null);
+        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
+        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now, null);
+        const late = try relay.advance(a, &r, .woke, t_expires, null);
+        try testing.expect(late.done);
+        try testing.expectEqual(relay.Status.refused, r.status);
+        try testing.expectEqualStrings("this host's overlay did not answer before expires", r.detail.?);
+    }
+    // An answer with no BEEF (any other refusal): settled at once, as before.
+    {
+        var r = fresh;
+        _ = try relay.advance(a, &r, .start, t_now, null);
+        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
+        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
+            .{ .key = "ok", .value = .{ .boolean = false } },
+            .{ .key = "reason", .value = .{ .text = "below_minimum" } },
+        } }) } }, t_now, null);
+        try testing.expect(fx.done and fx.catchup == null);
+        try testing.expectEqual(relay.Status.refused, r.status);
+    }
+}

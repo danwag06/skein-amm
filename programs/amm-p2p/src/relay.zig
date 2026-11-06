@@ -46,9 +46,17 @@
 //!
 //!   start                  emit dial {peer, protocol: /amm-validator/1/swap}; rest
 //!   {stream} (box dial)    emit send {stream, body: the package, naming the token's topic}; rest
-//!   {stream, body} (frame) the validator's answer: accepted | refused; emit close; done
+//!   {stream, body} (frame) the validator's answer: accepted | refused; emit close; done — or
+//!                          (0.41.0) when it carries a `beef` (accepted: what the validator
+//!                          submitted to its own overlay; `pool_spent`: the newest pool's
+//!                          transaction), emit close and submit that BEEF to THIS instance's own
+//!                          overlay (the token topic, the message amm-validator's submit.zig sends);
+//!                          rest on that submission
+//!   the overlay's answer   (0.41.0) the validator's answer applied: accepted | refused (a refusal
+//!                          by this overlay said in `detail`; the validator's verdict stands); done
 //!   closed | error         failed; done
-//!   woke at/after expires  timeout (close the stream if open); done
+//!   woke at/after expires  timeout (close the stream if open); done — while the overlay has not
+//!                          answered (0.41.0): the validator's answer applied, `detail` saying so
 //!
 //! **Local** (`advanceLocal`, `localAnswer`): the validator is this instance.
 //! A node does not dial itself, so the relay does what the front door does
@@ -602,6 +610,12 @@ pub const Record = struct {
     reason: ?[]const u8 = null,
     detail: ?[]const u8 = null,
     pool_state: ?Value = null,
+    /// The validator's answer frame (0.41.0), kept while this instance's overlay takes its `beef`;
+    /// applied when that submission answers (`caughtUp`).
+    reply: ?[]const u8 = null,
+    /// The submission of that `beef` to this instance's overlay (0.41.0): the message the relay
+    /// thread awaits.
+    submission: ?[]const u8 = null,
 
     fn put(es: *std.ArrayList(cbor.Entry), a: Allocator, k: []const u8, v: Value) !void {
         try es.append(a, .{ .key = k, .value = v });
@@ -638,6 +652,8 @@ pub const Record = struct {
         if (r.dial) |x| try put(&es, a, "dial", .{ .cid = x });
         if (r.stream) |x| try put(&es, a, "stream", .{ .uint = x });
         if (r.thread) |x| try put(&es, a, "thread", .{ .cid = x });
+        if (r.reply) |x| try put(&es, a, "reply", .{ .bytes = x });
+        if (r.submission) |x| try put(&es, a, "submission", .{ .cid = x });
         if (r.request) |q| try put(&es, a, "request", .{ .map = try a.dupe(cbor.Entry, &.{
             .{ .key = "message", .value = .{ .cid = q.message } },
             .{ .key = "sender", .value = .{ .bytes = q.sender } },
@@ -670,6 +686,8 @@ pub const Record = struct {
             .reason = v.getText("reason"),
             .detail = v.getText("detail"),
             .pool_state = v.get("poolState"),
+            .reply = v.getBytes("reply"),
+            .submission = v.getCid("submission"),
         };
         if (v.get("request")) |q| r.request = .{
             .message = q.getCid("message") orelse return error.BadRecord,
@@ -733,6 +751,9 @@ pub const Book = struct {
 pub const Input = union(enum) {
     start,
     answer: libp2p.DialAnswer,
+    /// The engine's answer to the submission of the validator's `beef` (0.41.0): `{fn: "submit",
+    /// request, replyTo, result | error}`.
+    overlay: Value,
     woke,
 };
 
@@ -747,7 +768,32 @@ pub const Effect = struct {
     call: bool = false,
     /// The record settled: answer the caller.
     done: bool = false,
+    /// (0.41.0) Submit this BEEF (the validator's answer's) to this instance's own overlay and rest on
+    /// that submission (main.zig: its message becomes `submission`).
+    catchup: ?[]const u8 = null,
 };
+
+/// The `beef` a validator's answer frame carries (0.41.0: an accepted spend's, a `pool_spent`
+/// refusal's), or null.
+pub fn replyBeef(a: Allocator, frame: []const u8) ?[]const u8 {
+    const v = cbor.decode(a, frame) catch return null;
+    return v.getBytes("beef");
+}
+
+/// This instance's overlay answered the submission of the validator's `beef` (0.41.0): the
+/// validator's answer (`reply`) applied; a refusal by this overlay (`rejected`, or an error) said in
+/// `detail`, the validator's verdict standing.
+pub fn caughtUp(a: Allocator, r: *Record, ans: Value) void {
+    applyReply(a, r, r.reply orelse return settle(r, .failed, "bad_record", "no validator answer kept"));
+    if (r.status == .failed) return;
+    const why: ?[]const u8 = if (ans.get("error")) |e|
+        e.getText("message") orelse e.getText("code") orelse "error"
+    else if (ans.get("result")) |res|
+        (if (eql(u8, res.getText("state") orelse "", "rejected")) res.getText("reason") orelse "rejected" else null)
+    else
+        "no result";
+    if (why) |y| r.detail = std.fmt.allocPrint(a, "this host's overlay refused the validator's transaction: {s}", .{y}) catch "this host's overlay refused the validator's transaction";
+}
 
 /// The validator's answer frame (amm-validator README, "Protocol"):
 /// `{ok: true, tx, txid}` → accepted; `{ok: false, reason, detail?, txid?, pool?}` → refused.
@@ -803,8 +849,13 @@ pub fn advance(a: Allocator, r: *Record, in: Input, now: u64, pkg: ?[]const u8) 
                 return .{ .emits = emits.items, .rest = true };
             },
             .frame => |body| {
-                applyReply(a, r, body);
                 if (r.stream) |sid| try emits.append(a, try libp2p.close(a, sid));
+                // 0.41.0: the BEEF it carries goes into this instance's overlay first.
+                if (replyBeef(a, body)) |b| {
+                    r.reply = body;
+                    return .{ .emits = emits.items, .catchup = b, .rest = true };
+                }
+                applyReply(a, r, body);
                 return .{ .emits = emits.items, .done = true };
             },
             .closed => |why| {
@@ -812,8 +863,18 @@ pub fn advance(a: Allocator, r: *Record, in: Input, now: u64, pkg: ?[]const u8) 
                 return .{ .done = true };
             },
         },
+        .overlay => |ans| {
+            caughtUp(a, r, ans);
+            return .{ .done = true };
+        },
         .woke => {
             if (now < r.expires) return .{ .rest = true };
+            if (r.reply) |body| {
+                // 0.41.0: the validator answered; this overlay did not take its BEEF in time.
+                applyReply(a, r, body);
+                if (r.status != .failed) r.detail = "this host's overlay did not answer before expires";
+                return .{ .done = true };
+            }
             settle(r, .timeout, "no_answer", "the validator did not answer before expires");
             if (r.stream) |sid| try emits.append(a, try libp2p.close(a, sid));
             return .{ .emits = emits.items, .done = true };
