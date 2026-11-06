@@ -4,6 +4,26 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.44.0 (2026-11-06)
+
+The relay's call to a validator is carried by the host (agent-env plans/relay-call-build-2026-11-06.md D1–D5).
+
+- amm-p2p: the relay thread emits ONE `call` intention (skein 0.3.0) — `{event: "call", peer, protocol:
+  "/amm-validator/1/swap", body: <the package>}` — and rests on it. The host dials, writes the frame, waits on the open
+  stream for the answer frame and answers `{replyTo, request, from, body}` (the frame path as before, the 0.41.0
+  catch-up submission of a carried `beef` unchanged) or `{replyTo, request, error}` (`failed`, reason `unreachable`,
+  the host's text the detail). The `dial` / `send` / `close` / `frame` handling, the stream fields, the deadline, the
+  request's `expires`, `checkPair`'s `expired` refusal and the `timeout` status are gone (`retryable` = `failed`); an
+  argument naming `expires` is refused `bad-args`; a stored record with `timeout` reads as `failed`; a relay thread
+  launched before 0.44.0 that is stepped by its old dial's answer or deadline settles `failed` ("relayed before
+  0.44.0"). The local relay (the validator is this instance) as built, minus `expires`. The catch-up pass keeps
+  `dial` / `send` / `close`.
+- Pages / client: no `SWAP_TTL_MS`, `ttlMs` or `expires`; `LEG_PATIENCE_MS` = 15 s: past it the page stops waiting on
+  the relay's answer for a leg (an AbortController on the signed fetch; a fetch that ignores the signal is left behind,
+  its late answer not acted on) and the leg is "no answer yet" → the overlay check, one re-ask, the race, as before.
+  `timeout` is no outcome.
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.44.0 (the client on the engine 0.44.0). The validator is unchanged.
+
 ## 0.43.0 (2026-11-06)
 
 One swap in flight per pool (agent-env plans/pool-lock-build-2026-11-06.md D3, D4; on ovh two swaps on one NANNER

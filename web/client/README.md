@@ -103,7 +103,7 @@ last-leg change keys), `swapInstructions` / `swapSatsInstructions` (their custom
 change row's with `order`), `LP_KEY_PROTOCOL` (BRC-29) + `LP_KEY_MARK` +
 `lpKeyDescription` / `lpKeyIdOfDescription` (the deploy's pool output description naming the LP
 keyID), `POOL_TAG` / `POOL_OP` / `isPoolRow` / `poolCustomInstructions` (an `amm-pools` row),
-`POOL_DEPLOY_LABEL` (`amm-pool-deploy`), `SWAP_TTL_MS` (15 s), `transferPlanLabels` (the `p color
+`POOL_DEPLOY_LABEL` (`amm-pool-deploy`), `LEG_PATIENCE_MS` (15 s: how long the client waits on the relay for one leg, 0.44.0), `transferPlanLabels` (the `p color
 plan` labels), the receipt helpers `newReceivingKey` / `receiptOutput`, and `xTopics` (the BRC-22
 `x-topics` header: a JSON array).
 
