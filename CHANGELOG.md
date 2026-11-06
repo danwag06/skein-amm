@@ -4,6 +4,27 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.44.0 (2026-11-06)
+
+The host is the relay (agent-env plans/host-relay-build-2026-11-06.md; David Case: "the instance logs FACTS, never
+ATTEMPTS"). A swap being forwarded is an attempt: nothing of it is logged on the taker's side any more; the only entry
+there is the overlay submission of the transaction the validator returned.
+
+- amm-p2p: the relay is gone — relay.zig (the pair check, the swap records and the app state's `swaps` map, the relay
+  thread's dial / frame / deadline steps, the local relay to this instance's own validator, `expires`), the functions
+  `amm.swap.submit` and `amm.swap.status` (and their manifest declarations), the read `/swaps` (P10) and its filter,
+  the `/call` route's wait on a relay. What stays: `amm.swap.terms`, `amm.pool.terms`, `amm.pool.affirm` (in-VM, at
+  once), the market record, the reads, the proofs-by-block call and the catch-up pass (src/interface.zig,
+  src/stream.zig). The commission rule the open-exchange host now applies is in programs/amm-p2p/README.md "The
+  commission rule". amm-validator unchanged (`zig build bin` leaves bin/amm-validator.wasm byte-identical).
+- Pages / client: a leg is ONE plain `POST <origin>/@<tokenId>/amm/swap` (the open-exchange host's route, 0.17.0)
+  answered with the validator's reply (`{ok: true, tx, txid}` / `{ok: false, reason, pool?}`) or the host's
+  `{ok: false, reason: "unreachable", detail}`; the page's patience `LEG_PATIENCE_MS` (15 s, an AbortController on
+  the plain fetch) is the only timer and closes the request, which stops the host. Gone: `SWAP_TTL_MS`, the leg's
+  `expires`, the swap record and its `pending` / `timeout` statuses, `readSwap`. The no-answer path is unchanged.
+- Engine: a leg result with no answer is `"unknown"` (was `"timeout"`).
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.44.0 (the client on the engine 0.44.0).
+
 ## 0.43.0 (2026-11-06)
 
 One swap in flight per pool (agent-env plans/pool-lock-build-2026-11-06.md D3, D4; on ovh two swaps on one NANNER
