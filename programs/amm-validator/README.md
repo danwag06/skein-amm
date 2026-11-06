@@ -6,6 +6,10 @@ The AMM validator as a [skein](https://github.com/shruggr/skein) handler program
 zig build test-amm-validator   # from the repo root: the package, the protocol, the refusals, signing against the Go fixtures, and the submission, natively
 ```
 
+## 0.43.0: one swap in flight per pool (David Case, 2026-11-06)
+
+Two swaps on one pool were signed seconds apart on ovh, both submitted before the chain app held either (agent-env plans/double-spender-audit-2026-11-06.md). When `spend` signs a swap and the handler submits it, the pool is locked in that step (src/lock.zig, the head `<app>/locks`): the pool output it spends, its txid, the signing step's thread (the front door's request thread, or the local relay's), the request's hash. A request for a locked pool — any output of its lineage, walked forward spender to spender to the lock's output — is not refused and not signed: it awaits the holder's thread (`{wait: true}`) and joins the lock's queue. The holder's step that takes its submission's answer releases the lock; a holder whose thread rests without one (the local relay's deadline) holds nothing (awaiting a thread at rest is refused). Each waiter, stepped again with `resolved`, runs the same check: the first admitted → `pool_spent` with the new state and its BEEF; rejected → the head of the queue is signed and takes the lock, the rest wait on it. The kernel steps a thread's waiters by their origin's stamp (ms), then CID, so the queue keeps arrival order itself. The same request sent again (a retry) is not a waiter: answered as before. Per pool: a lock never holds another pool's swap. The validator's Rescind does not go through `spend` and takes no lock.
+
 ## 0.13.0: the nonce; the Rescind (David Case, 2026-10-22)
 
 This section supersedes 0.11.0's affirmation and Close below (docs/AMM.md "The deploy and the affirmation", "Close and Rescind").
@@ -79,6 +83,7 @@ What changed from amm-poc (skein-overlay 0.2.0, the wallet library's head `walle
 | `src/view.zig` | What the validator reads of its overlay (`View`), and `OverlayView` over the app's overlay state and the chain state. |
 | `src/oracle.zig` | The validator's keys through the signer, the `wallet` import (BRC-100 wire frames, skein-sdk `wallet` module's `wire`). |
 | `src/submit.zig` | `Route` (the engine's own `submit.route` in the handler's step), `submissionBeef` (the signed BEEF: the request's, its subject signed, merged with the pool transaction's Atomic BEEF — 0.29.5), `withPool` (the same merge for a Rescind). |
+| `src/lock.zig` | The pool locks (0.43.0): the record under `<app>/locks`, `gate` (wait or check now), `take` (the signing step), `release` (the step taking the submission's answer). Pure, over a `Threads` interface (main.zig: `await`). |
 | `src/main.zig` | The VM adapter: the handlers (fn `swap`, `affirm`), launching or awaiting the submission's thread, root's `rescind` and its thread's steps, and `main`. |
 | `../../src/fixtures/add_liquidity.zig` | Generated: an AddLiquidity continuing the fixture chain; the funded AddLiquidity of the fixture pool with its nosend funding transaction (the relay's shape). |
 | `../../gen/addliquidity/main.go` | Its generator (Go, this repo's module). |

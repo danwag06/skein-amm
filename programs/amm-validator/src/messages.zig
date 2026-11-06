@@ -12,6 +12,7 @@ const validator = @import("validator.zig");
 const submit = @import("submit.zig");
 const ov = @import("skein_overlay");
 const View = @import("view.zig").View;
+const lock = @import("lock.zig");
 
 const cbor = w.cbor;
 const Value = cbor.Value;
@@ -226,6 +227,22 @@ pub fn respond(a: std.mem.Allocator, op: validator.Op, body: Value, d: Deps) !Se
             return .{ .reply = try validator.affirm(a, req, d.config, d.oracle) };
         },
     }
+}
+
+/// A swap request through the pool's lock (0.43.0, lock.zig), then `respond`: the request waits
+/// (`null`: this step awaited the lock's holder, or the waiter ahead of it, and the queue lists
+/// `me`), or is served — and when it was signed and goes to the overlay (`Next.submit`), its pool is
+/// locked by `me` in this step. An affirm is never locked. `locks` is the step's record: main.zig
+/// saves it.
+pub fn respondLocked(a: std.mem.Allocator, op: validator.Op, body: Value, d: Deps, locks: *lock.Locks, me: []const u8, th: lock.Threads) !?Served {
+    if (op != .swap) return try respond(a, op, body, d);
+    const req = parseSpend(body) orelse return try respond(a, op, body, d);
+    const sub = validator.subjectOf(a, req.tx) orelse return try respond(a, op, body, d);
+    const h = lock.requestHash(sub.raw);
+    if ((try locks.gate(a, d.view, req.pool, h, me, th)) == .wait) return null;
+    const served = try respond(a, op, body, d);
+    if (served.next == .submit) try locks.take(a, req.pool, served.reply.ok.txid.?, h, me);
+    return served;
 }
 
 // ---------------------------------------------------------------- the answer after the step

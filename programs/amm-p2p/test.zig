@@ -904,6 +904,57 @@ test "relay: the validator named (0.4.0) — submit dials the peer given; this n
     }
 }
 
+test "relay (0.43.0): two swaps relayed at once to this node's own validator on one pool — both wait (the first on its submission, the second on the first's lock); the first accepted; the second, called again when the first's thread rests, refused pool_spent with the pool's new state; a waiter past expires times out without a call" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    var book = try relay.Book.load(a, ms.store(), null);
+    var dummy: u8 = 0;
+    const p = try buildPair(a);
+    const env: relay.Env = .{ .book = &book, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = named_peer, .launchFn = testLaunch };
+    const rec = (try relay.submit(a, env, try fromSdk(a, try submitArgs(a, p, null)))).launched;
+    var first = rec;
+    var second = rec;
+    var third = rec;
+    const wait: Value = readBack(a, .{ .map = &.{.{ .key = "wait", .value = .{ .boolean = true } }} });
+    // Both called; the validator answers each {wait: true} (the second awaited the first's thread): both rest.
+    for ([_]*relay.Record{ &first, &second, &third }) |r| {
+        try testing.expect(relay.advanceLocal(r, .start, t_now).call);
+        try testing.expect(relay.localAnswer(a, r, wait, "").rest);
+    }
+    // The first: its submission answered, accepted.
+    try testing.expect(relay.advanceLocal(&first, .again, t_now + 10).call);
+    try testing.expect(relay.localAnswer(a, &first, readBack(a, .{ .map = &.{
+        .{ .key = "verdict", .value = .{ .text = "accept" } },
+        .{ .key = "body", .value = .{ .bytes = try frameOf(a, .{ .map = &.{
+            .{ .key = "ok", .value = .{ .boolean = true } },
+            .{ .key = "tx", .value = .{ .bytes = "the first swap" } },
+            .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
+        } }) } },
+    } }), "").done);
+    try testing.expectEqual(relay.Status.accepted, first.status);
+    // The second, stepped by the first's thread at rest (`resolved`): called again, refused pool_spent with the new state.
+    try testing.expect(relay.advanceLocal(&second, .again, t_now + 11).call);
+    const newer = "ab" ** 32 ++ "_0";
+    try testing.expect(relay.localAnswer(a, &second, readBack(a, .{ .map = &.{
+        .{ .key = "verdict", .value = .{ .text = "accept" } },
+        .{ .key = "body", .value = .{ .bytes = try frameOf(a, .{ .map = &.{
+            .{ .key = "ok", .value = .{ .boolean = false } },
+            .{ .key = "reason", .value = .{ .text = "pool_spent" } },
+            .{ .key = "pool", .value = .{ .map = &.{.{ .key = "outpoint", .value = .{ .text = newer } }} } },
+        } }) } },
+    } }), "").done);
+    try testing.expectEqual(relay.Status.refused, second.status);
+    try testing.expectEqualStrings("pool_spent", second.reason.?);
+    try testing.expectEqualStrings(newer, second.pool_state.?.getText("outpoint").?);
+    // The third, still waiting when its deadline comes: timeout, the validator not called.
+    const late = relay.advanceLocal(&third, .woke, t_expires);
+    try testing.expect(late.done and !late.call);
+    try testing.expectEqual(relay.Status.timeout, third.status);
+}
+
 // --- the dispatch, by the app's manifest (app/etc/app.json), with the functions over memory ---
 
 const TestEnv = struct {

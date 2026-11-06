@@ -26,6 +26,7 @@ const ov = @import("skein_overlay");
 const sktopic = @import("topic");
 const Oracle = @import("src/oracle.zig").Oracle;
 const rescind = @import("src/rescind.zig");
+const pool_lock = @import("src/lock.zig");
 
 const bsvz = w.bsvz;
 const cbor = w.cbor;
@@ -2236,4 +2237,195 @@ test "pool_spent past the LP's Close (0.41.1): the refusal carries the closing t
     const after = (try validator.newest(a, (try m2.deps()).view, m2.topic, m2.pool_op)).?;
     try testing.expect(after == .closed);
     try testing.expectEqualSlices(u8, &close, &after.closed.by);
+}
+
+// --- one swap in flight per pool (0.43.0, plans/pool-lock-build-2026-11-06.md D3) ---
+
+/// The kernel's threads as the lock sees them: one at rest cannot be awaited (skein VM.md "Waiting
+/// on a thread"); what each step awaited, in order.
+const Threads = struct {
+    a: std.mem.Allocator,
+    at_rest: std.StringHashMapUnmanaged(void) = .empty,
+    awaited: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    fn waitFn(ptr: *anyopaque, t: []const u8) bool {
+        const self: *Threads = @ptrCast(@alignCast(ptr));
+        if (self.at_rest.contains(t)) return false;
+        self.awaited.append(self.a, t) catch @panic("OOM");
+        return true;
+    }
+    fn threads(self: *Threads) pool_lock.Threads {
+        return .{ .ptr = self, .awaitFn = waitFn };
+    }
+    fn rest(self: *Threads, t: []const u8) !void {
+        try self.at_rest.put(self.a, t, {});
+    }
+    /// What the last step awaited.
+    fn last(self: *Threads) []const u8 {
+        return self.awaited.items[self.awaited.items.len - 1];
+    }
+};
+
+/// The record as main.zig keeps it between steps: written, then read back.
+fn relock(a: std.mem.Allocator, l: pool_lock.Locks) !pool_lock.Locks {
+    return pool_lock.Locks.parse(a, readBack(a, try l.value(a)));
+}
+
+const T1 = "cid:thread-1";
+const T2 = "cid:thread-2";
+const T3 = "cid:thread-3";
+
+/// One step of a swap's direct call through the lock (main.zig `directCall`): the served request,
+/// or null (it waits); the record kept.
+fn lockedStep(m: *Mined, a: std.mem.Allocator, locks: *pool_lock.Locks, th: *Threads, req: []const u8, op: Outpoint, me: []const u8) !?messages.Served {
+    const served = try messages.respondLocked(a, .swap, try spendBody(a, req, op), try m.deps(), locks, me, th.threads());
+    locks.* = try relock(a, locks.*);
+    return served;
+}
+
+test "pool lock: two swaps on one pool before either is admitted — the second waits on the first's thread; the first admitted → the second answered pool_spent with the new state; the lock gone" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const m = try Mined.init(a, &ms);
+    var th: Threads = .{ .a = a };
+    var locks: pool_lock.Locks = .{};
+
+    // The first: signed, to be submitted; its pool locked by its thread in the same step.
+    const r1 = try m.swapRequest(a);
+    const s1 = (try lockedStep(m, a, &locks, &th, r1, m.pool_op, T1)).?;
+    try testing.expect(s1.next == .submit);
+    try testing.expectEqual(@as(usize, 1), locks.entries.items.len);
+    const e = locks.entries.items[0];
+    try testing.expect(e.pool.eql(m.pool_op));
+    try testing.expectEqualSlices(u8, &s1.reply.ok.txid.?, &e.holder.?.txid);
+    try testing.expectEqualStrings(T1, e.holder.?.thread);
+
+    // The second, as on ovh: before the engine has even routed the first (nothing held, nothing pending):
+    // not refused, not signed — it awaits the first's thread.
+    const p = try relayPair(a, m.f, .signed);
+    const r2 = try relayBeef(a, m, p);
+    m.f.oracle.calls = 0;
+    try testing.expect((try lockedStep(m, a, &locks, &th, r2, m.pool_op, T2)) == null);
+    try testing.expectEqual(@as(usize, 0), m.f.oracle.calls);
+    try testing.expectEqualStrings(T1, th.last());
+    try testing.expectEqual(@as(usize, 1), locks.entries.items[0].waiters.items.len);
+
+    // The first goes through: routed, ingested, admitted. Its thread takes the answer (the lock
+    // released) and comes to rest.
+    const ev = try m.node.launched(s1);
+    _ = try m.node.step(ev);
+    try testing.expect((try m.node.status(ev, "RECEIVED")).admitted);
+    try testing.expect(locks.release(T1));
+    try testing.expect((try m.fromSubmit(a, .swap, try spendBody(a, r1, m.pool_op), m.node.sent.last())) == .ok);
+    try th.rest(T1);
+
+    // The second, stepped again (`resolved`): the same check against the settled state — pool_spent,
+    // the new state (the first's continuation) and its BEEF; nothing signed; no lock left.
+    const s2 = (try lockedStep(m, a, &locks, &th, r2, m.pool_op, T2)).?;
+    try expectRefused(s2.reply, .pool_spent);
+    try testing.expect(s2.reply.refused.newest.?.live.outpoint.eql(.{ .txid = s1.reply.ok.txid.?, .vout = 0 }));
+    try testing.expect(s2.reply.refused.beef != null);
+    try testing.expectEqual(@as(usize, 0), m.f.oracle.calls);
+    try testing.expectEqual(@as(usize, 0), locks.entries.items.len);
+
+    // A stale request naming the first pool output after a third swap locked the new state: the lineage
+    // walked to the lock — it waits too, whatever output of the pool it names.
+    const newest: Outpoint = .{ .txid = s1.reply.ok.txid.?, .vout = 0 };
+    try locks.take(a, newest, .{0x44} ** 32, .{0x45} ** 32, T3);
+    try testing.expect((try lockedStep(m, a, &locks, &th, r2, m.pool_op, T2)) == null);
+    try testing.expectEqualStrings(T3, th.last());
+}
+
+test "pool lock: the first rejected → the waiter is checked and signed and takes the lock; the next waiter waits on it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const m = try Mined.init(a, &ms);
+    var th: Threads = .{ .a = a };
+    var locks: pool_lock.Locks = .{};
+
+    const r1 = try m.swapRequest(a);
+    const s1 = (try lockedStep(m, a, &locks, &th, r1, m.pool_op, T1)).?;
+    const r2 = try relayBeef(a, m, try relayPair(a, m.f, .signed));
+    try testing.expect((try lockedStep(m, a, &locks, &th, r2, m.pool_op, T2)) == null);
+    // A third, the same pool: in the queue after the second.
+    const stale = try withUnlocking(a, try request(a, m.f.raw("swap_bsv_in"), 0), 1, &.{0x00});
+    try testing.expect((try lockedStep(m, a, &locks, &th, stale, m.pool_op, T3)) == null);
+    try testing.expectEqual(@as(usize, 2), locks.entries.items[0].waiters.items.len);
+
+    // The network rejects the first; its thread takes the answer and rests.
+    const ev = try m.node.launched(s1);
+    _ = try m.node.step(ev);
+    try testing.expectEqual(Gated.rejected, (try m.node.status(ev, "REJECTED")).gate);
+    _ = locks.release(T1);
+    try th.rest(T1);
+
+    // The kernel steps the waiters of T1 in its order; here the third first (one millisecond, a
+    // higher CID): the queue keeps arrival order — it waits on the second.
+    try testing.expect((try lockedStep(m, a, &locks, &th, stale, m.pool_op, T3)) == null);
+    try testing.expectEqualStrings(T2, th.last());
+    // The second: the head of the queue — checked and signed, the pool locked by it, the third still queued.
+    m.f.oracle.calls = 0;
+    const s2 = (try lockedStep(m, a, &locks, &th, r2, m.pool_op, T2)).?;
+    try testing.expect(s2.next == .submit);
+    try testing.expectEqual(@as(usize, 1), m.f.oracle.calls);
+    const e = locks.entries.items[0];
+    try testing.expectEqualStrings(T2, e.holder.?.thread);
+    try testing.expectEqualSlices(u8, &s2.reply.ok.txid.?, &e.holder.?.txid);
+    try testing.expectEqual(@as(usize, 1), e.waiters.items.len);
+    try testing.expectEqualStrings(T3, e.waiters.items[0]);
+    // The third, stepped again (the second still in flight): waits on it.
+    try testing.expect((try lockedStep(m, a, &locks, &th, stale, m.pool_op, T3)) == null);
+    try testing.expectEqualStrings(T2, th.last());
+}
+
+test "pool lock: per pool — a lock on another pool never holds a swap; a waiter past its relay's expiry (its thread at rest) is dropped; the request in flight sent again is not a waiter (today's answer)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const m = try Mined.init(a, &ms);
+    var th: Threads = .{ .a = a };
+    var locks: pool_lock.Locks = .{};
+
+    // Another pool's lock (its thread live): this pool's swap goes through and takes its own.
+    const other: Outpoint = .{ .txid = .{0x66} ** 32, .vout = 0 };
+    try locks.take(a, other, .{0x67} ** 32, .{0x68} ** 32, T3);
+    const r1 = try m.swapRequest(a);
+    const s1 = (try lockedStep(m, a, &locks, &th, r1, m.pool_op, T1)).?;
+    try testing.expect(s1.next == .submit);
+    try testing.expectEqual(@as(usize, 0), th.awaited.items.len);
+    try testing.expectEqual(@as(usize, 2), locks.entries.items.len);
+
+    // The same request again from another thread (a retry): not a waiter; answered as today — the
+    // engine routes the first meanwhile, so it waits on that submission (not signed again).
+    const ev = try m.node.launched(s1);
+    _ = try m.node.step(ev);
+    m.f.oracle.calls = 0;
+    const again = (try lockedStep(m, a, &locks, &th, r1, m.pool_op, T2)).?;
+    try testing.expect(again.next == .wait_on);
+    try testing.expectEqual(@as(usize, 0), m.f.oracle.calls);
+    try testing.expect(locks.waitingIn(T2) == null);
+
+    // A waiter (T2 with another swap) whose relay times out: its thread rests; the holder's answer
+    // comes, it rests; the next waiter (T3) finds the expired one gone and is checked.
+    const r2 = try relayBeef(a, m, try relayPair(a, m.f, .signed));
+    try testing.expect((try lockedStep(m, a, &locks, &th, r2, m.pool_op, T2)) == null);
+    const stale = try withUnlocking(a, try request(a, m.f.raw("swap_bsv_in"), 0), 1, &.{0x00});
+    try testing.expect((try lockedStep(m, a, &locks, &th, stale, m.pool_op, T3)) == null);
+    try th.rest(T2); // the local relay's deadline: timeout, done
+    _ = try m.node.status(ev, "RECEIVED");
+    _ = locks.release(T1);
+    try th.rest(T1);
+    const s3 = (try lockedStep(m, a, &locks, &th, stale, m.pool_op, T3)).?;
+    try expectRefused(s3.reply, .pool_spent);
+    // Only the other pool's lock is left.
+    try testing.expectEqual(@as(usize, 1), locks.entries.items.len);
+    try testing.expect(locks.entries.items[0].pool.eql(other));
 }

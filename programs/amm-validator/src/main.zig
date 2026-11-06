@@ -76,6 +76,7 @@ const submit = @import("submit.zig");
 const view_mod = @import("view.zig");
 const launch = @import("launch.zig");
 const rescind = @import("rescind.zig");
+const lock = @import("lock.zig");
 const Oracle = @import("oracle.zig").Oracle;
 const terms = @import("terms");
 
@@ -147,7 +148,10 @@ fn run(a: std.mem.Allocator) anyerror!void {
     // The configuration as the engine reads it: the app this program was installed in (the
     // matched row's program record names it), its `config.overlay`, its roles.
     const in = try ov.engine_vm.configured(a, raw_in, arg);
-    return directCall(a, in, arg, op);
+    // 0.43.0: the thread this call's step is (the front door's request thread, or the local relay's):
+    // what a request waiting on a pool's lock awaits (lock.zig).
+    const me = (raw_in.get("step") orelse return error.BadInput).getCid("thread") orelse return error.BadInput;
+    return directCall(a, in, arg, op, me);
 }
 
 /// Launch the genesis wallet program on `body` (launch.zig `launchArgs`): a thread of its own,
@@ -168,8 +172,28 @@ fn answerWait(a: std.mem.Allocator) !void {
     try vm.answer(a, .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "wait", .value = .{ .boolean = true } }}) });
 }
 
-/// fn `swap`, `affirm`: a frame of a direct call, or amm-p2p's local call (above).
-fn directCall(a: std.mem.Allocator, in: Value, arg: Value, op: validator.Op) !void {
+// ---------------------------------------------------------------- the pool locks (0.43.0)
+
+fn awaitThread(_: *anyopaque, thread: []const u8) bool {
+    vm.awaitRecord(thread) catch return false; // at rest: its state is there to read
+    return true;
+}
+
+const threads: lock.Threads = .{ .ptr = &oracle_dummy, .awaitFn = awaitThread };
+
+fn loadLocks(a: std.mem.Allocator, app: []const u8) !lock.Locks {
+    const s = vm.store();
+    const rec: ?Value = if (try vm.head(a, try lock.headName(a, app))) |rc| try s.getValue(a, rc) else null;
+    return lock.Locks.parse(a, rec);
+}
+
+fn saveLocks(a: std.mem.Allocator, app: []const u8, locks: lock.Locks) !void {
+    const rc = try vm.store().putValue(a, try locks.value(a));
+    try vm.advance(try lock.headName(a, app), rc);
+}
+
+/// fn `swap`, `affirm`: a frame of a direct call, or amm-p2p's local call (above). `me`: this step's thread.
+fn directCall(a: std.mem.Allocator, in: Value, arg: Value, op: validator.Op, me: []const u8) !void {
     // A frame on a direct call (the front door's), or (0.4.0) the same package handed in-VM by this
     // instance's own relay when the validator the caller named is this node (amm-p2p `callValidator`).
     const transport = arg.getText("transport") orelse "";
@@ -185,22 +209,35 @@ fn directCall(a: std.mem.Allocator, in: Value, arg: Value, op: validator.Op) !vo
     const ovv = try a.create(view_mod.OverlayView);
     ovv.* = .{ .st = st };
 
-    // Called again (#66): the engine's answer to the submission this frame awaited.
+    const app = ov.calls.appOf(in);
+    // Called again (#66): the engine's answer to the submission this frame awaited. 0.43.0: the
+    // pool's lock this thread holds is released (its queue is stepped when this thread comes to rest).
     if (arg.get("reply")) |r| if (r == .map) {
         const ans = try vm.store().getValue(a, r.getCid("body") orelse return error.BadInput);
+        var locks = try loadLocks(a, app);
+        if (locks.release(me)) try saveLocks(a, app, locks);
         return answerBody(a, try messages.answerFromSubmit(a, st, ovv.view(), op, body, ans));
     };
+    // 0.43.0: a swap waits while its pool is locked (lock.zig): a fresh request, or one waiting in a
+    // lock's queue stepped again.
+    var locks = try loadLocks(a, app);
+    const before = try cbor.encode(a, try locks.value(a));
+    const resolved = arg.get("resolved") != null;
+    const queued = op == .swap and locks.waitingIn(me) != null;
     // Called again (#66): the submission's thread this frame waited on (a resubmission's) has come
     // to rest.
-    if (arg.get("resolved") != null) return answerBody(a, try messages.answerFromState(a, st, ovv.view(), op, body));
-
+    if (resolved and !queued) return answerBody(a, try messages.answerFromState(a, st, ovv.view(), op, body));
     const now: i64 = if (in.getUint("now")) |n| @intCast(n) else 0;
-    const served = try messages.respond(a, op, body, .{
+    const served = (try messages.respondLocked(a, op, body, .{
         .config = .{ .identity = identity, .terms = try termsNow(a, in), .now_ms = now, .validated = try validatedSet(a, in) },
         .view = ovv.view(),
         .oracle = oracle,
         .st = st,
-    });
+    }, &locks, me, threads)) orelse {
+        try saveLocks(a, app, locks);
+        return answerWait(a);
+    };
+    if (!std.mem.eql(u8, before, try cbor.encode(a, try locks.value(a)))) try saveLocks(a, app, locks);
     switch (served.next) {
         .answer => return answerBody(a, served.reply),
         .from_state => return answerBody(a, try messages.answerFromState(a, st, ovv.view(), op, body)),
