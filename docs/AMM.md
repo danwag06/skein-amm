@@ -472,7 +472,7 @@ BUMP in chain state) transaction, else `state`; `stream` = `text/event-stream`, 
 | P7 | `GET /@<token>/amm/terms` | amm-p2p (B) | `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps, minLegSats} \| null, market: {commissionPkh, minCommissionBps}}` (the two `/call` answers in one, unsigned; 0.40.0: `minLegSats` the validator's minimum leg, sats, 0 none) | state |
 | P8 | `GET /@<token>/amm/spends?outpoint=a,b` | amm-p2p (B) | `[{outpoint, spentBy?, current?, hops, closed}]` one per outpoint in query order (today's single form kept working) | state |
 | P9 | `GET /@<token>/amm/tx?id=<txid>` | amm-p2p (B) | the transaction's BEEF bytes, `application/octet-stream` (`beefFor`); 404 unknown | imm |
-| P10 | `GET /@<token>/amm/swaps?id=<id>` | amm-p2p (B) | the relay record as `amm.swap.status` answers it, unsigned | state |
+| P10 | (0.44.0: gone — no swap records: the host relays, the instance logs facts, never attempts) | | | |
 | P11 | `GET /@<token>/amm/token` | unchanged | | state |
 | P12 | `GET <origin>/amm/tokens` | swap app (D) | rows gain `iconUrl` = `/@discovery/1color/<token>/icon` (origin-relative), the data-URL `icon` field GOES | state |
 | P13 | `GET /@discovery/1color/tokens?ids=a,b` and paged `?limit=&skip=` | color-lookup (C) | rows `{tokenId, topic, sym, dec, iconUrl?, txid, vout}`; with `ids`: one row per id in query order, unknown = `{tokenId, listed: false}`; `iconUrl` RELATIVE to the list (`<token>/icon`) | state |
@@ -595,15 +595,21 @@ token is not part of Open Exchange; a marketplace host adds its own).
 **Box `amm`** (derived): the engine's own `watch`, `resume`, `wait` (from
 the instance itself) and, as an event route, the libp2p routes' admits.
 
-`amm.swap.submit` takes the funding transaction (the wallet's `noSend`
-action) and the swap, and the validator the caller names —
-`validator` (its identity key) and `peerId` (its libp2p peer ID, text, 0.4.0)
-— checks the pair, records it under `amm/app` and relays it to that
-validator: it dials `peerId` over libp2p, or, when `peerId` is its own
-node's, calls its own `amm-validator` in-VM with the same package (a node
-does not dial itself). It looks at no liveness. The record settles
-`accepted`, `refused`, `timeout` or `failed` (amm-p2p README "The
-marketplace relay").
+**The swap relay is the HOST's** (0.44.0, David Case 2026-11-06: "the
+instance logs facts, never attempts"; `amm.swap.submit`, `amm.swap.status`,
+the swap records under `amm/app` and `/swaps` are gone). The page posts the
+funding transaction and the swap, the pool, and the validator it names
+(`validator`, its identity key, and `peerId`) to the open-exchange host's
+plain route `POST /@<token>/amm/swap`. The host checks one rule, the
+exchange's commission (amm-p2p README "The commission rule"), signs the
+validator's package with the token instance's key outside any step, carries
+it on one libp2p stream (one request frame, one answer frame) — or, when
+`peerId` is its own node, hands it in as that node's inbound frame — and
+answers the page with the validator's reply, after submitting a `beef` it
+carries to the token instance's overlay. Any break fails the request at
+once, named; when the page's request closes the host stops (no dial
+continued, nothing unwritten written). Nothing is logged on the taker's side
+but that overlay submission.
 
 `amm.pool.affirm` is not relayed: amm-p2p packages the request (box
 `affirm`, from this instance to itself) and calls its own amm-validator's
@@ -712,8 +718,8 @@ root's switch); no `config.amm` (0.16.0: `commission`, the relay's
 commission pkh, is gone, the key derived, "The commission key" above; 0.9.0
 to 0.14.2 also `ammValidator`, the validator's terms, and before 0.9.0 the
 bounds `minValidatorFeeBps`, `maxLpFeeBps`, `maxCommissionBps`: 0.15.0
-moved the terms to the runtime record `amm/terms`, "The terms" above); `provides` the two `amm.*` interfaces (`amm.swap.submit` with
-`peerId: "string"` beside `validator`, 0.4.0; `amm.pool.terms`, 0.9.0;
+moved the terms to the runtime record `amm/terms`, "The terms" above); `provides` the two `amm.*` interfaces (`amm.swap.terms`; 0.44.0: no
+`amm.swap.submit` / `status`; `amm.pool.terms`, 0.9.0;
 `amm.pool.affirm`, 0.11.0, in place of `amm.pool.submit` / `status`;
 0.13.0: `{pool, satoshis}` → `{validatorPubKey, nonce, signature}`);
 `requires: ["chain/1"]`; no `start` / `stop` (0.6.0). No
@@ -790,7 +796,7 @@ writes fails inside the call). Exact paths match before a prefix, so
 | `/requests` | read | `requests` → `amm-p2p.requests` | 0.9.0; the config app's in 0.17.0; removed in 0.19.0 |
 | `/spends` | read | `spends` → `amm-p2p.spends` | 0.9.0 |
 | `/token` | read | `token` → `amm-setup.token` | 0.22.0 |
-| `/pools/beef`, `/positions`, `/fees/validator`, `/fees/commission`, `/terms`, `/tx`, `/swaps` | read | `poolsBeef`, `positions`, `validatorFees`, `commissionFees`, `readTerms`, `tx`, `swaps` → `amm-p2p.<the same>` | 0.34.0 ("The public read API") |
+| `/pools/beef`, `/positions`, `/fees/validator`, `/fees/commission`, `/terms`, `/tx` | read | `poolsBeef`, `positions`, `validatorFees`, `commissionFees`, `readTerms`, `tx` → `amm-p2p.<the same>` | 0.34.0 ("The public read API"; 0.44.0: `/swaps` gone) |
 | `/trades`, `/candles`, `/stats` | read | `trades`, `candles`, `stats` → `amm-p2p.<the same>` | 0.36.0 ("The history reads") |
 | `/color/` (prefix) | read | `colorToken` → `color-lookup.token` (skein-1color 0.15.0: `/color/<tokenId>/holders?limit=&skip=` → `{count, rows: [{address, balance}]}`, the token's holders from color-lookup's balance table) | 0.37.0 |
 | `/.live/tm_color_<txid>_0-live`, `/.live/ls_amm_<txid>_0-live` | the runtime's liveness read (no program, skein #138) | | |

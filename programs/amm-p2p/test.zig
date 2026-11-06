@@ -6,7 +6,7 @@ const std = @import("std");
 const w = @import("chain");
 const wire = @import("wallet").wire;
 const names = @import("src/names.zig");
-const libp2p = @import("src/libp2p.zig");
+const stream = @import("src/stream.zig");
 const schedule = @import("src/schedule.zig");
 const proofs = @import("src/proofs.zig");
 /// js-libp2p's peer ID of the generator point's key (skein src/host/p2p.ts `peerIdOf` of the private key 1).
@@ -223,14 +223,14 @@ test "the peer ID of a compressed secp256k1 key: the identity multihash of its p
     const a = arena.allocator();
     var k: [33]u8 = undefined;
     _ = try std.fmt.hexToBytes(&k, "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
-    const id = try libp2p.peerIdOf(a, k);
+    const id = try stream.peerIdOf(a, k);
     try testing.expectEqual(@as(usize, 39), id.len);
     try testing.expectEqualSlices(u8, &.{ 0x00, 0x25, 0x08, 0x02, 0x12, 0x21 }, id[0..6]);
     try testing.expectEqualSlices(u8, &k, id[6..]);
-    try testing.expectEqualStrings(PEER_ID_OF_G, try libp2p.peerIdText(a, id));
+    try testing.expectEqualStrings(PEER_ID_OF_G, try stream.peerIdText(a, id));
 }
 
-test "libp2p adapter: the handler's argument, answers with admit entries, the direct call's answer, the provider's bodies and answers" {
+test "the direct call's shapes (stream.zig, 0.44.0: was stream.zig): the handler's argument, the direct call's answer, the provider's bodies and answers" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -245,34 +245,21 @@ test "libp2p adapter: the handler's argument, answers with admit entries, the di
         .{ .key = "signature", .value = .{ .bytes = "sig" } },
         .{ .key = "body", .value = .{ .bytes = "body" } },
     }) };
-    const in = try libp2p.inbound(arg);
+    const in = try stream.inbound(arg);
     try testing.expectEqualSlices(u8, pid, in.from);
     try testing.expectEqualStrings("tm_x-live", in.topic.?);
-    try testing.expectError(error.NotLibp2p, libp2p.inbound(.{ .map = &.{} }));
+    try testing.expectError(error.NotLibp2p, stream.inbound(.{ .map = &.{} }));
 
-    // Accept carries the entries to admit ({event, box}); reject/ignore a reason only.
-    const ev0: Value = .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "kind", .value = .{ .text = "x" } }}) };
-    const ok = readBack(a, try libp2p.answer(a, .{ .accept = &.{.{ .box = "b", .event = ev0 }} }));
-    try testing.expectEqualStrings("accept", ok.getText("verdict").?);
-    try testing.expectEqualStrings("b", ok.getArray("admit").?[0].getText("box").?);
-    const rej = try libp2p.answer(a, .{ .reject = "Why" });
-    try testing.expectEqualStrings("reject", rej.getText("verdict").?);
-    try testing.expectEqualStrings("Why", rej.getText("reason").?);
-    try testing.expect(rej.get("admit") == null);
-    const da = readBack(a, try libp2p.directAnswer(a, "reply"));
+    const da = readBack(a, try stream.directAnswer(a, "reply"));
     try testing.expectEqualSlices(u8, "reply", da.getBytes("body").?);
 
     // Outbound: the provider's boxes and bodies; `dial` takes the peer as text.
-    const p = try libp2p.publish(a, "tm_x-live", "b");
-    try testing.expectEqualStrings("publish", p.box);
-    try testing.expectEqualStrings("tm_x-live", readBack(a, p.body).getText("topic").?);
-    const text = try libp2p.peerIdText(a, pid);
-    try testing.expectEqualSlices(u8, pid, try libp2p.peerIdBytes(a, .{ .text = text }));
-    const d = try libp2p.dial(a, text, names.proofs_protocol);
+    const text = try stream.peerIdText(a, pid);
+    const d = try stream.dial(a, text, names.proofs_protocol);
     try testing.expectEqualStrings("dial", d.box);
     try testing.expectEqualStrings(text, readBack(a, d.body).getText("peer").?);
-    try testing.expectEqual(@as(u64, 3), readBack(a, (try libp2p.send(a, 3, "q")).body).getUint("stream").?);
-    try testing.expectEqualStrings("close", (try libp2p.close(a, 3)).box);
+    try testing.expectEqual(@as(u64, 3), readBack(a, (try stream.send(a, 3, "q")).body).getUint("stream").?);
+    try testing.expectEqualStrings("close", (try stream.close(a, 3)).box);
 
     // The dial's answers: {stream} (box dial), a frame, its end, an error.
     const m = struct {
@@ -280,16 +267,16 @@ test "libp2p adapter: the handler's argument, answers with admit entries, the di
             return .{ .map = al.dupe(cbor.Entry, es) catch @panic("OOM") };
         }
     };
-    try testing.expectEqual(@as(u64, 7), (try libp2p.dialAnswer("dial", m.of(a, &.{.{ .key = "stream", .value = .{ .uint = 7 } }}))).opened);
-    try testing.expectEqualSlices(u8, "r", (try libp2p.dialAnswer("frame", m.of(a, &.{ .{ .key = "stream", .value = .{ .uint = 7 } }, .{ .key = "body", .value = .{ .bytes = "r" } } }))).frame);
-    try testing.expect((try libp2p.dialAnswer("frame", m.of(a, &.{ .{ .key = "stream", .value = .{ .uint = 7 } }, .{ .key = "closed", .value = .{ .boolean = true } } }))) == .closed);
-    try testing.expectEqualStrings("refused", (try libp2p.dialAnswer("dial", m.of(a, &.{.{ .key = "error", .value = .{ .text = "refused" } }}))).closed);
-    try testing.expectError(error.BadAnswer, libp2p.dialAnswer("send", m.of(a, &.{})));
+    try testing.expectEqual(@as(u64, 7), (try stream.dialAnswer("dial", m.of(a, &.{.{ .key = "stream", .value = .{ .uint = 7 } }}))).opened);
+    try testing.expectEqualSlices(u8, "r", (try stream.dialAnswer("frame", m.of(a, &.{ .{ .key = "stream", .value = .{ .uint = 7 } }, .{ .key = "body", .value = .{ .bytes = "r" } } }))).frame);
+    try testing.expect((try stream.dialAnswer("frame", m.of(a, &.{ .{ .key = "stream", .value = .{ .uint = 7 } }, .{ .key = "closed", .value = .{ .boolean = true } } }))) == .closed);
+    try testing.expectEqualStrings("refused", (try stream.dialAnswer("dial", m.of(a, &.{.{ .key = "error", .value = .{ .text = "refused" } }}))).closed);
+    try testing.expectError(error.BadAnswer, stream.dialAnswer("send", m.of(a, &.{})));
 }
 
-// ================================================================ the marketplace relay (amm.swap/1)
+// ================================================================ amm.swap/1 (0.44.0: terms only; the host relays)
 
-const relay = @import("src/relay.zig");
+const iface = @import("src/interface.zig");
 const app = @import("app");
 const sk = @import("sk");
 const scbor = @import("sdk_cbor");
@@ -307,17 +294,6 @@ fn unhex(a: Allocator, h: []const u8) []u8 {
     _ = std.fmt.hexToBytes(out, h) catch @panic("bad hex");
     return out;
 }
-
-/// The fixtures' taker (gen/main.go `key(30)`), who owns fund:1.
-const taker_priv: [32]u8 = .{30} ** 32;
-/// The relay's commission key hash: the fixtures' relay (gen/main.go `key(50)`, vectors' commission_pkh).
-const commission_pkh: [20]u8 = blk: {
-    @setEvalBranchQuota(10_000);
-    var k: [20]u8 = undefined;
-    _ = std.fmt.hexToBytes(&k, vec.commission_pkh) catch unreachable;
-    break :blk k;
-};
-const relay_priv: [32]u8 = .{0x44} ** 32;
 
 fn p2pkhScript(a: Allocator, pkh: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ &.{ 0x76, 0xa9, 0x14 }, pkh, &.{ 0x88, 0xac } });
@@ -377,659 +353,37 @@ fn signP2pkh(a: Allocator, tx: *Transaction, i: usize, src: []const u8, sats: u6
 /// different fee makes a different swap). The fixtures carry no funding
 /// parent of this shape (their swap spends fund:1 directly), so it is built
 /// here.
-const Pair = struct { funding: []const u8, swap: []const u8, pool: []const u8, validator: [33]u8 };
-
-const PairOpts = struct { commission: [20]u8 = commission_pkh, sign_funding: bool = true, fee: u64 = 500 };
-
-fn buildPair(a: Allocator) !Pair {
-    return buildPairWith(a, .{});
-}
-
-fn buildPairWith(a: Allocator, o: PairOpts) !Pair {
-    const fund = try Transaction.parse(a, unhex(a, vec.fund));
-    const pd_raw = unhex(a, vec.pool_deploy);
-    const pd = try Transaction.parse(a, pd_raw);
-    const base = try Transaction.parse(a, unhex(a, vec.swap_bsv_in));
-    const taker_pkh = hash160(&(try (try bsvz.primitives.ec.PrivateKey.fromBytes(taker_priv)).publicKey()).toCompressedSec1());
-    const taker_lock = try p2pkhScript(a, &taker_pkh);
-
-    // The swap's outputs: continuation, payout, LP fee, validator fee, commission (the fixture's, to `commission`).
-    const outs = try a.dupe(bsvz.transaction.Output, base.outputs[0..5]);
-    try std.testing.expectEqualSlices(u8, try p2pkhScript(a, &commission_pkh), outs[4].locking_script.bytes);
-    outs[4].locking_script = Script.init(try p2pkhScript(a, &o.commission));
-    var out_sum: u64 = 0;
-    for (outs) |x| out_sum += @intCast(x.satoshis);
-    const pool_sats: u64 = @intCast(pd.outputs[0].satoshis);
-    const exact = out_sum - pool_sats + o.fee;
-
-    // The funding transaction: fund:1 (500,000, the taker's) → exact, change.
-    var f = fund;
-    f.inputs = try a.dupe(bsvz.transaction.Input, &.{.{
-        .previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(unhex(a, vec.fund)) }, .index = 1 },
-        .unlocking_script = Script.empty(),
-        .sequence = 0xffffffff,
-    }});
-    f.outputs = try a.dupe(bsvz.transaction.Output, &.{
-        .{ .satoshis = @intCast(exact), .locking_script = Script.init(taker_lock) },
-        .{ .satoshis = @intCast(500_000 - exact - 300), .locking_script = Script.init(taker_lock) },
-    });
-    if (o.sign_funding) try signP2pkh(a, &f, 0, fund.outputs[1].locking_script.bytes, @intCast(fund.outputs[1].satoshis), taker_priv);
-    const f_raw = try f.serialize(a);
-
-    // The swap: the pool, then the funding output.
-    var s = base;
-    const sins = try a.dupe(bsvz.transaction.Input, &.{ base.inputs[0], .{
-        .previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(f_raw) }, .index = 0 },
-        .unlocking_script = Script.empty(),
-        .sequence = 0xffffffff,
-    } });
-    s.inputs = sins;
-    s.outputs = outs;
-    const lock = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.lock;
-    const pre = try bsvz.transaction.sighash.formatPreimage(a, &s, 0, Script.init(lock[2..]), @intCast(pool_sats), 0x41);
-    // The pool call, push by push (_codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-    // commissionPkh, tokenChangePkh, tokenChange, _changePKH, _changeAmount, txPreimage, methodIndex): the slot
-    // empty, the commission's pkh, no token change (the fixture's), no change, the new preimage.
-    const u = base.inputs[0].unlocking_script.bytes;
-    var pos: usize = 0;
-    var i: usize = 0;
-    var script: std.ArrayList(u8) = .empty;
-    while (pos < u.len) : (i += 1) {
-        const p = color.brc162.readPush(u, pos).?;
-        const raw = u[pos..p.next];
-        try script.appendSlice(a, switch (i) {
-            1 => &.{0}, // validatorSig: the slot, empty
-            6 => try pushData(a, &o.commission),
-            10 => &.{0}, // _changeAmount = 0
-            11 => try pushData(a, pre),
-            else => raw,
-        });
-        pos = p.next;
-    }
-    try std.testing.expectEqual(@as(usize, relay.swap_pushes), i);
-    sins[0].unlocking_script = Script.init(script.items);
-    try signP2pkh(a, &s, 1, taker_lock, exact, taker_priv);
-    const pool_text = try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(pd_raw))});
-    var validator: [33]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&validator, vec.identity);
-    return .{ .funding = f_raw, .swap = try s.serialize(a), .pool = pool_text, .validator = validator };
-}
-
-fn expectRefusal(c: relay.Checked, reason: []const u8) !void {
-    switch (c) {
-        .ok => {
-            std.debug.print("expected {s}, got ok\n", .{reason});
-            return error.TestExpectedRefusal;
-        },
-        .refused => |r| {
-            if (!eql(u8, r.reason, reason)) std.debug.print("expected {s}, got {s} ({s})\n", .{ reason, r.reason, r.detail orelse "" });
-            try testing.expectEqualStrings(reason, r.reason);
-        },
-    }
-}
-
-const ours: relay.Commission = .{ .pkh = commission_pkh };
-const t_now: u64 = 1_700_000_000_000;
-const t_expires: u64 = t_now + 60_000;
-
-test "relay: a pair from the fixtures (the funding transaction pays the swap's input exactly; the swap spends it, its commission paying us) is checked; each refusal" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const p = try buildPair(a);
-
-    const ok = try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_expires, t_now, ours);
-    try testing.expect(ok == .ok);
-    try testing.expectEqual(@as(u64, 20_000), ok.ok.call.amount_in);
-    try testing.expect(ok.ok.call.bsv_in);
-    try testing.expectEqualSlices(u8, &commission_pkh, ok.ok.call.commission_pkh);
-    try testing.expectEqual(@as(u64, 0), ok.ok.call.change);
-    try testing.expectEqual(@as(i64, vec.lp_fee_bps), ok.ok.continuation.lp_fee_bps);
-    try testing.expectEqual(@as(i64, vec.commission_bps), ok.ok.continuation.commission_bps);
-    // Without a commission pkh configured, any commission payee passes.
-    try testing.expect(try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_expires, t_now, .{}) == .ok);
-    const other = try buildPairWith(a, .{ .commission = .{0x22} ** 20 });
-    try testing.expect(try relay.checkPair(a, other.funding, other.swap, other.pool, &other.validator, t_expires, t_now, .{}) == .ok);
-
-    // Our commission: another's.
-    try expectRefusal(try relay.checkPair(a, other.funding, other.swap, other.pool, &other.validator, t_expires, t_now, ours), "commission_missing");
-    // A pool charging no commission has no commission output: our check passes.
-    {
-        var s = try Transaction.parse(a, other.swap);
-        const lock = color.brc162.decode(s.outputs[0].locking_script.bytes).?.lock;
-        // CommissionBps (template offset 723) sits at 724 in the lock (the pool test of the slot, test.zig), as OP_10.
-        const at = s.outputs[0].locking_script.bytes.len - lock.len + 724;
-        try testing.expectEqual(@as(u8, 0x5a), s.outputs[0].locking_script.bytes[at]);
-        const outs = try a.dupe(bsvz.transaction.Output, s.outputs[0..4]);
-        const zero = try a.dupe(u8, s.outputs[0].locking_script.bytes);
-        zero[at] = 0x00;
-        outs[0].locking_script = Script.init(zero);
-        s.outputs = outs;
-        const c = try relay.checkPair(a, other.funding, try s.serialize(a), other.pool, &other.validator, t_expires, t_now, ours);
-        try testing.expect(c == .ok);
-        try testing.expectEqual(@as(i64, 0), c.ok.continuation.commission_bps);
-    }
-
-    // The pair itself.
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_now, t_now, ours), "expired");
-    try expectRefusal(try relay.checkPair(a, "junk", p.swap, p.pool, &p.validator, t_expires, t_now, ours), "bad_funding");
-    try expectRefusal(try relay.checkPair(a, p.funding, "junk", p.pool, &p.validator, t_expires, t_now, ours), "bad_swap");
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, "nope", &p.validator, t_expires, t_now, ours), "bad_pool");
-    const wrong_pool = try std.fmt.allocPrint(a, "{s}_1", .{p.pool[0..64]});
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, wrong_pool, &p.validator, t_expires, t_now, ours), "pool_not_input_0");
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), p.swap, p.pool, &p.validator, t_expires, t_now, ours), "funding_not_spent");
-    var other_key = p.validator;
-    other_key[5] ^= 1;
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, &other_key, t_expires, t_now, ours), "wrong_validator");
-    try expectRefusal(try relay.checkPair(a, p.funding, p.swap, p.pool, p.validator[0..32], t_expires, t_now, ours), "bad_validator");
-
-    // Unsigned: the funding transaction's input, the swap's funding input.
-    {
-        const u = try buildPairWith(a, .{ .sign_funding = false });
-        try expectRefusal(try relay.checkPair(a, u.funding, u.swap, u.pool, &u.validator, t_expires, t_now, ours), "funding_unsigned");
-        var s = try Transaction.parse(a, p.swap);
-        const ins = try a.dupe(bsvz.transaction.Input, s.inputs);
-        ins[1].unlocking_script = Script.empty();
-        s.inputs = ins;
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "swap_unsigned");
-    }
-    // The fixture's own swap: signed by the validator already, and spending fund:1, not a funding output.
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.swap_bsv_in), p.pool, &p.validator, t_expires, t_now, .{}), "signature_slot_not_empty");
-    // An output past the contract's (a change output the call does not name).
-    {
-        var s = try Transaction.parse(a, p.swap);
-        s.outputs = try std.mem.concat(a, bsvz.transaction.Output, &.{ s.outputs, &.{s.outputs[4]} });
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
-        // The commission output dropped while the pool charges one.
-        s.outputs = s.outputs[0..4];
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
-        // The commission one sat short; paying another than the call names.
-        const short = try a.dupe(bsvz.transaction.Output, (try Transaction.parse(a, p.swap)).outputs);
-        short[4].satoshis -= 1;
-        s.outputs = short;
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
-        const elsewhere = try a.dupe(bsvz.transaction.Output, (try Transaction.parse(a, p.swap)).outputs);
-        elsewhere[4].locking_script = Script.init(try p2pkhScript(a, &(.{0x22} ** 20)));
-        s.outputs = elsewhere;
-        try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
-    }
-    // The token change (0.40.0): named in the call (push 8, OP_5) with no output for it; then
-    // with its output (after the commission) it passes; a tokenChangePkh not 20 bytes (push 7).
-    {
-        const S = struct {
-            fn withPush(al: Allocator, swap: []const u8, idx: usize, raw: []const u8) ![]const u8 {
-                var t = try Transaction.parse(al, swap);
-                const u = t.inputs[0].unlocking_script.bytes;
-                var out: std.ArrayList(u8) = .empty;
-                var pos: usize = 0;
-                var i: usize = 0;
-                while (pos < u.len) : (i += 1) {
-                    const q = color.brc162.readPush(u, pos).?;
-                    try out.appendSlice(al, if (i == idx) raw else u[pos..q.next]);
-                    pos = q.next;
-                }
-                const ins = try al.dupe(bsvz.transaction.Input, t.inputs);
-                ins[0].unlocking_script = Script.init(out.items);
-                t.inputs = ins;
-                return t.serialize(al);
-            }
-        };
-        const named = try S.withPush(a, p.swap, 8, &.{0x55});
-        try expectRefusal(try relay.checkPair(a, p.funding, named, p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
-        var s = try Transaction.parse(a, named);
-        const pd = try Transaction.parse(a, unhex(a, vec.pool_deploy));
-        const asset = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.id.?.txid;
-        const ch = (try relay.parseSwapCall(a, s.inputs[0].unlocking_script.bytes)).?;
-        s.outputs = try std.mem.concat(a, bsvz.transaction.Output, &.{ s.outputs, &.{.{ .satoshis = 1, .locking_script = Script.init(try pool_lib.payoutScript(a, asset, 5, ch.token_change_pkh[0..20].*, false)) }} });
-        const with = try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours);
-        try testing.expect(with == .ok);
-        try testing.expectEqual(@as(u64, 5), with.ok.call.token_change);
-        try expectRefusal(try relay.checkPair(a, p.funding, try S.withPush(a, p.swap, 7, &([_]u8{19} ++ [_]u8{0x55} ** 19)), p.pool, &p.validator, t_expires, t_now, ours), "bad_call");
-    }
-    // Not a swap: the Rescind fixture's pool input (0.13.0: the validator's, funded by fund:6).
-    try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.rescind), try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.swap_tokens_in)))}), &p.validator, t_expires, t_now, .{}), "not_a_swap");
-}
-
-fn keySigner(a: Allocator, priv: [32]u8) !relay.Signer {
-    const k = try a.create([32]u8);
-    k.* = priv;
-    return .{ .ctx = k, .identityFn = struct {
-        fn f(ctx: *anyopaque, _: Allocator) anyerror![33]u8 {
-            const p: *[32]u8 = @ptrCast(@alignCast(ctx));
-            const kd = bsvz.primitives.key_deriver.KeyDeriver.init(try bsvz.primitives.ec.PrivateKey.fromBytes(p.*));
-            return (try kd.identityKey()).toCompressedSec1();
-        }
-    }.f, .signFn = struct {
-        fn f(ctx: *anyopaque, al: Allocator, hash: [32]u8) anyerror![]const u8 {
-            const p: *[32]u8 = @ptrCast(@alignCast(ctx));
-            const kd = bsvz.primitives.key_deriver.KeyDeriver.init(try bsvz.primitives.ec.PrivateKey.fromBytes(p.*));
-            const child = try kd.derivePrivateKey(al, .{ .security_level = 2, .name = relay.envelope_protocol }, relay.envelope_key_id, .{ .type_ = .anyone });
-            const sig = try child.signDigest(hash);
-            return al.dupe(u8, sig.asSlice());
-        }
-    }.f };
-}
-
-test "relay: the one BEEF (the funding transaction's ancestry, the funding transaction, the swap) and the signed package the validator opens" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const p = try buildPair(a);
-    const pair = (try relay.checkPair(a, p.funding, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
-
-    // A raw funding transaction: [funding, swap].
-    const b1 = try w.beef.parse(a, try relay.requestBeef(a, pair));
-    try testing.expectEqual(@as(usize, 2), b1.entries.len);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.funding), &b1.entries[0].txid);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.swap), &b1.subject().?);
-
-    // The funding as a BEEF (createAction's): its parent fund comes along, an unrelated entry does not.
-    const fund_raw = unhex(a, vec.fund);
-    const fbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = &.{}, .entries = try a.dupe(w.beef.Entry, &.{
-        .{ .txid = w.beef.txidOf(unhex(a, vec.token_deploy)), .format = .raw, .raw = unhex(a, vec.token_deploy) },
-        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
-        .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
-    }) });
-    const pair2 = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
-    const b2 = try w.beef.parse(a, try relay.requestBeef(a, pair2));
-    try testing.expectEqual(@as(usize, 3), b2.entries.len);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(fund_raw), &b2.entries[0].txid);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.funding), &b2.entries[1].txid);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.swap), &b2.subject().?);
-
-    // The funding's BEEF out of order (an Atomic BEEF, its parent fund after it): sorted, the same
-    // one BEEF (skein-sdk 0.11.1, David 2026-10-22).
-    const fback = try w.beef.serialize(a, .{ .version = w.beef.V2, .atomic = w.beef.txidOf(p.funding), .bumps = &.{}, .entries = try a.dupe(w.beef.Entry, &.{
-        .{ .txid = w.beef.txidOf(unhex(a, vec.token_deploy)), .format = .raw, .raw = unhex(a, vec.token_deploy) },
-        .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
-        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
-    }) });
-    const pair3 = (try relay.checkPair(a, fback, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
-    const b3 = try w.beef.parse(a, try relay.requestBeef(a, pair3));
-    try testing.expectEqual(@as(usize, 3), b3.entries.len);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(fund_raw), &b3.entries[0].txid);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.funding), &b3.entries[1].txid);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.swap), &b3.subject().?);
-    try testing.expect(w.beef.parentsFirst(b3));
-
-    // The package: a mail record signed by this instance (BRC-169), recipient the validator, box `swap`.
-    const rec: relay.Record = .{ .id = relay.idOf(p.swap), .funding = fbeef, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now };
-    const signer = try keySigner(a, relay_priv);
-    const topic = try names.overlayOf(a, "ab" ** 32 ++ "_0");
-    try testing.expectEqualStrings("tm_color_" ++ "ab" ** 32 ++ "_0", topic);
-    try testing.expect(names.parse(topic).?.kind == .overlay);
-    const frame = try relay.packageFor(a, signer, rec, topic);
-    const pkg = try scbor.decode(a, frame);
-    // 0.31.0: the frame names the token's topic at its top level, what the dialled host's stream
-    // routing reads off the first frame (skein p2p.ts streamHandle: dag-cbor {topic, …}).
-    try testing.expectEqualStrings(topic, scbor.Value.str(pkg.get("topic")).?);
-    // No topic given (the in-VM affirm; an instance before its deploy): none in the frame.
-    try testing.expect((try scbor.decode(a, try relay.packageFor(a, signer, rec, null))).get("topic") == null);
-    const m = pkg.get("message").?;
-    const body = scbor.Value.bytesOf(pkg.get("body")).?;
-    try testing.expect((try message.problem(a, m, body)) == null);
-    try testing.expectEqualSlices(u8, &p.validator, scbor.Value.bytesOf(m.get("recipient")).?);
-    try testing.expectEqualStrings("swap", scbor.Value.str(m.get("box")).?);
-    try testing.expectEqualSlices(u8, &(try signer.identityFn(signer.ctx, a)), scbor.Value.bytesOf(m.get("sender")).?);
-    const req = try cbor.decode(a, body);
-    try testing.expectEqualStrings(p.pool, req.getText("pool").?);
-    const sent = try w.beef.parse(a, req.getBytes("tx").?);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.swap), &sent.subject().?);
-    // Another swap, another nonce (the record is unique to the swap).
-    try testing.expect(!eql(u8, &relay.nonceOf(rec.id), &relay.nonceOf(relay.idOf(p.funding))));
-}
-
-fn frameOf(a: Allocator, v: Value) ![]const u8 {
-    return cbor.encode(a, v);
-}
-
-test "relay: the record's lifecycle over the libp2p provider's answers — accepted, refused (with the pool's state), timeout, failed — kept in the app's state" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    const p = try buildPair(a);
-    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
-
-    // pending → dial → opened (send the package) → the frame {ok: true} → accepted, the stream closed.
-    {
-        var r = fresh;
-        const start = try relay.advance(a, &r, .start, t_now, null);
-        try testing.expect(start.rest and !start.done);
-        try testing.expectEqual(@as(?usize, 0), start.dial);
-        try testing.expectEqualStrings("dial", start.emits[0].box);
-        try testing.expectEqualStrings(relay.swap_protocol, start.emits[0].body.getText("protocol").?);
-        try testing.expectEqualStrings(fresh.peer.?, start.emits[0].body.getText("peer").?);
-        const opened = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now + 10, "the package");
-        try testing.expect(opened.rest and !opened.done);
-        try testing.expectEqualStrings("send", opened.emits[0].box);
-        try testing.expectEqualStrings("the package", opened.emits[0].body.getBytes("body").?);
-        try testing.expectEqual(@as(?u64, 7), r.stream);
-        const signed = "the signed swap";
-        const done = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = true } },
-            .{ .key = "tx", .value = .{ .bytes = signed } },
-            .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
-        } }) } }, t_now + 20, null);
-        try testing.expect(done.done);
-        try testing.expectEqualStrings("close", done.emits[0].box);
-        try testing.expectEqual(relay.Status.accepted, r.status);
-        try testing.expectEqualStrings(signed, r.tx.?);
-        try testing.expectEqual(t_now + 20, r.updated);
-        // Settled: nothing more happens to it.
-        try testing.expect((try relay.advance(a, &r, .woke, t_expires + 1, null)).done);
-        try testing.expectEqual(relay.Status.accepted, r.status);
-
-        // Kept under the app's state, read back as stored; the answer leaves out the relay's own fields.
-        var book = try relay.Book.load(a, ms.store(), null);
-        r.dial = &w.store.hashCid(.tx, .{1} ** 32);
-        r.thread = &w.store.hashCid(.tx, .{2} ** 32);
-        r.request = .{ .message = &w.store.hashCid(.tx, .{3} ** 32), .sender = &p.validator };
-        try book.put(a, r);
-        const st = readBack(a, try book.state(a));
-        try testing.expectEqualStrings(relay.state_kind, st.getText("kind").?);
-        var again = try relay.Book.load(a, ms.store(), st);
-        const back = (try again.get(a, r.id)).?;
-        try testing.expectEqual(relay.Status.accepted, back.status);
-        try testing.expectEqualSlices(u8, p.funding, back.funding);
-        try testing.expectEqual(@as(?u64, 7), back.stream);
-        try testing.expectEqualSlices(u8, r.thread.?, back.thread.?);
-        try testing.expectEqualSlices(u8, &p.validator, back.request.?.sender);
-        const ans = readBack(a, try back.answer(a));
-        try testing.expectEqualStrings("accepted", ans.getText("status").?);
-        try testing.expectEqualStrings(&relay.idText(r.id), ans.getText("id").?);
-        try testing.expectEqualStrings(signed, ans.getBytes("tx").?);
-        try testing.expect(ans.get("thread") == null and ans.get("dial") == null and ans.get("request") == null and ans.get("peer") == null);
-        try testing.expect((try again.get(a, relay.idOf(p.funding))) == null);
-    }
-
-    // The validator refuses: refused, with its reason and the pool's newest state.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 8 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = false } },
-            .{ .key = "reason", .value = .{ .text = "pool_spent" } },
-            .{ .key = "pool", .value = .{ .map = &.{
-                .{ .key = "outpoint", .value = .{ .text = "cd" ** 32 ++ "_0" } },
-                .{ .key = "bsvReserve", .value = .{ .uint = 1_019_930 } },
-            } } },
-        } }) } }, t_now + 5, null);
-        try testing.expect(fx.done);
-        try testing.expectEqual(relay.Status.refused, r.status);
-        try testing.expectEqualStrings("pool_spent", r.reason.?);
-        const ans = readBack(a, try r.answer(a));
-        try testing.expectEqual(@as(u64, 1_019_930), ans.get("poolState").?.getUint("bsvReserve").?);
-    }
-
-    // No answer by `expires`: woken early it rests again; at `expires`, timeout, the stream closed.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 9 } }, t_now, "pkg");
-        const early = try relay.advance(a, &r, .woke, t_expires - 1, null);
-        try testing.expect(early.rest and !early.done);
-        try testing.expectEqual(relay.Status.pending, r.status);
-        const late = try relay.advance(a, &r, .woke, t_expires, null);
-        try testing.expect(late.done);
-        try testing.expectEqual(relay.Status.timeout, r.status);
-        try testing.expectEqualStrings("close", late.emits[0].box);
-        try testing.expect(relay.Status.timeout.retryable());
-        // Launched after it expired: no dial at all.
-        var r2 = fresh;
-        const fx = try relay.advance(a, &r2, .start, t_expires, null);
-        try testing.expect(fx.done and fx.emits.len == 0);
-        try testing.expectEqual(relay.Status.timeout, r2.status);
-    }
-
-    // The dial fails, or the stream ends without a frame: failed (retryable). A garbled frame: failed.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        try testing.expect((try relay.advance(a, &r, .{ .answer = .{ .closed = "dial failed: no route" } }, t_now, null)).done);
-        try testing.expectEqual(relay.Status.failed, r.status);
-        try testing.expectEqualStrings("unreachable", r.reason.?);
-        var r2 = fresh;
-        _ = try relay.advance(a, &r2, .start, t_now, null);
-        _ = try relay.advance(a, &r2, .{ .answer = .{ .opened = 1 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r2, .{ .answer = .{ .frame = "\xff" } }, t_now, null);
-        try testing.expectEqual(relay.Status.failed, r2.status);
-        try testing.expectEqualStrings("bad_reply", r2.reason.?);
-    }
-}
-
-test "relay: the validator named (0.4.0) — submit dials the peer given; this node's own peer is handed to its own validator program in-VM: wait, called again, answered; failed; timeout" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    var book = try relay.Book.load(a, ms.store(), null);
-    test_env = .{ .book = &book };
-    const p = try buildPair(a);
-    var dummy: u8 = 0;
-    const args = try fromSdk(a, try submitArgs(a, p, null));
-
-    // Another node's peer named: recorded as given, not local; the relay dials it.
-    test_env.self_peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9";
-    const env: relay.Env = .{ .book = &book, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = test_env.self_peer, .launchFn = testLaunch };
-    var r = (try relay.submit(a, env, args)).launched;
-    try testing.expectEqualStrings(named_peer, r.peer.?);
-    try testing.expect(!r.local);
-    const start = try relay.advance(a, &r, .start, t_now, null);
-    try testing.expectEqualStrings("dial", start.emits[0].box);
-    try testing.expectEqualStrings(named_peer, start.emits[0].body.getText("peer").?);
-    try testing.expectEqualStrings(relay.swap_protocol, start.emits[0].body.getText("protocol").?);
-    // Unknown self (no handle): never local.
-    try testing.expect(!relay.isSelf(.{ .book = &book, .now = t_now, .commission = ours, .ctx = &dummy, .launchFn = testLaunch }, named_peer));
-
-    // This node's own peer named: local, kept so in the stored record (not in the answer).
-    var book2 = try relay.Book.load(a, ms.store(), null);
-    const self_env: relay.Env = .{ .book = &book2, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = named_peer, .launchFn = testLaunch };
-    const fresh = (try relay.submit(a, self_env, args)).launched;
-    try testing.expect(fresh.local);
-    try testing.expectEqualStrings(named_peer, fresh.peer.?);
-    const back = (try book2.get(a, fresh.id)).?;
-    try testing.expect(back.local);
-    try testing.expect((readBack(a, try back.answer(a))).get("local") == null);
-
-    // Launched: call the validator (no dial, nothing emitted). It awaited its submission: rest.
-    {
-        var l = fresh;
-        const fx = relay.advanceLocal(&l, .start, t_now);
-        try testing.expect(fx.call and !fx.done and fx.emits.len == 0 and fx.dial == null);
-        const waiting = relay.localAnswer(a, &l, readBack(a, .{ .map = &.{.{ .key = "wait", .value = .{ .boolean = true } }} }), "");
-        try testing.expect(waiting.rest and !waiting.done);
-        try testing.expectEqual(relay.Status.pending, l.status);
-        // Stepped by the engine's answer: called again; the handler answers the reply frame.
-        const again = relay.advanceLocal(&l, .again, t_now + 10);
-        try testing.expect(again.call);
-        const signed = "the signed swap";
-        const done = relay.localAnswer(a, &l, readBack(a, .{ .map = &.{
-            .{ .key = "verdict", .value = .{ .text = "accept" } },
-            .{ .key = "body", .value = .{ .bytes = try frameOf(a, .{ .map = &.{
-                .{ .key = "ok", .value = .{ .boolean = true } },
-                .{ .key = "tx", .value = .{ .bytes = signed } },
-                .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
-            } }) } },
-        } }), "");
-        try testing.expect(done.done and done.emits.len == 0);
-        try testing.expectEqual(relay.Status.accepted, l.status);
-        try testing.expectEqualStrings(signed, l.tx.?);
-        // Settled: nothing more.
-        try testing.expect(relay.advanceLocal(&l, .again, t_now + 20).done);
-    }
-    // A refusal at once: refused with the reason.
-    {
-        var l = fresh;
-        _ = relay.advanceLocal(&l, .start, t_now);
-        const fx = relay.localAnswer(a, &l, readBack(a, .{ .map = &.{
-            .{ .key = "verdict", .value = .{ .text = "accept" } },
-            .{ .key = "body", .value = .{ .bytes = try frameOf(a, .{ .map = &.{
-                .{ .key = "ok", .value = .{ .boolean = false } },
-                .{ .key = "reason", .value = .{ .text = "not_validating" } },
-            } }) } },
-        } }), "");
-        try testing.expect(fx.done);
-        try testing.expectEqual(relay.Status.refused, l.status);
-        try testing.expectEqualStrings("not_validating", l.reason.?);
-    }
-    // The call fails (no validator program, the handler errors): failed, retryable; no body: failed.
-    {
-        var l = fresh;
-        _ = relay.advanceLocal(&l, .start, t_now);
-        try testing.expect(relay.localAnswer(a, &l, null, "NoValidatorProgram").done);
-        try testing.expectEqual(relay.Status.failed, l.status);
-        try testing.expectEqualStrings("validator_failed", l.reason.?);
-        try testing.expectEqualStrings("NoValidatorProgram", l.detail.?);
-        try testing.expect(l.status.retryable());
-        var l2 = fresh;
-        _ = relay.localAnswer(a, &l2, readBack(a, .{ .map = &.{.{ .key = "verdict", .value = .{ .text = "accept" } }} }), "");
-        try testing.expectEqualStrings("bad_reply", l2.reason.?);
-    }
-    // Woken before `expires`: rest; at `expires`: timeout. Launched after it: timeout, no call.
-    {
-        var l = fresh;
-        _ = relay.advanceLocal(&l, .start, t_now);
-        try testing.expect(relay.advanceLocal(&l, .woke, t_expires - 1).rest);
-        const late = relay.advanceLocal(&l, .woke, t_expires);
-        try testing.expect(late.done and !late.call);
-        try testing.expectEqual(relay.Status.timeout, l.status);
-        var l2 = fresh;
-        const fx = relay.advanceLocal(&l2, .start, t_expires);
-        try testing.expect(fx.done and !fx.call);
-        try testing.expectEqual(relay.Status.timeout, l2.status);
-    }
-}
-
-test "relay (0.43.0): two swaps relayed at once to this node's own validator on one pool — both wait (the first on its submission, the second on the first's lock); the first accepted; the second, called again when the first's thread rests, refused pool_spent with the pool's new state; a waiter past expires times out without a call" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    var book = try relay.Book.load(a, ms.store(), null);
-    var dummy: u8 = 0;
-    const p = try buildPair(a);
-    const env: relay.Env = .{ .book = &book, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = named_peer, .launchFn = testLaunch };
-    const rec = (try relay.submit(a, env, try fromSdk(a, try submitArgs(a, p, null)))).launched;
-    var first = rec;
-    var second = rec;
-    var third = rec;
-    const wait: Value = readBack(a, .{ .map = &.{.{ .key = "wait", .value = .{ .boolean = true } }} });
-    // Both called; the validator answers each {wait: true} (the second awaited the first's thread): both rest.
-    for ([_]*relay.Record{ &first, &second, &third }) |r| {
-        try testing.expect(relay.advanceLocal(r, .start, t_now).call);
-        try testing.expect(relay.localAnswer(a, r, wait, "").rest);
-    }
-    // The first: its submission answered, accepted.
-    try testing.expect(relay.advanceLocal(&first, .again, t_now + 10).call);
-    try testing.expect(relay.localAnswer(a, &first, readBack(a, .{ .map = &.{
-        .{ .key = "verdict", .value = .{ .text = "accept" } },
-        .{ .key = "body", .value = .{ .bytes = try frameOf(a, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = true } },
-            .{ .key = "tx", .value = .{ .bytes = "the first swap" } },
-            .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
-        } }) } },
-    } }), "").done);
-    try testing.expectEqual(relay.Status.accepted, first.status);
-    // The second, stepped by the first's thread at rest (`resolved`): called again, refused pool_spent with the new state.
-    try testing.expect(relay.advanceLocal(&second, .again, t_now + 11).call);
-    const newer = "ab" ** 32 ++ "_0";
-    try testing.expect(relay.localAnswer(a, &second, readBack(a, .{ .map = &.{
-        .{ .key = "verdict", .value = .{ .text = "accept" } },
-        .{ .key = "body", .value = .{ .bytes = try frameOf(a, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = false } },
-            .{ .key = "reason", .value = .{ .text = "pool_spent" } },
-            .{ .key = "pool", .value = .{ .map = &.{.{ .key = "outpoint", .value = .{ .text = newer } }} } },
-        } }) } },
-    } }), "").done);
-    try testing.expectEqual(relay.Status.refused, second.status);
-    try testing.expectEqualStrings("pool_spent", second.reason.?);
-    try testing.expectEqualStrings(newer, second.pool_state.?.getText("outpoint").?);
-    // The third, still waiting when its deadline comes: timeout, the validator not called.
-    const late = relay.advanceLocal(&third, .woke, t_expires);
-    try testing.expect(late.done and !late.call);
-    try testing.expectEqual(relay.Status.timeout, third.status);
-}
-
 // --- the dispatch, by the app's manifest (app/etc/app.json), with the functions over memory ---
 
 const TestEnv = struct {
-    book: *relay.Book,
-    /// This node's own peer ID, as main.zig's `selfPeerText` gives it (null: unknown).
-    self_peer: ?[]const u8 = null,
-    launched: usize = 0,
-    commission: relay.Commission = ours,
-    market: relay.market.Market = .{},
+    commission: iface.Commission = ours,
+    market: iface.market.Market = .{},
     seen_writes: ?bool = null,
-    launched_kind: ?relay.Kind = null,
 };
 var test_env: TestEnv = undefined;
 
-/// The validator's peer ID as the page names it (taken from the runtime's liveness read).
-const named_peer = "16Uiu2HAm6mP74uTowae2xMtAKJpqw1Dt2NhcgSdXgyDoyfmkwGqq";
+/// This exchange's commission key hash in the tests: the fixtures' (gen/main.go `key(50)`, vectors' commission_pkh).
+const commission_pkh: [20]u8 = blk: {
+    @setEvalBranchQuota(10_000);
+    var k: [20]u8 = undefined;
+    _ = std.fmt.hexToBytes(&k, vec.commission_pkh) catch unreachable;
+    break :blk k;
+};
+const ours: iface.Commission = .{ .pkh = commission_pkh };
 
-/// `args` with `peerId` set to `peer`, or removed (null).
-fn withPeer(a: Allocator, args: scbor.Value, peer: ?[]const u8) !scbor.Value {
-    var es: std.ArrayList(cbor.Entry) = .empty;
-    for ((try fromSdk(a, args)).map) |e| if (!eql(u8, e.key, "peerId")) try es.append(a, e);
-    if (peer) |x| try es.append(a, .{ .key = "peerId", .value = .{ .text = x } });
-    return toSdk(a, .{ .map = es.items });
-}
-fn testLaunch(_: *anyopaque, _: Allocator, kind: relay.Kind, _: [32]u8) anyerror![]const u8 {
-    test_env.launched += 1;
-    test_env.launched_kind = kind;
-    return &w.store.hashCid(.tx, .{9} ** 32);
-}
 fn fromSdk(a: Allocator, v: scbor.Value) !Value {
     return cbor.decode(a, try scbor.encode(a, v));
 }
-fn toSdk(a: Allocator, v: Value) !scbor.Value {
-    return scbor.decode(a, try cbor.encode(a, v));
-}
-fn testSubmit(c: *app.Call) anyerror!scbor.Value {
-    test_env.seen_writes = c.writes;
-    var dummy: u8 = 0;
-    const env: relay.Env = .{ .book = test_env.book, .now = t_now, .commission = ours, .ctx = &dummy, .self_peer = test_env.self_peer, .launchFn = testLaunch };
-    return switch (try relay.submit(c.a, env, try fromSdk(c.a, c.args))) {
-        .refused => |r| sk.report(try relay.refusalText(c.a, r)),
-        .launched, .pending, .settled => |r| toSdk(c.a, try r.answer(c.a)),
-    };
-}
-fn testStatus(c: *app.Call) anyerror!scbor.Value {
-    test_env.seen_writes = c.writes;
-    return switch (try relay.status(c.a, test_env.book, try fromSdk(c.a, c.args))) {
-        .found => |r| toSdk(c.a, try r.answer(c.a)),
-        .not_found => sk.report("not_found"),
-        .bad_id => sk.report("bad_id"),
-    };
-}
 fn testTerms(c: *app.Call) anyerror!scbor.Value {
     test_env.seen_writes = c.writes;
-    return toSdk(c.a, try relay.terms(c.a, test_env.commission, test_env.market));
+    return toSdkV(c.a, try iface.terms(c.a, test_env.commission, test_env.market));
+}
+fn toSdkV(a: Allocator, v: Value) !scbor.Value {
+    return scbor.decode(a, try cbor.encode(a, v));
 }
 const test_fns = [_]app.Function{
-    .{ .name = relay.fn_submit, .run = testSubmit },
-    .{ .name = relay.fn_status, .run = testStatus },
-    .{ .name = relay.fn_terms, .run = testTerms },
+    .{ .name = iface.fn_terms, .run = testTerms },
 };
-
-fn submitArgs(a: Allocator, p: Pair, extra: ?cbor.Entry) !scbor.Value {
-    var es: std.ArrayList(cbor.Entry) = .empty;
-    try es.appendSlice(a, &.{
-        .{ .key = "funding", .value = .{ .bytes = p.funding } },
-        .{ .key = "swap", .value = .{ .bytes = p.swap } },
-        .{ .key = "pool", .value = .{ .text = p.pool } },
-        .{ .key = "validator", .value = .{ .bytes = &p.validator } },
-        .{ .key = "peerId", .value = .{ .text = named_peer } },
-        .{ .key = "expires", .value = .{ .uint = t_expires } },
-    });
-    if (extra) |e| try es.append(a, e);
-    return toSdk(a, .{ .map = es.items });
-}
 
 fn expectErr(o: app.Outcome, code: app.Code, msg_prefix: []const u8) !void {
     switch (o) {
@@ -1042,111 +396,52 @@ fn expectErr(o: app.Outcome, code: app.Code, msg_prefix: []const u8) !void {
     }
 }
 
-test "relay: dispatch by the manifest (app/etc/app.json, amm.swap/1) — submit records and launches, the same swap again answers its record, status reads it; shapes and writes as declared" {
+test "amm.swap/1 by the manifest (0.44.0, David Case 2026-11-06: the host relays, the instance logs facts, never attempts): terms only — no submit, no status; no /swaps read, no `swaps` filter, no `expires` anywhere in the manifest" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    var book = try relay.Book.load(a, ms.store(), null);
-    test_env = .{ .book = &book };
+    test_env = .{};
     const m = try dagjson.decode(a, manifest_json);
     const in: scbor.Value = .{ .map = &.{} };
-    const p = try buildPair(a);
+    try testing.expect((try app.declOf(a, m, "amm.swap.submit")) == null);
+    try testing.expect((try app.declOf(a, m, "amm.swap.status")) == null);
+    try expectErr(try app.run(a, in, iface.app_name, m, &test_fns, "amm.swap.submit", .{ .map = &.{} }, null), .@"unknown-fn", "amm.swap.submit");
+    try testing.expect(m.get("filters").?.get("swaps") == null);
+    for (m.get("routes").?.array) |r| try testing.expect(!eql(u8, scbor.Value.str(r.get("address")) orelse "", "/swaps"));
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"expires\"") == null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "amm-p2p.swaps") == null);
 
-    // The declarations.
-    try testing.expect((try app.declOf(a, m, relay.fn_submit)).?.get("writes").?.bool);
-    try testing.expect(!(try app.declOf(a, m, relay.fn_status)).?.get("writes").?.bool);
-
-    // submit: recorded pending, the relay launched once; the answer is the record.
-    const r1 = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, null), null);
-    try testing.expect(r1 == .ok);
-    try testing.expectEqual(@as(?bool, true), test_env.seen_writes);
-    const rec = try fromSdk(a, r1.ok);
-    try testing.expectEqualStrings("pending", rec.getText("status").?);
-    try testing.expectEqualStrings(&relay.idText(relay.idOf(p.swap)), rec.getText("id").?);
-    try testing.expectEqual(@as(usize, 1), test_env.launched);
-    // The same swap again: its record, no second relay.
-    const r2 = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, null), null);
-    try testing.expect(r2 == .ok);
-    try testing.expectEqual(@as(usize, 1), test_env.launched);
-
-    // status: the record; an unknown id, not_found; read-only as declared.
-    var sargs = scbor.MapBuilder.init(a);
-    try sargs.put("id", scbor.string(rec.getText("id").?));
-    const s1 = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_status, sargs.value(), null);
-    try testing.expect(s1 == .ok);
-    try testing.expectEqual(@as(?bool, false), test_env.seen_writes);
-    try testing.expectEqualStrings("pending", (try fromSdk(a, s1.ok)).getText("status").?);
-    var unknown = scbor.MapBuilder.init(a);
-    try unknown.put("id", scbor.string("00" ** 32));
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_status, unknown.value(), null), .failed, "not_found");
-
-    // The declared shapes: a missing arg, an extra one, a wrong type.
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_status, .{ .map = &.{} }, null), .@"bad-args", "args.id: missing");
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, .{ .key = "fee", .value = .{ .uint = 1 } }), null), .@"bad-args", "args.fee: not in the shape");
-    const bad = try a.dupe(cbor.Entry, (try fromSdk(a, try submitArgs(a, p, null))).map);
-    for (bad) |*e| if (eql(u8, e.key, "pool")) {
-        e.value = .{ .uint = 0 };
-    };
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try toSdk(a, .{ .map = bad }), null), .@"bad-args", "args.pool: want string");
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, "amm.swap.cancel", .{ .map = &.{} }, null), .@"unknown-fn", "amm.swap.cancel");
-
-    // A refusal is the function's error, and nothing is recorded or launched.
-    const none = try buildPairWith(a, .{ .commission = .{0x22} ** 20 });
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, none, null), null), .failed, "commission_missing");
-    // 0.4.0: the caller names the validator's peer; no liveness is looked at. No peerId: the
-    // declared shape refuses it; one that is no peer ID text: bad_peer. Nothing recorded or launched.
-    const other = try buildPairWith(a, .{ .fee = 600 });
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try withPeer(a, try submitArgs(a, other, null), null), null), .@"bad-args", "args.peerId: missing");
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try withPeer(a, try submitArgs(a, other, null), ""), null), .failed, "bad_peer");
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try withPeer(a, try submitArgs(a, other, null), "/ip4/1.2.3.4/tcp/1"), null), .failed, "bad_peer");
-    try testing.expectEqual(@as(usize, 1), test_env.launched);
-    try testing.expect((try book.get(a, relay.idOf(other.swap))) == null);
-    // The record dials the peer named, not this node's own.
-    const named = (try book.get(a, relay.idOf(p.swap))).?;
-    try testing.expectEqualStrings(named_peer, named.peer.?);
-    try testing.expect(!named.local);
-
-    // terms: the relay's commission pkh, read-only as declared; none configured, null; no args taken.
-    try testing.expect(!(try app.declOf(a, m, relay.fn_terms)).?.get("writes").?.bool);
-    const t1 = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_terms, .{ .map = &.{} }, null);
+    // terms: this exchange's commission pkh, read-only as declared; none, null; no args taken.
+    try testing.expect(!(try app.declOf(a, m, iface.fn_terms)).?.get("writes").?.bool);
+    const t1 = try app.run(a, in, iface.app_name, m, &test_fns, iface.fn_terms, .{ .map = &.{} }, null);
     try testing.expect(t1 == .ok);
     try testing.expectEqual(@as(?bool, false), test_env.seen_writes);
     try testing.expectEqualSlices(u8, &commission_pkh, (try fromSdk(a, t1.ok)).getBytes("commissionPkh").?);
     test_env.commission = .{};
-    const t2 = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_terms, null, null);
+    const t2 = try app.run(a, in, iface.app_name, m, &test_fns, iface.fn_terms, null, null);
     try testing.expect(t2 == .ok);
     try testing.expect((try fromSdk(a, t2.ok)).get("commissionPkh").? == .null);
     test_env.commission = ours;
     // 0.16.0: the market's minimum beside it, 0 when none is set; the record's when set.
     try testing.expectEqual(@as(u64, 0), (try fromSdk(a, t1.ok)).getUint("minCommissionBps").?);
     test_env.market = .{ .min_commission_bps = 1 };
-    const t3 = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_terms, null, null);
+    const t3 = try app.run(a, in, iface.app_name, m, &test_fns, iface.fn_terms, null, null);
     try testing.expectEqual(@as(u64, 1), (try fromSdk(a, t3.ok)).getUint("minCommissionBps").?);
     test_env.market = .{};
     var targs = scbor.MapBuilder.init(a);
-    try targs.put("pool", scbor.string(p.pool));
-    try expectErr(try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_terms, targs.value(), null), .@"bad-args", "args.pool: not in the shape");
-
-    // A swap that timed out is relayed again.
-    var r = (try book.get(a, relay.idOf(p.swap))).?;
-    r.status = .timeout;
-    try book.put(a, r);
-    _ = try app.run(a, in, relay.app_name, m, &test_fns, relay.fn_submit, try submitArgs(a, p, null), null);
-    try testing.expectEqual(@as(usize, 2), test_env.launched);
-    try testing.expectEqual(relay.Status.pending, (try book.get(a, relay.idOf(p.swap))).?.status);
+    try targs.put("pool", scbor.string("00" ** 32 ++ "_0"));
+    try expectErr(try app.run(a, in, iface.app_name, m, &test_fns, iface.fn_terms, targs.value(), null), .@"bad-args", "args.pool: not in the shape");
 }
 
-test "the relay's head is the app's root head <app>/app (skein-sdk 0.3.0 app.headOf)" {
+test "the app's root head is <app>/app (skein-sdk 0.3.0 app.headOf)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expectEqualStrings(try app.headOf(arena.allocator(), relay.app_name), relay.app_head);
+    try std.testing.expectEqualStrings(try app.headOf(arena.allocator(), iface.app_name), iface.app_head);
 }
 
 test "this program's state head is under the app's name, amm/p2p (#77: an app advances only <app>/…)" {
-    try std.testing.expectEqualStrings("amm/p2p", relay.p2p_head);
-    try std.testing.expect(std.mem.startsWith(u8, relay.p2p_head, relay.app_name ++ "/"));
+    try std.testing.expectEqualStrings("amm/p2p", iface.p2p_head);
+    try std.testing.expect(std.mem.startsWith(u8, iface.p2p_head, iface.app_name ++ "/"));
 }
 
 // ================================================================ the affirmation (amm.pool/1, 0.11.0)
@@ -1161,16 +456,16 @@ test "affirm (0.13.0): the args {pool, satoshis} become the validator's body; it
         .{ .key = "pool", .value = .{ .bytes = script } },
         .{ .key = "satoshis", .value = .{ .uint = vec.pool0.bsv } },
     }) };
-    const body = (try relay.affirmBody(a, args)).?;
+    const body = (try iface.affirmBody(a, args)).?;
     try testing.expectEqualSlices(u8, script, body.getBytes("pool").?);
     try testing.expectEqual(@as(u64, vec.pool0.bsv), body.getUint("satoshis").?);
     try testing.expect(body.get("keyInput") == null);
     // Missing args: nothing to ask.
-    try testing.expect((try relay.affirmBody(a, .{ .map = args.map[0..1] })) == null);
+    try testing.expect((try iface.affirmBody(a, .{ .map = args.map[0..1] })) == null);
     // The package's nonce is the body's.
-    try testing.expectEqualSlices(u8, &try relay.affirmNonce(a, body), &try relay.affirmNonce(a, body));
-    const other = (try relay.affirmBody(a, .{ .map = try a.dupe(cbor.Entry, &.{ args.map[0], .{ .key = "satoshis", .value = .{ .uint = 1 } } }) })).?;
-    try testing.expect(!std.mem.eql(u8, &try relay.affirmNonce(a, body), &try relay.affirmNonce(a, other)));
+    try testing.expectEqualSlices(u8, &try iface.affirmNonce(a, body), &try iface.affirmNonce(a, body));
+    const other = (try iface.affirmBody(a, .{ .map = try a.dupe(cbor.Entry, &.{ args.map[0], .{ .key = "satoshis", .value = .{ .uint = 1 } } }) })).?;
+    try testing.expect(!std.mem.eql(u8, &try iface.affirmNonce(a, body), &try iface.affirmNonce(a, other)));
 
     // The validator's answer: {verdict, body: {ok: true, validatorPubKey, nonce, signature}} →
     // {validatorPubKey, nonce, signature}.
@@ -1184,23 +479,23 @@ test "affirm (0.13.0): the args {pool, satoshis} become the validator's body; it
         .{ .key = "signature", .value = .{ .bytes = sig } },
     }) });
     const ans: Value = .{ .map = try a.dupe(cbor.Entry, &.{ .{ .key = "verdict", .value = .{ .text = "accept" } }, .{ .key = "body", .value = .{ .bytes = frame } } }) };
-    const got = relay.affirmAnswer(a, ans);
+    const got = iface.affirmAnswer(a, ans);
     try testing.expectEqualSlices(u8, sig, got.ok.getBytes("signature").?);
     try testing.expectEqualSlices(u8, key, got.ok.getBytes("validatorPubKey").?);
     try testing.expectEqualSlices(u8, nonce, got.ok.getBytes("nonce").?);
     try testing.expectEqual(@as(usize, 3), got.ok.map.len);
     // Affirmed without the key or the nonce: a bad reply.
     const short = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{ .{ .key = "ok", .value = .{ .boolean = true } }, .{ .key = "signature", .value = .{ .bytes = sig } } }) });
-    try testing.expectEqualStrings("bad_reply", relay.affirmAnswer(a, .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "body", .value = .{ .bytes = short } }}) }).refused.reason);
+    try testing.expectEqualStrings("bad_reply", iface.affirmAnswer(a, .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "body", .value = .{ .bytes = short } }}) }).refused.reason);
     // A refusal: its reason and detail, as the function's error text.
     const nframe = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{ .{ .key = "ok", .value = .{ .boolean = false } }, .{ .key = "reason", .value = .{ .text = "fees_unacceptable" } }, .{ .key = "detail", .value = .{ .text = "lpFeeBps: the terms are 30" } } }) });
-    const no = relay.affirmAnswer(a, .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "body", .value = .{ .bytes = nframe } }}) });
-    try testing.expectEqualStrings("fees_unacceptable: lpFeeBps: the terms are 30", try relay.refusalText(a, no.refused));
-    try testing.expectEqualStrings("bad_reply", relay.affirmAnswer(a, .{ .map = &.{} }).refused.reason);
+    const no = iface.affirmAnswer(a, .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "body", .value = .{ .bytes = nframe } }}) });
+    try testing.expectEqualStrings("fees_unacceptable: lpFeeBps: the terms are 30", try iface.refusalText(a, no.refused));
+    try testing.expectEqualStrings("bad_reply", iface.affirmAnswer(a, .{ .map = &.{} }).refused.reason);
 
     // The manifest: amm.pool.affirm, no writes, its args; amm.pool.submit and status gone.
     const m = try dagjson.decode(a, manifest_json);
-    const decl = (try app.declOf(a, m, relay.fn_pool_affirm)).?;
+    const decl = (try app.declOf(a, m, iface.fn_pool_affirm)).?;
     try testing.expect(!decl.get("writes").?.bool);
     const dargs = decl.get("args").?;
     for ([_][]const u8{ "pool", "satoshis" }) |k| try testing.expect(dargs.get(k) != null);
@@ -1208,7 +503,7 @@ test "affirm (0.13.0): the args {pool, satoshis} become the validator's body; it
     for ([_][]const u8{ "validatorPubKey", "nonce", "signature" }) |k| try testing.expect(decl.get("answer").?.get(k) != null);
     try testing.expect((try app.declOf(a, m, "amm.pool.submit")) == null);
     try testing.expect((try app.declOf(a, m, "amm.pool.status")) == null);
-    try testing.expect((try app.declOf(a, m, relay.fn_pool_terms)) != null);
+    try testing.expect((try app.declOf(a, m, iface.fn_pool_terms)) != null);
 }
 
 test "market and validator are the engine's (0.6.0, shruggr/skein#120), root's switch (0.6.2, David 2026-10-07): no validate route, no start or stop, no config.amm.ammP2p.market; config.overlay.market / .validator absent, both off until root turns one on" {
@@ -1339,29 +634,29 @@ test "amm.pool.terms (0.15.0): the record root set, with this validator's identi
     const terms = @import("terms");
     const id: [33]u8 = .{2} ++ .{0x11} ** 32;
     const rec = try terms.record(a, .{ .lp_fee_bps = 30, .validator_fee_bps = 5, .commission_bps = 25 });
-    const ans = (try relay.poolTerms(a, &id, PEER_ID_OF_G, terms.fromRecord(rec))).?;
+    const ans = (try iface.poolTerms(a, &id, PEER_ID_OF_G, terms.fromRecord(rec))).?;
     try testing.expectEqualSlices(u8, &id, ans.getBytes("validator").?);
     try testing.expectEqualStrings(PEER_ID_OF_G, ans.getText("peerId").?);
     try testing.expectEqual(@as(u64, 30), ans.getUint("lpFeeBps").?);
     try testing.expectEqual(@as(u64, 5), ans.getUint("validatorFeeBps").?);
     try testing.expectEqual(@as(u64, 25), ans.getUint("commissionBps").?);
     // No peer known: no peerId.
-    try testing.expect((try relay.poolTerms(a, &id, null, terms.fromRecord(rec))).?.get("peerId") == null);
+    try testing.expect((try iface.poolTerms(a, &id, null, terms.fromRecord(rec))).?.get("peerId") == null);
     // Unset (no head) or cleared (the record null): no answer; main.zig reports "no validator here".
-    try testing.expect((try relay.poolTerms(a, &id, PEER_ID_OF_G, null)) == null);
-    try testing.expect((try relay.poolTerms(a, &id, PEER_ID_OF_G, terms.fromRecord(.null))) == null);
+    try testing.expect((try iface.poolTerms(a, &id, PEER_ID_OF_G, null)) == null);
+    try testing.expect((try iface.poolTerms(a, &id, PEER_ID_OF_G, terms.fromRecord(.null))) == null);
     try testing.expectEqualStrings("no validator here", terms.no_validator);
     // The manifest ships no terms: config.amm has no ammValidator; amm.pool.terms is still declared.
     const m = try dagjson.decode(a, manifest_json);
     try testing.expect(m.get("config").?.get("amm") == null); // 0.16.0: no config.amm at all (commission gone too)
-    try testing.expect((try app.declOf(a, m, relay.fn_pool_terms)) != null);
+    try testing.expect((try app.declOf(a, m, iface.fn_pool_terms)) != null);
 }
 
 test "market terms (0.16.0, David 2026-10-24): a runtime record root sets — fn market gated by roles.root in the box amm/amm-p2p, the head amm/market; set, clear, refused shapes; unset 0; no config.amm.commission" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const market = relay.market;
+    const market = iface.market;
 
     // The manifest: `market` is root's; the box amm-p2p routes to this program; no commission config.
     const m = try dagjson.decode(a, manifest_json);
@@ -1371,7 +666,7 @@ test "market terms (0.16.0, David 2026-10-24): a runtime record root sets — fn
     try testing.expect(gated);
     try testing.expect(m.get("config").?.get("amm") == null);
     try testing.expectEqualStrings("amm/amm-p2p", names.own_box);
-    try testing.expectEqualStrings("amm/market", try market.headName(a, relay.app_name));
+    try testing.expectEqualStrings("amm/market", try market.headName(a, iface.app_name));
 
     // Set: {minCommissionBps}, an integer 0 to 10 000.
     const set: Value = .{ .map = &.{.{ .key = "minCommissionBps", .value = .{ .uint = 25 } }} };
@@ -1400,9 +695,6 @@ test "market terms (0.16.0, David 2026-10-24): a runtime record root sets — fn
     try testing.expectEqual(@as(u64, 0), market.fromRecord(.null).min_commission_bps);
     try testing.expectEqual(@as(u64, 0), market.fromRecord(null).min_commission_bps);
 
-    // The relay refuses nothing by it: checkPair takes no market (a listing preference, not a rule).
-    const info = @typeInfo(@TypeOf(relay.checkPair)).@"fn";
-    inline for (info.params) |prm| try testing.expect(prm.type != market.Market);
 }
 
 test "the commission key (0.16.0): the instance's own, BRC-43 level 1 `amm commission` / `relay`, counterparty anyone — the signer's key for it is the one anyone derives from the identity" {
@@ -1410,27 +702,27 @@ test "the commission key (0.16.0): the instance's own, BRC-43 level 1 `amm commi
     defer arena.deinit();
     const a = arena.allocator();
     const kd_mod = bsvz.primitives.key_deriver;
-    const proto: kd_mod.Protocol = .{ .security_level = relay.commission_protocol.level, .name = relay.commission_protocol.name };
-    try testing.expectEqual(@as(u8, 1), relay.commission_protocol.level);
-    try testing.expectEqualStrings("amm commission", relay.commission_protocol.name);
-    try testing.expectEqualStrings("relay", relay.commission_key_id);
+    const proto: kd_mod.Protocol = .{ .security_level = iface.commission_protocol.level, .name = iface.commission_protocol.name };
+    try testing.expectEqual(@as(u8, 1), iface.commission_protocol.level);
+    try testing.expectEqualStrings("amm commission", iface.commission_protocol.name);
+    try testing.expectEqualStrings("relay", iface.commission_key_id);
     const root = try bsvz.primitives.ec.PrivateKey.fromBytes(.{0x07} ** 32);
     const identity = (try root.publicKey()).toCompressedSec1();
     // The signer's (forSelf, counterparty anyone: getPublicKey's answer to main.zig `commissionKey`).
     const signer = kd_mod.KeyDeriver.init(root);
-    const mine = (try signer.derivePublicKey(a, proto, relay.commission_key_id, .{ .type_ = .anyone }, true)).toCompressedSec1();
+    const mine = (try signer.derivePublicKey(a, proto, iface.commission_key_id, .{ .type_ = .anyone }, true)).toCompressedSec1();
     // Anyone's, from the identity alone.
     const anyone = kd_mod.KeyDeriver.init(null);
-    const theirs = (try anyone.derivePublicKey(a, proto, relay.commission_key_id, .{ .type_ = .other, .public_key = try bsvz.primitives.ec.PublicKey.fromSec1(&identity) }, false)).toCompressedSec1();
+    const theirs = (try anyone.derivePublicKey(a, proto, iface.commission_key_id, .{ .type_ = .other, .public_key = try bsvz.primitives.ec.PublicKey.fromSec1(&identity) }, false)).toCompressedSec1();
     try testing.expectEqualSlices(u8, &mine, &theirs);
     // amm.swap.terms answers its hash160.
     const pkh = hash160(&mine);
-    const t = try relay.terms(a, .{ .pkh = pkh }, .{});
+    const t = try iface.terms(a, .{ .pkh = pkh }, .{});
     try testing.expectEqualSlices(u8, &pkh, t.getBytes("commissionPkh").?);
 }
 
 test {
-    _ = relay.market;
+    _ = iface.market;
 }
 
 // ================================================================ the public read API (0.34.0)
@@ -1543,7 +835,6 @@ test "read API (0.34.0): the routes and their filters in the manifest — plain 
         .{ "/terms", "readTerms" },
         .{ "/spends", "spends" },
         .{ "/tx", "tx" },
-        .{ "/swaps", "swaps" },
         .{ "/trades", "trades" },
         .{ "/candles", "candles" },
         .{ "/stats", "stats" },
@@ -1929,186 +1220,6 @@ test "spends (0.40.0, VERIFY): /spends answers spentBy for a plain sats output a
     try testing.expect((try reads.spendOf(a, &e.ch, .{ .txid = fund, .vout = 3 })).spent_by == null);
 }
 
-// ---------------------------------------------------------------- 0.40.1: a leg fed by rows of unrelated transactions
-
-fn merkleParentP(l: [32]u8, r: [32]u8) [32]u8 {
-    return w.store.dblSha256(&(l ++ r));
-}
-
-const PEp = std.meta.Elem(std.meta.Elem(@FieldType(w.merkle.MerklePath, "path")));
-
-/// A two-transaction block of fund and pool_deploy at height 1: its BUMP (both leaves) and merkle root.
-fn twoLeafBump(a: Allocator, l0: [32]u8, l1: [32]u8) !struct { path: w.merkle.MerklePath, root: [32]u8 } {
-    const level = try a.dupe(PEp, &.{ .{ .offset = 0, .hash = .{ .bytes = l0 }, .txid = true }, .{ .offset = 1, .hash = .{ .bytes = l1 }, .txid = true } });
-    const p: w.merkle.MerklePath = .{ .block_height = 1, .path = try a.dupe([]PEp, &.{level}) };
-    return .{ .path = try w.merkle.MerklePath.parse(a, try p.bytes(a)), .root = merkleParentP(l0, l1) };
-}
-
-/// The door's check (skein kernel-zig/src/door.zig `spv`): `chain.spv.verify` over the BEEF, `rootAt`
-/// the block's root at height 1, `knownRaw` none — the BEEF stands alone (amm-validator's test.zig `doorVerify`).
-fn doorVerifyP(a: Allocator, root: [32]u8, bytes: []const u8) !w.spv.Result {
-    const Ctx = struct {
-        root: [32]u8,
-        fn rootAt(ptr: *anyopaque, height: u32) anyerror!?[32]u8 {
-            const c: *@This() = @ptrCast(@alignCast(ptr));
-            return if (height == 1) c.root else null;
-        }
-        fn knownRaw(_: *anyopaque, _: Allocator, _: [32]u8) anyerror!?[]const u8 {
-            return null;
-        }
-    };
-    var ctx = Ctx{ .root = root };
-    return w.spv.verify(a, try w.beef.parse(a, bytes), .{ .ptr = &ctx, .rootAtFn = Ctx.rootAt, .knownRawFn = Ctx.knownRaw });
-}
-
-/// A swap spending the pool, the funding transaction's output (fund:1 → `exact − 7000`) and an output of
-/// an UNRELATED transaction (fund:2 → 7000): its validator slot signed by the pool's first key
-/// (`1-amm pool-<nonce>`, counterparty anyone, the fixtures' identity), every other input by the taker.
-fn twoSourcePair(a: Allocator) !struct { funding: []const u8, other: []const u8, swap: []const u8, signed: []const u8, pool: []const u8, validator: [33]u8 } {
-    const fund = try Transaction.parse(a, unhex(a, vec.fund));
-    const fund_txid = w.beef.txidOf(unhex(a, vec.fund));
-    const pd_raw = unhex(a, vec.pool_deploy);
-    const pd = try Transaction.parse(a, pd_raw);
-    const base = try Transaction.parse(a, unhex(a, vec.swap_bsv_in));
-    const taker_pkh = hash160(&(try (try bsvz.primitives.ec.PrivateKey.fromBytes(taker_priv)).publicKey()).toCompressedSec1());
-    const taker_lock = try p2pkhScript(a, &taker_pkh);
-    const outs = try a.dupe(bsvz.transaction.Output, base.outputs[0..5]);
-    var out_sum: u64 = 0;
-    for (outs) |x| out_sum += @intCast(x.satoshis);
-    const pool_sats: u64 = @intCast(pd.outputs[0].satoshis);
-    const exact = out_sum - pool_sats + 600;
-    const part: u64 = 7_000;
-
-    const spend = struct {
-        fn tx(al: Allocator, f: Transaction, prev: [32]u8, vout: u32, amount: u64, total: u64, lock: []const u8) !Transaction {
-            var t = f;
-            t.inputs = try al.dupe(bsvz.transaction.Input, &.{.{ .previous_outpoint = .{ .txid = .{ .bytes = prev }, .index = vout }, .unlocking_script = Script.empty(), .sequence = 0xffffffff }});
-            t.outputs = try al.dupe(bsvz.transaction.Output, &.{
-                .{ .satoshis = @intCast(amount), .locking_script = Script.init(lock) },
-                .{ .satoshis = @intCast(total - amount - 300), .locking_script = Script.init(lock) },
-            });
-            return t;
-        }
-    };
-    var f = try spend.tx(a, fund, fund_txid, 1, exact - part, @intCast(fund.outputs[1].satoshis), taker_lock);
-    try signP2pkh(a, &f, 0, fund.outputs[1].locking_script.bytes, @intCast(fund.outputs[1].satoshis), taker_priv);
-    const f_raw = try f.serialize(a);
-    var g = try spend.tx(a, fund, fund_txid, 2, part, @intCast(fund.outputs[2].satoshis), taker_lock);
-    try signP2pkh(a, &g, 0, fund.outputs[2].locking_script.bytes, @intCast(fund.outputs[2].satoshis), taker_priv);
-    const g_raw = try g.serialize(a);
-
-    var s = base;
-    const sins = try a.dupe(bsvz.transaction.Input, &.{
-        base.inputs[0],
-        .{ .previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(f_raw) }, .index = 0 }, .unlocking_script = Script.empty(), .sequence = 0xffffffff },
-        .{ .previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(g_raw) }, .index = 0 }, .unlocking_script = Script.empty(), .sequence = 0xffffffff },
-    });
-    s.inputs = sins;
-    s.outputs = outs;
-    const lock = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.lock;
-    const pre = try bsvz.transaction.sighash.formatPreimage(a, &s, 0, Script.init(lock[2..]), @intCast(pool_sats), 0x41);
-    const u = base.inputs[0].unlocking_script.bytes;
-    const pushes = struct {
-        fn build(al: Allocator, unl: []const u8, slot: []const u8, preimage: []const u8) ![]const u8 {
-            var pos: usize = 0;
-            var i: usize = 0;
-            var script: std.ArrayList(u8) = .empty;
-            while (pos < unl.len) : (i += 1) {
-                const p = color.brc162.readPush(unl, pos).?;
-                try script.appendSlice(al, switch (i) {
-                    1 => slot,
-                    10 => &.{0}, // _changeAmount = 0
-                    11 => try pushData(al, preimage),
-                    else => unl[pos..p.next],
-                });
-                pos = p.next;
-            }
-            return script.items;
-        }
-    };
-    sins[0].unlocking_script = Script.init(try pushes.build(a, u, &.{0}, pre));
-    try signP2pkh(a, &s, 1, taker_lock, exact - part, taker_priv);
-    try signP2pkh(a, &s, 2, taker_lock, part, taker_priv);
-    const unsigned = try s.serialize(a);
-
-    // The validator's slot: its key for the deploy (keyed by the nonce), over the pool input's preimage.
-    const kd = bsvz.primitives.key_deriver.KeyDeriver.init(try bsvz.primitives.ec.PrivateKey.fromBytes(.{0x7f} ** 32));
-    const vk = try kd.derivePrivateKey(a, .{ .security_level = 1, .name = "amm pool" }, vec.nonce, .{ .type_ = .anyone });
-    var want: [33]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&want, vec.pool0.validator);
-    try testing.expectEqualSlices(u8, &want, &(try vk.publicKey()).toCompressedSec1());
-    const sig = try vk.signDigest(bsvz.crypto.hash.hash256(pre).bytes);
-    var signed_tx = try Transaction.parse(a, unsigned);
-    const ins2 = try a.dupe(bsvz.transaction.Input, signed_tx.inputs);
-    ins2[0].unlocking_script = Script.init(try pushes.build(a, u, try pushData(a, try std.mem.concat(a, u8, &.{ sig.asSlice(), &.{0x41} })), pre));
-    signed_tx.inputs = ins2;
-
-    var validator: [33]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&validator, vec.identity);
-    return .{ .funding = f_raw, .other = g_raw, .swap = unsigned, .signed = try signed_tx.serialize(a), .pool = try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(pd_raw))}), .validator = validator };
-}
-
-test "relay (0.40.1): a swap spending outputs of two unrelated transactions, both in the funding BEEF — the request BEEF keeps both ancestries; with the pool and the validator's signature it passes the door's check; the funding's ancestry alone was MissingInput; the single chain unchanged" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const p = try twoSourcePair(a);
-    const fund_raw = unhex(a, vec.fund);
-    const pd_raw = unhex(a, vec.pool_deploy);
-    const blk = try twoLeafBump(a, w.beef.txidOf(fund_raw), w.beef.txidOf(pd_raw));
-    const bumps = try a.dupe(w.merkle.MerklePath, &.{blk.path});
-    // What the page sends (0.40.1, web/ui swapAction.ts `fundingBeef`): ONE BEEF of every staged input's
-    // source and its ancestry, in an Atomic envelope whose subject is the funding transaction.
-    const fbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .atomic = w.beef.txidOf(p.funding), .bumps = bumps, .entries = try a.dupe(w.beef.Entry, &.{
-        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw_with_bump, .bump = 0, .raw = fund_raw },
-        .{ .txid = w.beef.txidOf(p.other), .format = .raw, .raw = p.other },
-        .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
-    }) });
-    const pair = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.funding), &pair.funding.txid);
-    const req = try w.beef.parse(a, try relay.requestBeef(a, pair));
-    try testing.expectEqual(@as(usize, 4), req.entries.len); // fund, the other source, the funding, the swap
-    try testing.expect(req.find(w.beef.txidOf(p.other)) != null);
-    try testing.expect(req.find(w.beef.txidOf(fund_raw)) != null);
-    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.swap), &req.subject().?);
-    try testing.expect(w.beef.parentsFirst(req));
-
-    // The validator's submission (amm-validator submit.zig): the request with the signed swap, the pool's
-    // transaction merged with its proof — every input's source inside, scripts verified, as the door checks.
-    const submission = struct {
-        fn of(al: Allocator, r: w.beef.Beef, signed: []const u8, pool_raw: []const u8) ![]const u8 {
-            const es = try al.alloc(w.beef.Entry, r.entries.len + 1);
-            es[0] = .{ .txid = w.beef.txidOf(pool_raw), .format = .raw_with_bump, .bump = 0, .raw = pool_raw };
-            for (r.entries, es[1..]) |e, *o| o.* = e;
-            es[es.len - 1] = .{ .txid = w.beef.txidOf(signed), .format = .raw, .raw = signed };
-            return w.beef.serialize(al, .{ .version = w.beef.V2, .bumps = r.bumps, .entries = es });
-        }
-    };
-    const out = try submission.of(a, req, p.signed, pd_raw);
-    const r = try doorVerifyP(a, blk.root, out);
-    try testing.expectEqual(@as(usize, 5), r.proven.len);
-
-    // Before 0.40.1 (the funding transaction's ancestry alone): the other source is missing, MissingInput.
-    const only = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = bumps, .entries = try a.dupe(w.beef.Entry, &.{
-        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw_with_bump, .bump = 0, .raw = fund_raw },
-        .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
-        .{ .txid = w.beef.txidOf(p.swap), .format = .raw, .raw = p.swap },
-    }) });
-    try testing.expectError(error.MissingInput, doorVerifyP(a, blk.root, try submission.of(a, try w.beef.parse(a, only), p.signed, pd_raw)));
-
-    // The single chain: an unrelated entry in the funding BEEF that no input spends is still left out.
-    const q = try buildPair(a);
-    const qbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = &.{}, .entries = try a.dupe(w.beef.Entry, &.{
-        .{ .txid = w.beef.txidOf(unhex(a, vec.token_deploy)), .format = .raw, .raw = unhex(a, vec.token_deploy) },
-        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
-        .{ .txid = w.beef.txidOf(q.funding), .format = .raw, .raw = q.funding },
-    }) });
-    const qpair = (try relay.checkPair(a, qbeef, q.swap, q.pool, &q.validator, t_expires, t_now, ours)).ok;
-    const qb = try w.beef.parse(a, try relay.requestBeef(a, qpair));
-    try testing.expectEqual(@as(usize, 3), qb.entries.len);
-    try testing.expect(qb.find(w.beef.txidOf(unhex(a, vec.token_deploy))) == null);
-}
-
 test "pool events (0.41.0): each emitted event's row is the `/pools/history` row byte for byte — the route's JSON is the events' rows' JSON in order" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2132,112 +1243,4 @@ test "pool events (0.41.0): each emitted event's row is the `/pools/history` row
     }
     try want.appendSlice(a, "],\"next\":null}");
     try testing.expectEqualStrings(want.items, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "", 0)));
-}
-
-test "relay (0.41.0): a validator's answer carrying a BEEF — accepted, or refused pool_spent — goes into this instance's overlay first: the record stays pending, the submission awaited; settled only on that overlay's answer (a refusal there said in `detail`, the verdict standing) or, past expires, with the validator's answer; an answer without one settles at once" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ms = w.store.MemStore.init(testing.allocator);
-    defer ms.deinit();
-    const p = try buildPair(a);
-    const fresh: relay.Record = .{ .id = relay.idOf(p.swap), .funding = p.funding, .swap = p.swap, .pool = p.pool, .validator = p.validator, .expires = t_expires, .created = t_now, .updated = t_now, .peer = "16Uiu2HAmL3ee25zUdPHFTUVToTuzBgBjt8yoxAd952pYyvfbmDT9" };
-    const beef_bytes = "the validator's BEEF";
-    const accepted = try frameOf(a, .{ .map = &.{
-        .{ .key = "ok", .value = .{ .boolean = true } },
-        .{ .key = "tx", .value = .{ .bytes = "the signed swap" } },
-        .{ .key = "txid", .value = .{ .text = "ab" ** 32 } },
-        .{ .key = "beef", .value = .{ .bytes = beef_bytes } },
-    } });
-    const spent = try frameOf(a, .{ .map = &.{
-        .{ .key = "ok", .value = .{ .boolean = false } },
-        .{ .key = "reason", .value = .{ .text = "pool_spent" } },
-        .{ .key = "pool", .value = .{ .map = &.{.{ .key = "outpoint", .value = .{ .text = "cd" ** 32 ++ "_0" } }} } },
-        .{ .key = "beef", .value = .{ .bytes = beef_bytes } },
-    } });
-    const admitted: Value = .{ .map = &.{
-        .{ .key = "fn", .value = .{ .text = "submit" } },
-        .{ .key = "result", .value = .{ .map = &.{.{ .key = "state", .value = .{ .text = "admitted" } }} } },
-    } };
-    const rejected: Value = .{ .map = &.{
-        .{ .key = "fn", .value = .{ .text = "submit" } },
-        .{ .key = "result", .value = .{ .map = &.{ .{ .key = "state", .value = .{ .text = "rejected" } }, .{ .key = "reason", .value = .{ .text = "NotAdmitted" } } } } },
-    } };
-
-    // Accepted with a BEEF: the stream closed, the BEEF handed out to submit, still pending; the kept
-    // answer and the submission round-trip in the stored record (not in the answer).
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now + 10, null);
-        try testing.expect(fx.rest and !fx.done);
-        try testing.expectEqualStrings("close", fx.emits[0].box);
-        try testing.expectEqualStrings(beef_bytes, fx.catchup.?);
-        try testing.expectEqual(relay.Status.pending, r.status);
-        try testing.expect(r.tx == null);
-        r.submission = &w.store.hashCid(.tx, .{4} ** 32);
-        var book = try relay.Book.load(a, ms.store(), null);
-        try book.put(a, r);
-        var again = try relay.Book.load(a, ms.store(), readBack(a, try book.state(a)));
-        var back = (try again.get(a, r.id)).?;
-        try testing.expectEqualSlices(u8, accepted, back.reply.?);
-        try testing.expectEqualSlices(u8, r.submission.?, back.submission.?);
-        const pend = readBack(a, try back.answer(a));
-        try testing.expect(pend.get("reply") == null and pend.get("submission") == null);
-        // Woken before expires: it rests on.
-        try testing.expect((try relay.advance(a, &back, .woke, t_now + 20, null)).rest);
-        // This overlay admitted it: accepted now, the validator's transaction, no detail.
-        const done = try relay.advance(a, &back, .{ .overlay = admitted }, t_now + 30, null);
-        try testing.expect(done.done and done.emits.len == 0);
-        try testing.expectEqual(relay.Status.accepted, back.status);
-        try testing.expectEqualStrings("the signed swap", back.tx.?);
-        try testing.expect(back.detail == null);
-    }
-    // This overlay refuses it: the validator's verdict stands, `detail` says so.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = accepted } }, t_now, null);
-        _ = try relay.advance(a, &r, .{ .overlay = rejected }, t_now, null);
-        try testing.expectEqual(relay.Status.accepted, r.status);
-        try testing.expectEqualStrings("this host's overlay refused the validator's transaction: NotAdmitted", r.detail.?);
-    }
-    // pool_spent with a BEEF: pending until this overlay answers, then refused with the pool's state.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now, null);
-        try testing.expect(!fx.done and fx.catchup != null);
-        try testing.expectEqual(relay.Status.pending, r.status);
-        _ = try relay.advance(a, &r, .{ .overlay = admitted }, t_now, null);
-        try testing.expectEqual(relay.Status.refused, r.status);
-        try testing.expectEqualStrings("pool_spent", r.reason.?);
-        try testing.expect(r.pool_state != null);
-    }
-    // No answer from this overlay by expires: the validator's answer, `detail` saying so.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        _ = try relay.advance(a, &r, .{ .answer = .{ .frame = spent } }, t_now, null);
-        const late = try relay.advance(a, &r, .woke, t_expires, null);
-        try testing.expect(late.done);
-        try testing.expectEqual(relay.Status.refused, r.status);
-        try testing.expectEqualStrings("this host's overlay did not answer before expires", r.detail.?);
-    }
-    // An answer with no BEEF (any other refusal): settled at once, as before.
-    {
-        var r = fresh;
-        _ = try relay.advance(a, &r, .start, t_now, null);
-        _ = try relay.advance(a, &r, .{ .answer = .{ .opened = 7 } }, t_now, "pkg");
-        const fx = try relay.advance(a, &r, .{ .answer = .{ .frame = try frameOf(a, .{ .map = &.{
-            .{ .key = "ok", .value = .{ .boolean = false } },
-            .{ .key = "reason", .value = .{ .text = "below_minimum" } },
-        } }) } }, t_now, null);
-        try testing.expect(fx.done and fx.catchup == null);
-        try testing.expectEqual(relay.Status.refused, r.status);
-    }
 }

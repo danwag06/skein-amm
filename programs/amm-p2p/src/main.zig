@@ -1,11 +1,14 @@
-//! amm-p2p: the AMM overlay's marketplace relay and the app's pages, as one
-//! skein program (Zig, wasm32-wasi).
+//! amm-p2p: the AMM app's functions (amm.swap.terms, amm.pool.terms, amm.pool.affirm), its read
+//! routes, its pages and the market record, as one skein program (Zig, wasm32-wasi). 0.44.0 (David
+//! Case 2026-11-06): no relay here — the open-exchange host carries a swap to its validator
+//! (`POST /@<tokenId>/amm/swap`); the instance logs facts, never attempts.
 //! The standard overlay gossip — submissions on `<topic>`, STEAKs on
 //! `<topic>-admit`, proofs on `<topic>-proof` — is skein's overlay engine's
 //! (skein#74), not this program's.
 //!
 //! The bodies and plans are in proofs.zig and schedule.zig (pure, tested
-//! natively); the libp2p shapes are libp2p.zig. This file wires them to the VM.
+//! natively); the direct call's shapes are stream.zig, the functions' interface.zig. This file wires
+//! them to the VM.
 //!
 //! **Market and validator** (0.6.0, shruggr/skein#120, David 2026-10-06 evening) are the overlay
 //! engine's, not this program's: "a skein runs as a market and/or a validator by two settings in
@@ -13,7 +16,7 @@
 //! {every}`), and registering a token's topic is the one act that drives both" — the engine emits
 //! `liveness` / `beacon` on `tm_color_<txid>_0-live` at `register` (skein-overlay 0.9.0). The page reads
 //! `GET /<app>/.live/<topic>` and names the validator (its identity key and peer ID) in the swap;
-//! the relay dials the peer it is given. This program keeps no validated set, no beacons, no
+//! the host dials the peer it is given. This program keeps no validated set, no beacons, no
 //! liveness, and takes no start or stop.
 //!
 //! **Called** (input kind "call"; `fn`):
@@ -25,22 +28,21 @@
 //!                   the app's pages, `www/` of the app's own tree (skein-sdk `files.serve`,
 //!                   shruggr/skein#125); it reads only
 //!   call            route /amm/call (APPS.md §4; kernel.brc104: the caller is the signed request's key,
-//!                   who may call is the kernel's gate, 0.7.0): {fn, args} → {fn, result} | {fn, error}; `amm.swap.submit`
-//!                   answers {wait: true} and, called again with `resolved`, the record
+//!                   who may call is the kernel's gate, 0.7.0): {fn, args} → {fn, result} | {fn, error}, at once
 //!   spends          the read route `/spends?outpoint=<txid>.<vout>` (filter `spends`, 0.9.0): the chain
 //!                   state of an outpoint, a pool followed to its current output (reads.zig); 0.34.0:
 //!                   `?outpoint=a,b` one record per outpoint in query order (P8)
-//!   poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps
+//!   poolsBeef, positions, validatorFees, commissionFees, readTerms, tx
 //!                   the public read routes (0.34.0, reads.zig; docs/AMM.md "The public read API"):
 //!                   /pools/beef (P3), /positions (P4), /fees/validator (P5), /fees/commission (P6),
-//!                   /terms (P7), /tx (P9), /swaps (P10); plain GETs, cache headers per class
+//!                   /terms (P7), /tx (P9); plain GETs, cache headers per class (0.44.0: /swaps, P10, gone)
 //!   trades, candles, stats
 //!                   the history reads (0.36.0, reads.zig `historyRead`): /trades (H1), /candles
 //!                   (H2), /stats (H3), over the pool lookup's trade rows
 //!   poolsAt, poolsHistory
 //!                   the pool history reads (0.40.0): /pools/at?t= (every pool listed at t), /pools/history
 //!                   (the events of a window), over the lookup's `history` and `closes`
-//!   amm.swap.submit, amm.swap.status, amm.swap.terms   an in-VM call of the interface amm.swap/1 (relay.zig)
+//!   amm.swap.terms  an in-VM call of the interface amm.swap/1 (interface.zig; 0.44.0: submit and status gone)
 //!   amm.pool.terms, amm.pool.affirm   an in-VM call of the interface amm.pool/1 (the validator's terms,
 //!                   0.9.0; the affirmation of a proposed pool, 0.11.0: amm-validator's fn `affirm`
 //!                   called in-VM, answered at once)
@@ -48,28 +50,22 @@
 //! **Stepped** (the `mailbox` route on the box `amm/amm-p2p`; since 0.7.0, shruggr/skein#143, the
 //! app's box `amm` is the overlay engine's alone):
 //!
-//!   message {fn, args} in box `amm/amm-p2p`            this program's box (APPS.md §4): amm.swap.submit | status | terms,
+//!   message {fn, args} in box `amm/amm-p2p`            this program's box (APPS.md §4): amm.swap.terms,
 //!                                                     amm.pool.terms | affirm,
-//!                                                     answered to the sender in that box (a submit: when the relay settles)
+//!                                                     answered to the sender in that box
 //!   message {fn: "market", args} in box `amm/amm-p2p`  root's market record (0.16.0, market.zig; `roles.root`
 //!                                                     gates it): {minCommissionBps} sets, null clears, the head
 //!                                                     `amm/market`; answered to root in that box
-//!   thread  {kind: "amm-swap-relay" | "amm-pool-relay", id}   the relay (launched by a submit): a thread resting on
-//!                                                     the libp2p provider's answers to its dial of the validator
-//!                                                     the caller named, or (that validator is this node) on
-//!                                                     what its own validator program awaited, called in-VM
 //!   message {kind: "amm-p2p-tick", job: "catchup", name, due}   from the cron provider (skein#69): a catch-up
 //!                                                     pass (a thread resting on the libp2p provider's answers
 //!                                                     to its direct calls). A utility: nothing schedules it
 //!                                                     (0.6.0: the start that did is gone)
 //!
-//! State under the head `amm/p2p` (`relay.p2p_head`): {kind: "amm-p2p-state", maps: {cursor}} (the
+//! State under the head `amm/p2p` (`interface.p2p_head`): {kind: "amm-p2p-state", maps: {cursor}} (the
 //! catch-up cursor; a record 0.5.0 or earlier wrote also held `beacons`, `subscriptions`,
 //! `validated`, `liveness`, which are not read and dropped at the next write).
-//! The app's state under the head `amm/app` (relay.zig `Book`; skein #77:
-//! `app.headOf`): the installed app record's `state`, or (an instance wired
-//! by its genesis, no app record) the head's root itself: {kind:
-//! "amm-app-state", swaps, pools}.
+//! 0.44.0: nothing of this program's is kept under the head `amm/app` (the relay's `swaps` map,
+//! `{kind: "amm-app-state", swaps}`, is gone; a record an earlier version wrote is not read).
 //!
 //! Config: the installed app record's `config.amm` (`ammP2p`: the catch-up's `topics`, `peers`,
 //! `window`, `batch`, `replyTimeoutMs`, all optional), else genesis `defaults.ammP2p`, a JSON
@@ -85,12 +81,11 @@ const ov = @import("skein_overlay");
 const vm = @import("overlay_sk");
 const wire = @import("wallet").wire;
 const names = @import("names.zig");
-const libp2p = @import("libp2p.zig");
+const stream = @import("stream.zig");
 const schedule = @import("schedule.zig");
 const proofs = @import("proofs.zig");
 const views = @import("views.zig");
-const relay = @import("relay.zig");
-const amm_submit = @import("amm_submit");
+const iface = @import("interface.zig");
 const terms = @import("terms");
 const reads = @import("reads.zig");
 const lookup = @import("lookup");
@@ -144,7 +139,7 @@ const Config = struct {
 /// A configuration section: the installed app record's `config.amm.<key>`
 /// (as JSON text), else the genesis default `<genesis>` (JSON text).
 fn configText(a: Allocator, in: Value, key: []const u8, genesis: []const u8) !?[]const u8 {
-    if (try appRecord(a)) |rec| if (rec.get("config")) |c| if (c.get(relay.app_name)) |amm| if (amm.get(key)) |v| return try jsonOf(a, v);
+    if (try appRecord(a)) |rec| if (rec.get("config")) |c| if (c.get(iface.app_name)) |amm| if (amm.get(key)) |v| return try jsonOf(a, v);
     const d = in.get("defaults") orelse return null;
     return d.getText(genesis);
 }
@@ -213,7 +208,7 @@ fn strings(a: Allocator, v: std.json.Value) ![]const []const u8 {
 
 // ---------------------------------------------------------------- this program's state
 
-const state_head = relay.p2p_head;
+const state_head = iface.p2p_head;
 
 const State = struct {
     s: w.store.Store,
@@ -277,8 +272,8 @@ fn call(a: Allocator, in: Value) !void {
         const ans = try spendsRead(a, in, arg);
         return vm.answer(a, if (isFilter(in)) try asFilterAnswer(a, ans) else ans);
     }
-    // The public read API (0.34.0): plain GETs over the pool lookup's answers, the chain state, the
-    // relay's records and the terms.
+    // The public read API (0.34.0): plain GETs over the pool lookup's answers, the chain state and
+    // the terms.
     if (std.meta.stringToEnum(Read, func)) |r| {
         const ans = try publicRead(a, in, arg, r);
         return vm.answer(a, if (isFilter(in)) try asFilterAnswer(a, ans) else ans);
@@ -293,18 +288,8 @@ fn headRecord(a: Allocator, name: []const u8) !?Value {
     return try vm.store().getValue(a, c);
 }
 
-/// This instance's token topic `tm_color_<assetId>` (0.31.0), from the head `amm/token` amm-setup
-/// writes at the deploy event (its `tokenId`), named by `names.overlayOf`; null before the deploy.
-/// The relay's dialled frame carries it so the validator's host picks the token instance on a node
-/// running several (skein `p2p.ts` `streamHandle`).
-fn tokenTopic(a: Allocator) !?[]const u8 {
-    const rec = (try headRecord(a, token_head)) orelse return null;
-    const id = rec.getText("tokenId") orelse return null;
-    return try names.overlayOf(a, id);
-}
-
 /// The head amm-setup writes the token record under (amm-setup `setup.token_head`).
-const token_head = relay.app_name ++ "/token";
+const token_head = iface.app_name ++ "/token";
 
 /// The read `/spends?outpoint=<txid>.<vout>` (filter `spends`): the chain state of an outpoint
 /// (reads.zig `spendOf`). 0.34.0 (P8): `?outpoint=a,b` (a comma in it) answers one record per
@@ -326,21 +311,20 @@ fn spendsRead(a: Allocator, in: Value, arg: Value) !Value {
 }
 
 /// The public read routes' functions (0.34.0; the manifest's filters name them).
-const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps, trades, candles, stats, poolsAt, poolsHistory };
+const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, trades, candles, stats, poolsAt, poolsHistory };
 
-/// One public read (reads.zig): P3 to P7, P9, P10.
+/// One public read (reads.zig): P3 to P7, P9 (0.44.0: P10 `/swaps` gone with the relay records).
 fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
     const q = arg.getText("query") orelse "";
     switch (r) {
         .readTerms => return termsRead(a, in),
-        .swaps => return swapsRead(a, q),
         .tx => return txRead(a, in, q),
         else => {},
     }
     const rec = (try headRecord(a, token_head)) orelse return reads.httpError(a, 404, "no token yet: this instance has had no deploy");
     const token = rec.getText("tokenId") orelse return reads.httpError(a, 404, "no token yet: this instance has had no deploy");
     const st = try loadState(a, in);
-    var svc = try reads.loadLookup(a, vm.store(), try vm.head(a, try lookup.headName(a, relay.app_name, amm_lookup.service_name)));
+    var svc = try reads.loadLookup(a, vm.store(), try vm.head(a, try lookup.headName(a, iface.app_name, amm_lookup.service_name)));
     // The history reads (0.36.0): the trade rows, each trade's height from the overlay's `placed`.
     const hist: ?reads.History = switch (r) {
         .trades => .trades,
@@ -411,24 +395,11 @@ fn txRead(a: Allocator, in: Value, q: []const u8) !Value {
     return reads.httpCached(a, 200, "application/octet-stream", try reads.txCache(st.ch, txid), beef);
 }
 
-/// P10 `/swaps?id=<id>`: the relay record as `amm.swap.status` answers it (dag-json), unsigned.
-fn swapsRead(a: Allocator, q: []const u8) !Value {
-    const id = (try reads.queryParam(a, q, "id")) orelse return reads.httpError(a, 400, "want ?id=<swap id>");
-    const h = try AppHead.load(a);
-    var book = try relay.Book.load(a, vm.store(), h.state);
-    const args: Value = .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "id", .value = .{ .text = id } }}) };
-    return switch (try relay.statusOf(a, &book, .swap, args)) {
-        .found => |rec| reads.httpCached(a, 200, "application/json", .state, try dagjson.encode(a, try toSdk(a, try rec.answer(a)))),
-        .not_found => reads.httpError(a, 404, "not_found"),
-        .bad_id => reads.httpError(a, 400, "bad_id: 64 hex characters"),
-    };
-}
-
 /// The serving side of the direct call: one request frame, one reply frame. A utility since 0.2.0:
 /// no row routes `/amm/proofs/1.0.0` (sync is shruggr/skein#112's `want`).
 fn proofsByBlock(a: Allocator, in: Value, arg: Value) !Value {
-    const msg = try libp2p.inbound(arg);
-    return libp2p.directAnswer(a, try proofs.serve(a, views.held(try loadState(a, in)), msg.body));
+    const msg = try stream.inbound(arg);
+    return stream.directAnswer(a, try proofs.serve(a, views.held(try loadState(a, in)), msg.body));
 }
 
 // ---------------------------------------------------------------- outbound: emit to a provider
@@ -450,7 +421,7 @@ fn emit(a: Allocator, to: []const u8, box: []const u8, body: Value) ![]const u8 
     return vm.result(a, vm.sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
 }
 
-fn toLibp2p(a: Allocator, r: libp2p.Request) ![]const u8 {
+fn toLibp2p(a: Allocator, r: stream.Request) ![]const u8 {
     return emit(a, try providerKey(a, "libp2p"), r.box, r.body);
 }
 
@@ -460,7 +431,7 @@ fn walletCall(a: Allocator, frame: []const u8) ![]const u8 {
 
 /// This instance's libp2p peer ID (David, 2026-10-05): the signer's public key for protocol
 /// `[2, "skein instance"]` (skein src/host/signer.ts `INSTANCE_PROTOCOL`), key ID
-/// `libp2p:<handle>`, counterparty self, as an identity multihash (libp2p.zig `peerIdOf`).
+/// `libp2p:<handle>`, counterparty self, as an identity multihash (stream.zig `peerIdOf`).
 /// The host derives its node's key the same way, from the instance's root (skein 387e057,
 /// src/host/signer.ts `peerKey`: `[2, "skein instance"]` / `libp2p:<handle>` / self), so this
 /// is the peer ID the node runs.
@@ -468,8 +439,8 @@ fn selfPeerId(a: Allocator, in: Value) ![]const u8 {
     const me = in.get("self") orelse return error.NoSelf;
     const handle = me.getText("handle") orelse return error.NoHandle;
     const key_id = try std.fmt.allocPrint(a, "libp2p:{s}", .{handle});
-    const pk = try wire.publicKeyResult(try walletCall(a, try wire.getPublicKeyFrameFor(a, libp2p.instance_protocol.level, libp2p.instance_protocol.name, key_id, .self, null)));
-    return libp2p.peerIdOf(a, pk);
+    const pk = try wire.publicKeyResult(try walletCall(a, try wire.getPublicKeyFrameFor(a, stream.instance_protocol.level, stream.instance_protocol.name, key_id, .self, null)));
+    return stream.peerIdOf(a, pk);
 }
 
 // ---------------------------------------------------------------- steps
@@ -477,21 +448,14 @@ fn selfPeerId(a: Allocator, in: Value) ![]const u8 {
 fn step(a: Allocator, in: Value) !void {
     const s = vm.store();
     const args = in.get("args") orelse return error.BadInput;
-    // The relay thread (launched by amm.swap.submit).
-    if (relay.Kind.ofRelay(args.getText("kind") orelse "")) |kind| return relayStep(a, in, args, kind);
     // A message in this program's box `amm/amm-p2p`: a call {fn, args} (APPS.md §4). (Before
     // 0.7.0 the app's box `amm`, shared with the overlay engine by sender; since shruggr/skein#143 a
     // box has one route, and `amm` is the engine's: its own watch, resume and wait.)
     if (eql(u8, args.getText("box") orelse "", names.own_box)) {
-        // Stepped again when the relay thread it launched comes to rest: the relay answered the sender.
-        if (in.get("resolved") != null) {
-            _ = try vm.finish(a, s, try resultRecord(a, "relayed", &.{}));
-            return;
-        }
         if (args.getCid("body")) |bc| {
             const body = try s.getValue(a, bc);
             // Root's market record (0.16.0; `roles.root` gates `market`).
-            if (eql(u8, body.getText("fn") orelse "", relay.market.fn_market)) return marketStep(a, args, body);
+            if (eql(u8, body.getText("fn") orelse "", iface.market.fn_market)) return marketStep(a, args, body);
             if (body.get("fn") != null) return appMessage(a, in, args, body);
         }
     }
@@ -551,7 +515,7 @@ fn asFilterAnswer(a: Allocator, http: Value) !Value {
 /// shruggr/skein#125). It reads only: the head `amm/app` and the tree's blobs.
 fn servePages(a: Allocator, arg: Value) !Value {
     const req = try toSdk(a, arg);
-    const m = try app.manifestOf(a, relay.app_name);
+    const m = try app.manifestOf(a, iface.app_name);
     return fromSdk(a, try files.serve(a, req, scbor.Value.cidOf(m.get("tree")), files.rowOptions(req)));
 }
 
@@ -673,19 +637,19 @@ fn catchup(a: Allocator, in: Value, st: *State, at: u64, fields: *std.ArrayList(
                 // Not this dial's answer (a late one): rest again.
                 if (at < p.until) return rest(a, p.*, fields);
                 p.nextPeer();
-            } else switch (libp2p.dialAnswer(box, body) catch libp2p.DialAnswer{ .closed = "BadAnswer" }) {
+            } else switch (stream.dialAnswer(box, body) catch stream.DialAnswer{ .closed = "BadAnswer" }) {
                 .opened => |sid| {
                     // The direct call is open: send the request, rest on its reply frame.
                     p.stream = sid;
                     if (p.topic >= cfg.topics.len) return error.TopicsChanged;
                     const hdr = (try ch.chain().at(p.height)) orelse return error.NoHeader;
-                    _ = try toLibp2p(a, try libp2p.send(a, sid, try proofs.encodeRequest(a, .{ .block_hash = hdr.hash, .topic = cfg.topics[p.topic] })));
+                    _ = try toLibp2p(a, try stream.send(a, sid, try proofs.encodeRequest(a, .{ .block_hash = hdr.hash, .topic = cfg.topics[p.topic] })));
                     if (at < p.until) return rest(a, p.*, fields);
-                    _ = try toLibp2p(a, try libp2p.close(a, sid));
+                    _ = try toLibp2p(a, try stream.close(a, sid));
                     p.nextPeer();
                 },
                 .frame => |frame| {
-                    if (p.stream) |sid| _ = try toLibp2p(a, try libp2p.close(a, sid));
+                    if (p.stream) |sid| _ = try toLibp2p(a, try stream.close(a, sid));
                     if (try takeReply(a, st0, p.height, frame)) |k| {
                         proven += k;
                         p.nextBlock();
@@ -695,7 +659,7 @@ fn catchup(a: Allocator, in: Value, st: *State, at: u64, fields: *std.ArrayList(
             }
         } else {
             // The deadline: no answer in time.
-            if (p.stream) |sid| _ = try toLibp2p(a, try libp2p.close(a, sid));
+            if (p.stream) |sid| _ = try toLibp2p(a, try stream.close(a, sid));
             p.nextPeer();
         }
     };
@@ -741,7 +705,7 @@ fn catchup(a: Allocator, in: Value, st: *State, at: u64, fields: *std.ArrayList(
         try finishCatchup(proven);
         settled += proven;
         proven = 0;
-        p.dial = try toLibp2p(a, try libp2p.dial(a, p.peers[p.peer], names.proofs_protocol));
+        p.dial = try toLibp2p(a, try stream.dial(a, p.peers[p.peer], names.proofs_protocol));
         p.stream = null;
         p.until = at + cfg.reply_timeout_ms;
         return rest(a, p.*, fields);
@@ -792,7 +756,7 @@ fn takeReply(a: Allocator, st: *ov.state.State, height: u32, reply: []const u8) 
     return n;
 }
 
-// ---------------------------------------------------------------- the app: amm.swap/1 (the marketplace relay)
+// ---------------------------------------------------------------- the app: amm.swap/1 and amm.pool/1
 
 /// The SDK's dag-cbor and the wallet library's are the same encoding; values cross by bytes.
 fn toSdk(a: Allocator, v: Value) !scbor.Value {
@@ -805,46 +769,10 @@ fn fromSdk(a: Allocator, v: scbor.Value) !Value {
 
 /// The installed app record (the head `amm/app`'s root, `kind: "app"`), or null.
 fn appRecord(a: Allocator) !?Value {
-    const c = (try vm.head(a, relay.app_head)) orelse return null;
+    const c = (try vm.head(a, iface.app_head)) orelse return null;
     const v = try vm.store().getValue(a, c);
     return if (eql(u8, v.getText("kind") orelse "", "app")) v else null;
 }
-
-/// The app's head as this program keeps it: the installed app record and its
-/// `state`, or (no app record: an instance wired by its genesis) the root as
-/// the state record itself.
-const AppHead = struct {
-    record: ?Value,
-    state: ?Value,
-
-    fn load(a: Allocator) !AppHead {
-        const c = (try vm.head(a, relay.app_head)) orelse return .{ .record = null, .state = null };
-        const s = vm.store();
-        const v = try s.getValue(a, c);
-        if (eql(u8, v.getText("kind") orelse "", "app")) {
-            const st = if (v.getCid("state")) |sc| try s.getValue(a, sc) else null;
-            return .{ .record = v, .state = st };
-        }
-        if (eql(u8, v.getText("kind") orelse "", relay.state_kind)) return .{ .record = null, .state = v };
-        return error.NotTheAppsHead;
-    }
-
-    /// Keep the book's state under the head: the app record with `state` replaced (APPS.md §1), or the state as the root.
-    fn save(h: *AppHead, a: Allocator, book: *relay.Book) !void {
-        const s = vm.store();
-        const st = try book.state(a);
-        const sc = try s.putValue(a, st);
-        if (h.record) |rec| {
-            var es: std.ArrayList(cbor.Entry) = .empty;
-            for (rec.map) |e| if (!eql(u8, e.key, "state")) try es.append(a, e);
-            try es.append(a, .{ .key = "state", .value = .{ .cid = sc } });
-            const root: Value = .{ .map = es.items };
-            try vm.advance(relay.app_head, try s.putValue(a, root));
-            h.record = root;
-        } else try vm.advance(relay.app_head, sc);
-        h.state = st;
-    }
-};
 
 /// The manifest the dispatch reads `provides` from: the installed app record,
 /// else (wired by the genesis) `{kind: "app", name: "amm", provides}` with
@@ -856,32 +784,22 @@ fn manifest(a: Allocator, in: Value) !scbor.Value {
     const provides = dagjson.decode(a, text) catch return sk.report("defaults.ammProvides is not JSON");
     var m = scbor.MapBuilder.init(a);
     try m.put("kind", scbor.string("app"));
-    try m.put("name", scbor.string(relay.app_name));
+    try m.put("name", scbor.string(iface.app_name));
     try m.put("provides", provides);
     return m.value();
 }
 
-/// How the function was reached, and what it did that the caller's answer depends on.
+/// How the function was reached (the in-VM functions read the step's input from it).
 const Ctx = struct {
     in: Value,
     mode: enum { route, message, call },
-    /// A message's request (answered by the relay thread when the record settles).
-    request: ?relay.Request = null,
-    /// A route call's own program record (launching the relay thread).
-    arg: ?Value = null,
-    /// The answer waits on a thread (the route answers {wait: true}).
-    waiting: bool = false,
-    /// The relay thread was launched for this call: a message's answer comes from it.
-    launched: bool = false,
 };
 var ctx: Ctx = undefined;
 
 const fns = [_]app.Function{
-    .{ .name = relay.fn_submit, .run = submitFn },
-    .{ .name = relay.fn_status, .run = statusFn },
-    .{ .name = relay.fn_terms, .run = termsFn },
-    .{ .name = relay.fn_pool_terms, .run = poolTermsFn },
-    .{ .name = relay.fn_pool_affirm, .run = poolAffirmFn },
+    .{ .name = iface.fn_terms, .run = termsFn },
+    .{ .name = iface.fn_pool_terms, .run = poolTermsFn },
+    .{ .name = iface.fn_pool_affirm, .run = poolAffirmFn },
 };
 
 fn isAppFn(name: []const u8) bool {
@@ -895,14 +813,6 @@ fn failure(a: Allocator, e: anyerror) anyerror {
     return sk.report(std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (vm.lastError().len > 0) ": " else "", vm.lastError() }) catch "failed");
 }
 
-fn submitFn(c: *app.Call) anyerror!scbor.Value {
-    return submit(c, .swap) catch |e| failure(c.a, e);
-}
-
-fn statusFn(c: *app.Call) anyerror!scbor.Value {
-    return recordStatus(c, .swap) catch |e| failure(c.a, e);
-}
-
 fn poolAffirmFn(c: *app.Call) anyerror!scbor.Value {
     return poolAffirm(c) catch |e| failure(c.a, e);
 }
@@ -910,19 +820,18 @@ fn poolAffirmFn(c: *app.Call) anyerror!scbor.Value {
 /// amm.pool.affirm {pool, satoshis} → {validatorPubKey, nonce, signature} (0.11.0, David Case
 /// 2026-10-21; 0.13.0, 2026-10-22: the validator's nonce, no keyInput): the
 /// proposed pool to this instance's own validator — the package (box `affirm`, from this
-/// instance to itself) handed to amm-validator's fn `affirm` in-VM, as the local relay hands a
-/// swap — which checks it against the terms and answers its signature at once, or the refusal
+/// instance to itself) handed to amm-validator's fn `affirm` in-VM — which checks it against the terms and answers its signature at once, or the refusal
 /// (`<reason>[: <detail>]`). Nothing is recorded.
 fn poolAffirm(c: *app.Call) !scbor.Value {
     const a = c.a;
     const args = try fromSdk(a, c.args);
-    const body = (try relay.affirmBody(a, args)) orelse return sk.report("bad_request: want {pool: bytes, satoshis: int}");
+    const body = (try iface.affirmBody(a, args)) orelse return sk.report("bad_request: want {pool: bytes, satoshis: int}");
     const me = try signerIdentity(&signer_dummy, a);
-    const pkg = try relay.package(a, signer(), &me, relay.affirm_box, body, try relay.affirmNonce(a, body), null); // in-VM: no stream to route
-    const ans = try callValidator(a, ctx.in, relay.affirm_protocol, relay.affirm_box, pkg, null, null);
-    return switch (relay.affirmAnswer(a, ans)) {
+    const pkg = try iface.package(a, signer(), &me, iface.affirm_box, body, try iface.affirmNonce(a, body), null); // in-VM: no stream to route
+    const ans = try callValidator(a, ctx.in, iface.affirm_protocol, iface.affirm_box, pkg);
+    return switch (iface.affirmAnswer(a, ans)) {
         .ok => |v| toSdk(a, v),
-        .refused => |r| sk.report(try relay.refusalText(a, r)),
+        .refused => |r| sk.report(try iface.refusalText(a, r)),
     };
 }
 
@@ -935,7 +844,7 @@ fn poolAffirm(c: *app.Call) !scbor.Value {
 /// (0.17.0, shruggr/skein-amm#4) No head yet: the app record's `config.overlay.terms`, the initial
 /// value (src/terms.zig `current`), as amm-validator and the engine's beat read them.
 fn validatorTerms(a: Allocator) !?terms.Terms {
-    const head: ?Value = if (try vm.head(a, try terms.headName(a, relay.app_name))) |rc| try vm.store().getValue(a, rc) else null;
+    const head: ?Value = if (try vm.head(a, try terms.headName(a, iface.app_name))) |rc| try vm.store().getValue(a, rc) else null;
     return terms.current(head, try appRecord(a));
 }
 
@@ -946,17 +855,17 @@ fn poolTermsFn(c: *app.Call) anyerror!scbor.Value {
     const a = c.a;
     const t = validatorTerms(a) catch |e| return failure(a, e);
     const identity: ?[]const u8 = if (ctx.in.get("self")) |me| me.getBytes("identity") else null;
-    const answer = (try relay.poolTerms(a, identity, selfPeerText(a, ctx.in), t)) orelse return sk.report(terms.no_validator);
+    const answer = (try iface.poolTerms(a, identity, selfPeerText(a, ctx.in), t)) orelse return sk.report(terms.no_validator);
     return toSdk(a, answer);
 }
 
-/// The relay's commission key (0.16.0, the agent's call, "David to review"): hash160 of this
-/// instance's own key for the relay, through the signer: BRC-43 level 1, protocol `amm
-/// commission`, key ID `relay`, counterparty anyone, forSelf (relay.zig `commission_protocol`; as
+/// This exchange's commission key (0.16.0, the agent's call, "David to review"): hash160 of this
+/// instance's own key for the commission, through the signer: BRC-43 level 1, protocol `amm
+/// commission`, key ID `relay`, counterparty anyone, forSelf (interface.zig `commission_protocol`; as
 /// the validator's keys are derived, amm-validator oracle.zig). No config (`config.amm.commission`,
 /// to 0.15.0, is gone).
-fn commissionKey(a: Allocator) !relay.Commission {
-    const pk = try wire.publicKeyResult(try walletCall(a, try wire.getPublicKeyFrameFor(a, relay.commission_protocol.level, relay.commission_protocol.name, relay.commission_key_id, .anyone, true)));
+fn commissionKey(a: Allocator) !iface.Commission {
+    const pk = try wire.publicKeyResult(try walletCall(a, try wire.getPublicKeyFrameFor(a, iface.commission_protocol.level, iface.commission_protocol.name, iface.commission_key_id, .anyone, true)));
     return .{ .pkh = w.bsvz.crypto.hash.hash160(&pk).bytes };
 }
 
@@ -965,9 +874,9 @@ fn commissionKey(a: Allocator) !relay.Commission {
 ///
 /// (0.17.0, shruggr/skein-amm#4) No head yet: the app record's `config["amm-p2p"].market`, the
 /// initial value a token instance's create gives (market.zig `current`).
-fn marketNow(a: Allocator) !relay.market.Market {
-    const head: ?Value = if (try vm.head(a, try relay.market.headName(a, relay.app_name))) |rc| try vm.store().getValue(a, rc) else null;
-    return relay.market.current(head, try appRecord(a));
+fn marketNow(a: Allocator) !iface.market.Market {
+    const head: ?Value = if (try vm.head(a, try iface.market.headName(a, iface.app_name))) |rc| try vm.store().getValue(a, rc) else null;
+    return iface.market.current(head, try appRecord(a));
 }
 
 /// amm.swap.terms {} → {commissionPkh: bytes(20) | null, minCommissionBps}: what the page names as
@@ -977,27 +886,27 @@ fn termsFn(c: *app.Call) anyerror!scbor.Value {
     const a = c.a;
     const com = commissionKey(a) catch |e| return failure(a, e);
     const m = marketNow(a) catch |e| return failure(a, e);
-    return toSdk(a, relay.terms(a, com, m) catch |e| return failure(a, e));
+    return toSdk(a, iface.terms(a, com, m) catch |e| return failure(a, e));
 }
 
 /// Root's `{fn: "market", args}` in this program's box (0.16.0; the role `root` gates it, the
 /// kernel's gate, before the step; market.zig): set (`args` `{minCommissionBps}`) or clear (`args:
 /// null`) the record under `amm/market`, and answer `{fn: "market", request, replyTo, result: <the
 /// record> | null}` — or `error: {code: "bad-args", message}`, nothing written — to the sender in
-/// this box. The relay reads nothing of it: a listing preference, not a rule.
+/// this box. Nothing refuses by it: a listing preference, not a rule.
 fn marketStep(a: Allocator, args: Value, body: Value) !void {
     const s = vm.store();
     const message = args.getCid("message") orelse return error.BadInput;
-    const func = relay.market.fn_market;
-    const rec: ?Value = switch (relay.market.parseArgs(body.get("args"))) {
+    const func = iface.market.fn_market;
+    const rec: ?Value = switch (iface.market.parseArgs(body.get("args"))) {
         .bad => null,
-        .set => |m| try relay.market.record(a, m),
+        .set => |m| try iface.market.record(a, m),
         .clear => .null,
     };
     const answer = if (rec) |r| blk: {
-        try vm.advance(try relay.market.headName(a, relay.app_name), try s.putValue(a, r));
-        break :blk try relay.answerMessage(a, func, message, r);
-    } else try relay.errorMessage(a, func, message, "bad-args", relay.market.parseArgs(body.get("args")).bad);
+        try vm.advance(try iface.market.headName(a, iface.app_name), try s.putValue(a, r));
+        break :blk try iface.answerMessage(a, func, message, r);
+    } else try iface.errorMessage(a, func, message, "bad-args", iface.market.parseArgs(body.get("args")).bad);
     const sent = try answerSender(a, args.getBytes("sender"), answer);
     _ = try vm.finish(a, s, try resultRecord(a, func, &.{
         .{ .key = "answer", .value = answer },
@@ -1005,93 +914,15 @@ fn marketStep(a: Allocator, args: Value, body: Value) !void {
     }));
 }
 
-/// amm.swap.status {id} → the record (or the error `not_found`).
-fn recordStatus(c: *app.Call, kind: relay.Kind) !scbor.Value {
-    const a = c.a;
-    const h = try AppHead.load(a);
-    var book = try relay.Book.load(a, vm.store(), h.state);
-    return switch (try relay.statusOf(a, &book, kind, try fromSdk(a, c.args))) {
-        .found => |r| toSdk(a, try r.answer(a)),
-        .not_found => sk.report("not_found"),
-        .bad_id => sk.report("bad_id: 64 hex characters"),
-    };
-}
-
-/// This program's own record, to launch the relay thread as: a route call's
-/// matched entry (an installed route), a step's thread's program, else the
-/// genesis's `programs["amm-p2p"]`.
-fn selfProgram(a: Allocator, in: Value) ![]const u8 {
-    if (ctx.arg) |arg| if (arg.get("match")) |m| if (m.getCid("program")) |p| return p;
-    if (in.getCid("thread")) |t| if ((try vm.store().getValue(a, t)).getCid("program")) |p| return p;
-    if (in.get("programs")) |ps| if (ps.getCid("amm-p2p")) |p| return p;
-    return error.NoProgramRecord;
-}
-
-var env_call: *app.Call = undefined;
-
 /// This node's own peer ID (base58), or null when it cannot be had (no handle): a caller naming it
-/// names this instance's own validator (relay.zig `isSelf`).
+/// names this instance's own validator (amm.pool.terms answers it as `peerId`).
 fn selfPeerText(a: Allocator, in: Value) ?[]const u8 {
     const id = selfPeerId(a, in) catch return null;
-    return libp2p.peerIdText(a, id) catch null;
-}
-
-/// The relay thread: this program on {kind: "amm-swap-relay" | "amm-pool-relay", id}.
-fn envLaunch(_: *anyopaque, a: Allocator, kind: relay.Kind, id: [32]u8) anyerror![]const u8 {
-    const targs = try vm.store().putValue(a, .{ .map = try a.dupe(cbor.Entry, &.{
-        .{ .key = "kind", .value = .{ .text = kind.relayKind() } },
-        .{ .key = "id", .value = .{ .bytes = try a.dupe(u8, &id) } },
-    }) });
-    return env_call.launch(try selfProgram(a, ctx.in), targs);
-}
-
-/// amm.swap.submit {funding, swap, pool, validator, peerId, expires} (relay.zig
-/// `submit`): check, record `pending` under the app's head,
-/// launch the relay thread → the record. The same request again answers its
-/// record (a `/call` waits on its relay while it is pending); one that timed
-/// out or failed in transport is relayed again.
-fn submit(c: *app.Call, kind: relay.Kind) !scbor.Value {
-    const a = c.a;
-    const in = ctx.in;
-    var h = try AppHead.load(a);
-    var book = try relay.Book.load(a, vm.store(), h.state);
-    env_call = c;
-    const env: relay.Env = .{
-        .book = &book,
-        .now = in.getUint("now") orelse in.getUint("at") orelse 0,
-        .commission = try commissionKey(a),
-        .request = ctx.request,
-        .ctx = &signer_dummy,
-        .self_peer = selfPeerText(a, in),
-        .launchFn = envLaunch,
-    };
-    const args = try fromSdk(a, c.args);
-    const submitted = switch (kind) {
-        .swap => try relay.submit(a, env, args),
-    };
-    switch (submitted) {
-        .refused => |r| return sk.report(try relay.refusalText(a, r)),
-        .settled => |rec| return toSdk(a, try rec.answer(a)),
-        .pending => |rec| {
-            // The relay is under way: a route waits on its thread (at rest already: answered from the record).
-            if (ctx.mode == .route) if (rec.thread) |t| {
-                if (c.awaitRecord(t)) {
-                    ctx.waiting = true;
-                } else |_| {}
-            };
-            return toSdk(a, try rec.answer(a));
-        },
-        .launched => |rec| {
-            try h.save(a, &book);
-            ctx.launched = true;
-            ctx.waiting = true;
-            return toSdk(a, try rec.answer(a));
-        },
-    }
+    return stream.peerIdText(a, id) catch null;
 }
 
 fn dispatch(a: Allocator, in: Value, name: []const u8, args: ?scbor.Value, sender: ?[]const u8) !app.Outcome {
-    return app.run(a, try toSdk(a, in), relay.app_name, try manifest(a, in), &fns, name, args, sender);
+    return app.run(a, try toSdk(a, in), iface.app_name, try manifest(a, in), &fns, name, args, sender);
 }
 
 /// An in-VM call of amm.swap.*: the result, or the call's error.
@@ -1121,17 +952,14 @@ fn failureValue(a: Allocator, f: app.Failure) !scbor.Value {
     return e.value();
 }
 
-/// The `/call` route (APPS.md §4; the SDK's `app` route, with one addition:
-/// `amm.swap.submit` waits on the relay thread). The body is `{fn, args}`
-/// (JSON / dag-json, or dag-cbor as application/cbor); the answer `{fn,
-/// result}` (200) or `{fn, error}` (400, 403, 404, 409, 500). A submit that
-/// launched (or found) its relay answers `{wait: true}`; called again with
-/// `resolved` when the relay thread comes to rest, it answers the record.
+/// The `/call` route (APPS.md §4; the SDK's `app` route): the body is `{fn, args}` (JSON /
+/// dag-json, or dag-cbor as application/cbor); the answer `{fn, result}` (200) or `{fn, error}`
+/// (400, 403, 404, 409, 500). Every function answers at once (0.44.0: `amm.swap.submit`, the one
+/// that waited on a relay thread, is gone).
 fn appRoute(a: Allocator, in: Value, arg: Value) !Value {
-    ctx = .{ .in = in, .mode = .route, .arg = arg };
+    ctx = .{ .in = in, .mode = .route };
     const caller = arg.getBytes("caller");
     var name: []const u8 = "";
-    var call_args: ?scbor.Value = null;
     const outcome: app.Outcome = blk: {
         if (!eql(u8, arg.getText("method") orelse "", "POST")) break :blk .{ .err = .{ .code = .@"bad-request", .message = "POST {fn, args}" } };
         const raw = arg.getBytes("body") orelse "";
@@ -1140,23 +968,8 @@ fn appRoute(a: Allocator, in: Value, arg: Value) !Value {
             break :blk .{ .err = .{ .code = .@"bad-request", .message = "the body is not {fn, args} (JSON, or dag-cbor as application/cbor)" } };
         if (body != .map) break :blk .{ .err = .{ .code = .@"bad-request", .message = "the body is not {fn, args}" } };
         name = scbor.Value.str(body.get("fn")) orelse break :blk .{ .err = .{ .code = .@"bad-request", .message = "fn is not text" } };
-        call_args = body.get("args");
-        if (arg.get("resolved") != null and relay.Kind.ofSubmit(name) != null) {
-            const kind = relay.Kind.ofSubmit(name).?;
-            // Called again: the relay thread this request waited on has come to rest. The record, as it stands.
-            const sargs = try fromSdk(a, call_args orelse .null);
-            const id = switch (kind) {
-                .swap => relay.idOf(sargs.getBytes("swap") orelse ""),
-            };
-            const h = try AppHead.load(a);
-            var book = try relay.Book.load(a, vm.store(), h.state);
-            const rec = (try book.getKind(a, kind, id)) orelse break :blk .{ .err = .{ .code = .failed, .message = "not_found" } };
-            break :blk .{ .ok = try toSdk(a, try rec.answer(a)) };
-        }
-        break :blk try dispatch(a, in, name, call_args, caller);
+        break :blk try dispatch(a, in, name, body.get("args"), caller);
     };
-    if (outcome == .ok and ctx.waiting and arg.get("resolved") == null)
-        return .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "wait", .value = .{ .boolean = true } }}) };
     var ans = scbor.MapBuilder.init(a);
     try ans.put("fn", scbor.string(name));
     var code: u16 = 200;
@@ -1200,13 +1013,11 @@ fn answerSender(a: Allocator, sender: ?[]const u8, answer: Value) !bool {
     return true;
 }
 
-/// A message `{fn, args}` in box `amm/amm-p2p`: the call, answered to the sender (in that box) now
-/// — or, for a submit that launched the relay, by the relay thread when the
-/// record settles.
+/// A message `{fn, args}` in box `amm/amm-p2p`: the call, answered to the sender (in that box) now.
 fn appMessage(a: Allocator, in: Value, args: Value, body: Value) !void {
     const message = args.getCid("message") orelse return error.BadInput;
     const sender = args.getBytes("sender");
-    ctx = .{ .in = in, .mode = .message, .request = if (sender) |sd| .{ .message = message, .sender = sd } else null };
+    ctx = .{ .in = in, .mode = .message };
     const sbody = try toSdk(a, body);
     const name = scbor.Value.str(sbody.get("fn"));
     const outcome: app.Outcome = if (name) |n|
@@ -1214,13 +1025,9 @@ fn appMessage(a: Allocator, in: Value, args: Value, body: Value) !void {
     else
         .{ .err = .{ .code = .@"bad-request", .message = "fn is not text" } };
     const func = name orelse "";
-    if (outcome == .ok and ctx.launched) {
-        _ = try vm.finish(a, vm.store(), try resultRecord(a, func, &.{.{ .key = "relaying", .value = .{ .boolean = true } }}));
-        return;
-    }
     const answer = switch (outcome) {
-        .ok => |v| try relay.answerMessage(a, func, message, try fromSdk(a, v)),
-        .err => |f| try relay.errorMessage(a, func, message, @tagName(f.code), f.message),
+        .ok => |v| try iface.answerMessage(a, func, message, try fromSdk(a, v)),
+        .err => |f| try iface.errorMessage(a, func, message, @tagName(f.code), f.message),
     };
     const sent = try answerSender(a, sender, answer);
     _ = try vm.finish(a, vm.store(), try resultRecord(a, func, &.{
@@ -1229,7 +1036,7 @@ fn appMessage(a: Allocator, in: Value, args: Value, body: Value) !void {
     }));
 }
 
-// ---------------------------------------------------------------- the relay thread
+// ---------------------------------------------------------------- the affirm package's signer
 
 var signer_dummy: u8 = 0;
 
@@ -1238,130 +1045,12 @@ fn signerIdentity(_: *anyopaque, a: Allocator) anyerror![33]u8 {
 }
 
 fn signerSign(_: *anyopaque, a: Allocator, hash: [32]u8) anyerror![]const u8 {
-    return wire.signatureResult(try walletCall(a, try wire.createSignatureFrame(a, 2, relay.envelope_protocol, relay.envelope_key_id, .anyone, hash)));
+    return wire.signatureResult(try walletCall(a, try wire.createSignatureFrame(a, 2, iface.envelope_protocol, iface.envelope_key_id, .anyone, hash)));
 }
 
 /// This instance's identity, signing the package through the `wallet` import (BRC-169's message signature).
-fn signer() relay.Signer {
+fn signer() iface.Signer {
     return .{ .ctx = &signer_dummy, .identityFn = signerIdentity, .signFn = signerSign };
-}
-
-/// One step of the relay thread {kind: "amm-swap-relay" | "amm-pool-relay",
-/// id}: launched, or stepped again by the libp2p provider's answer to its
-/// dial or by the deadline at `expires` (relay.zig `advance`).
-fn relayStep(a: Allocator, in: Value, args: Value, kind: relay.Kind) !void {
-    const s = vm.store();
-    const idb = args.getBytes("id") orelse return error.BadInput;
-    if (idb.len != 32) return error.BadInput;
-    const id = idb[0..32].*;
-    const now: u64 = in.getUint("at") orelse in.getUint("now") orelse return error.BadInput;
-    var h = try AppHead.load(a);
-    var book = try relay.Book.load(a, s, h.state);
-    var rec = (try book.getKind(a, kind, id)) orelse {
-        _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{.{ .key = "missing", .value = .{ .boolean = true } }}));
-        return;
-    };
-    if (rec.local) return localRelayStep(a, in, kind, id, now, &h, &book, &rec);
-
-    var input: relay.Input = .start;
-    var pkg: ?[]const u8 = null;
-    if (in.get("reply")) |r| if (r == .map) {
-        const reply_to = r.getCid("replyTo") orelse "";
-        // 0.41.0: this instance's overlay answering the submission of the validator's BEEF.
-        if (rec.submission) |m| if (eql(u8, reply_to, m)) {
-            input = .{ .overlay = try s.getValue(a, r.getCid("body") orelse return error.BadInput) };
-        };
-        if (input == .start) {
-            if (rec.submission != null or rec.dial == null or !eql(u8, reply_to, rec.dial.?)) {
-                // Not the answer awaited (a late one): rest again.
-                if (rec.submission orelse rec.dial) |d| try vm.awaitRecord(d);
-                try vm.deadline(@intCast(rec.expires));
-                _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{.{ .key = "late", .value = .{ .boolean = true } }}));
-                return;
-            }
-            const body = try s.getValue(a, r.getCid("body") orelse return error.BadInput);
-            input = .{ .answer = libp2p.dialAnswer(r.getText("box") orelse "", body) catch .{ .closed = "BadAnswer" } };
-            if (input.answer == .opened and rec.status == .pending) pkg = try relay.packageFor(a, signer(), rec, try tokenTopic(a));
-        }
-    };
-    if (input == .start and (in.getBool("woke") orelse false)) input = .woke;
-
-    var fx = try relay.advance(a, &rec, input, now, pkg);
-    const lp = try providerKey(a, "libp2p");
-    for (fx.emits, 0..) |req, i| {
-        const m = try emit(a, lp, req.box, req.body);
-        if (fx.dial) |di| if (di == i) {
-            rec.dial = m;
-        };
-    }
-    if (fx.catchup) |b| {
-        // 0.41.0: the validator's BEEF into this instance's own overlay — the message amm-validator's
-        // submit.zig sends, from this instance to itself in the submissions box, for the token's
-        // topic — and the thread rests on that submission's first answer.
-        if (try tokenTopic(a)) |topic| {
-            const me = (in.get("self") orelse return error.NoSelf).getBytes("identity") orelse return error.NoSelf;
-            rec.submission = try vm.send(a, me, try amm_submit.box(a, relay.app_name), try amm_submit.body(a, b, topic));
-        } else {
-            relay.applyReply(a, &rec, rec.reply.?);
-            fx.rest = false;
-            fx.done = true;
-        }
-    }
-    try book.put(a, rec);
-    try h.save(a, &book);
-    if (fx.rest) {
-        try vm.awaitRecord(rec.submission orelse rec.dial orelse return error.NoDial);
-        try vm.deadline(@intCast(rec.expires));
-    }
-    var sent = false;
-    if (fx.done) if (rec.request) |q| {
-        sent = try answerSender(a, q.sender, try relay.answerMessage(a, kind.submitFn(), q.message, try rec.answer(a)));
-    };
-    _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{
-        .{ .key = "relay", .value = .{ .text = kind.relayKind() } },
-        .{ .key = "id", .value = .{ .text = try a.dupe(u8, &relay.idText(id)) } },
-        .{ .key = "status", .value = .{ .text = @tagName(rec.status) } },
-        .{ .key = "answered", .value = .{ .boolean = sent } },
-    }));
-}
-
-/// The relay to this instance's own validator (`rec.local`: the peer named is this node; 0.4.0,
-/// David 2026-10-06). A node does not dial itself: the relay does what the front door does with a
-/// frame on `/amm-validator/1/<call>` (skein programs/frontdoor libp2p.zig `stepped`) — it calls the
-/// route's handler, amm-validator's fn, in-VM from this step with the same package as the frame's
-/// body (`callValidator`). The handler's `{wait: true}` means it awaited its submission in this
-/// step, so this thread rests on that (and the deadline at `expires`); stepped again by the
-/// engine's answer (`reply`) or the awaited thread at rest (`resolved`), it calls the handler again
-/// with it. `{verdict, body}` is the reply frame: the record settles (relay.zig `localAnswer`).
-fn localRelayStep(a: Allocator, in: Value, kind: relay.Kind, id: [32]u8, now: u64, h: *AppHead, book: *relay.Book, rec: *relay.Record) !void {
-    const s = vm.store();
-    const reply: ?Value = if (in.get("reply")) |r| (if (r == .map) r else null) else null;
-    const resolved = in.get("resolved");
-    const input: relay.LocalInput = if (reply != null or resolved != null) .again else if (in.getBool("woke") orelse false) .woke else .start;
-    var fx = relay.advanceLocal(rec, input, now);
-    if (fx.call) {
-        const pkg = try relay.packageFor(a, signer(), rec.*, try tokenTopic(a));
-        var why: []const u8 = "";
-        const ans: ?Value = callValidator(a, in, kind.protocol(), kind.box(), pkg, reply, resolved) catch |e| blk: {
-            why = std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (vm.lastError().len > 0) ": " else "", vm.lastError() }) catch @errorName(e);
-            break :blk null;
-        };
-        fx = relay.localAnswer(a, rec, ans, why);
-    }
-    try book.put(a, rec.*);
-    try h.save(a, book);
-    if (fx.rest) try vm.deadline(@intCast(rec.expires));
-    var sent = false;
-    if (fx.done) if (rec.request) |q| {
-        sent = try answerSender(a, q.sender, try relay.answerMessage(a, kind.submitFn(), q.message, try rec.answer(a)));
-    };
-    _ = try vm.finish(a, s, try resultRecord(a, "relay", &.{
-        .{ .key = "relay", .value = .{ .text = kind.relayKind() } },
-        .{ .key = "id", .value = .{ .text = try a.dupe(u8, &relay.idText(id)) } },
-        .{ .key = "local", .value = .{ .boolean = true } },
-        .{ .key = "status", .value = .{ .text = @tagName(rec.status) } },
-        .{ .key = "answered", .value = .{ .boolean = sent } },
-    }));
 }
 
 /// The validator program's record: the installed app record's `programs["amm-validator"]`, else
@@ -1372,11 +1061,12 @@ fn validatorProgram(a: Allocator, in: Value) ![]const u8 {
     return error.NoValidatorProgram;
 }
 
-/// amm-validator's fn `func` (`swap`: its route's `fn`; `affirm`, 0.11.0: called in-VM only; the
-/// package's box), called in-VM with the argument the front door gives a frame's handler:
-/// `{transport: "local", protocol, body: <the package>, match: {program, fn, app}, reply?,
-/// resolved?}` (`transport` "local": no stream, no remote peer; the package carries who sent it).
-fn callValidator(a: Allocator, in: Value, protocol: []const u8, func: []const u8, pkg: []const u8, reply: ?Value, resolved: ?Value) !Value {
+/// amm-validator's fn `func` (`affirm`, 0.11.0: called in-VM only; the package's box), called in-VM
+/// with the argument the front door gives a frame's handler: `{transport: "local", protocol, body:
+/// <the package>, match: {program, fn, app}}` (`transport` "local": no stream, no remote peer; the
+/// package carries who sent it). 0.44.0: the local swap relay that also called `swap` this way is
+/// gone (the host hands a swap to a validator on its own node as an inbound frame).
+fn callValidator(a: Allocator, in: Value, protocol: []const u8, func: []const u8, pkg: []const u8) !Value {
     const prog = try validatorProgram(a, in);
     var es: std.ArrayList(cbor.Entry) = .empty;
     try es.appendSlice(a, &.{
@@ -1386,10 +1076,8 @@ fn callValidator(a: Allocator, in: Value, protocol: []const u8, func: []const u8
         .{ .key = "match", .value = .{ .map = try a.dupe(cbor.Entry, &.{
             .{ .key = "program", .value = .{ .cid = prog } },
             .{ .key = "fn", .value = .{ .text = func } },
-            .{ .key = "app", .value = .{ .text = relay.app_name } },
+            .{ .key = "app", .value = .{ .text = iface.app_name } },
         }) } },
     });
-    if (reply) |r| try es.append(a, .{ .key = "reply", .value = r });
-    if (resolved) |r| try es.append(a, .{ .key = "resolved", .value = r });
     return vm.call(a, prog, func, .{ .map = es.items });
 }

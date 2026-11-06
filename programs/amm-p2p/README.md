@@ -1,14 +1,33 @@
 # amm-p2p
 
-The AMM overlay's **marketplace relay** (the app's box handler: interfaces `amm.swap/1` and `amm.pool/1` (0.9.0: `amm.liquidity/1` gone), docs/notes.md 2026-10-02 "Marketplace relay") and the app's pages, with the proofs-by-block direct call and the catch-up pass as utilities nothing routes or schedules (#2, the pull half of proof sync), as one [skein](https://github.com/shruggr/skein) program (Zig 0.16.0, wasm32-wasi), the `amm-p2p` program of the `amm` app (`etc/app.json`). The design notes cited below are amm-poc's docs/notes.md.
+The AMM app's **functions** (interfaces `amm.swap/1`: `terms`; `amm.pool/1`: `terms`, `affirm`), its **read routes**, the **market record** and the app's pages, with the proofs-by-block direct call and the catch-up pass as utilities nothing routes or schedules (#2, the pull half of proof sync), as one [skein](https://github.com/shruggr/skein) program (Zig 0.16.0, wasm32-wasi), the `amm-p2p` program of the `amm` app (`etc/app.json`). 0.44.0: **no swap relay** here — the open-exchange host relays (below). The design notes cited below are amm-poc's docs/notes.md.
 
 ```
 zig build test-amm-p2p   # from the repo root: the direct call's request and reply, the catch-up plan, the names,
-                         # the catch-up tick, the libp2p
-                         # providers' bodies and answers; the relay: a pair's checks, the BEEF and the signed
-                         # package, the record's lifecycle (dialled, or local), the validator named, the dispatch;
-                         # the affirmation's body and answer (0.11.0); the manifest's role settings, natively
+                         # the catch-up tick, the libp2p provider's bodies and answers (stream.zig); amm.swap/1 by
+                         # the manifest (terms only); the affirmation's body and answer; the commission key; the reads,
+                         # natively
 ```
+
+## 0.44.0 (the host is the relay, David Case 2026-11-06)
+
+This section supersedes what the rest of this file says where they differ: every older section below that describes the relay, its records, `expires` or `/swaps` describes what is gone.
+
+"The instance logs FACTS, never ATTEMPTS." A swap being forwarded is an attempt, so nothing of it is in this program any more. **Gone:** `amm.swap.submit` and `amm.swap.status` (the manifest declares neither), the swap records and the app state's `swaps` map (`{kind: "amm-app-state", swaps}` under `amm/app`: a record an earlier version wrote is not read), the relay thread (`{kind: "amm-swap-relay", id}`: its dial, its frame, its deadline), the local relay to this instance's own validator, the read `/swaps` (P10) and its filter, every `expires`. relay.zig is gone; what the remaining functions use of it is `src/interface.zig`; the direct call's shapes the catch-up and `proofsByBlock` use are `src/stream.zig` (libp2p.zig, less the topic verdicts and `publish`, which nothing used).
+
+**Who relays now.** The open-exchange host (TS) serves `POST /@<tokenId>/amm/swap` (plain, no BRC-104 session): it checks the commission rule below and nothing else, signs the package with the token instance's key outside any step, carries it to the validator over libp2p on one stream (one request frame, one answer frame) — or hands it to a validator on its own node as that node's inbound frame — submits a `beef` the answer carries to the token instance's overlay, and answers the page. The validator (amm-validator) is unchanged: its protocol, checks, lock and answers.
+
+### The commission rule (the host's one check; was `checkPair`'s `commission_missing`)
+
+This exchange takes its commission at `pkh` = **hash160 of the token instance's own key** for the commission: the signer's public key for **BRC-43 security level 1, protocol `amm commission`, key ID `relay`, counterparty `anyone`, forSelf** (interface.zig `commission_protocol` / `commission_key_id`; main.zig `commissionKey`; `amm.swap.terms` answers it as `commissionPkh`). Anyone can derive the same public key from the instance's identity key (BRC-42 with the anyone key as the counterparty; test.zig "the commission key"); only the instance can sign for it.
+
+A swap (the raw transaction the page sends) is relayed only when:
+
+1. input 0's unlocking script is a Rúnar call of the pool's **Swap** (src/pool.zig `parseSwapCall`: exactly 13 pushes, the last the method index 0) — the pushes `_codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh, commissionPkh, tokenChangePkh, tokenChange, _changePKH, _changeAmount, txPreimage, methodIndex`;
+2. output 0 is the pool's continuation (a 1Color value output whose lock src/pool.zig `parse` reads as the Pool code) — its **CommissionBps** is the pool's (the contract keeps the rate along a lineage);
+3. the commission `feeOf(amountIn, CommissionBps)` = ⌈amountIn · CommissionBps / 10 000⌉ is nonzero exactly when CommissionBps > 0 (amountIn > 0); then the call's **`commissionPkh` (push 6) must equal `pkh`**. The contract itself pays the commission output (src/pool.zig `feeLayout`: output 2 + one per nonzero LP and validator fee) to that `commissionPkh` in the input asset, and the validator checks the whole transaction, so naming the key is the whole rule.
+
+A pool with CommissionBps 0 has no commission: any `commissionPkh` passes. A swap whose call or continuation does not read as above is refused too (the rule cannot be shown); everything else is the validator's to judge. A refusal is answered to the page with nothing logged anywhere.
 
 ## 0.13.0 (the validator's nonce, David Case 2026-10-22)
 
@@ -139,12 +158,12 @@ What is left:
 | file | what |
 |---|---|
 | `src/names.zig` | Topic, protocol, box and schedule names; parses `tm_color_<txid>_0` and `tm_color_<txid>_0-live` itself. |
-| `src/libp2p.zig` | The libp2p shapes: the handler's argument, the topic answer (verdict and `admit` entries), the direct-call answer, the libp2p provider's bodies and its answers to a dial. |
+| `src/stream.zig` | The direct call's shapes (0.44.0; was libp2p.zig): the handler's argument, the direct-call answer, the libp2p provider's bodies and its answers to a dial (the catch-up pass's). |
 | `src/schedule.zig` | The catch-up tick's kind and job (0.6.0: nothing schedules it). Pure. |
 | `src/proofs.zig` | Proofs by block: one BUMP per block (merge), the request and reply, the catch-up plan. Pure. |
 | `src/views.zig` | The views over the chain state (`chain/state`) and the app's overlay state (`<app>/state`). No VM imports. |
-| `src/relay.zig` | The marketplace relay: a pair's checks (the Pool contract's call and outputs, `pool` and 1Color's `brc162`), a deploy's checks (`checkDeploy`: the pool, its key, 1Color's `bsv21.tokenOf` for the first token input), the record of either kind and the app's state (`Book`: `swaps`, `pools`), the request BEEFs and the signed package, the relay thread's steps (`advance`), `submit`/`submitDeploy`/`status`/`statusOf`/`terms`. Pure. |
-| `src/main.zig` | The program: the route handlers, the steps (the catch-up tick, the app's box, the relay thread), the app dispatch (skein-sdk `app`), the signer (`wallet`), `emit`, `launch`, `await` and `deadline` imports. |
+| `src/interface.zig` | (0.44.0) The functions' shapes: `amm.swap.terms` (the commission key's protocol, `terms`), `amm.pool.terms` (`poolTerms`), the affirmation (`affirmBody`, `affirmNonce`, `affirmAnswer`, the signed package `package`), the answer messages. Pure. |
+| `src/main.zig` | The program: the route handlers, the steps (the catch-up tick, the app's box), the app dispatch (skein-sdk `app`), the signer (`wallet`), `emit`, `await` and `deadline` imports (the catch-up pass's). |
 | `test.zig` | Tests. |
 
 Dependencies (`build.zig`): skein-overlay 0.6.0 by URL + hash (its `sk` VM helpers, and its engine sources as the module `skein_overlay`, as amm-validator takes them), skein-sdk 0.5.1 through it (`chain`, `wallet`, `app`, `sk`, `cbor`, `dagjson`, `message`), skein-1color 0.4.0 (`1color`) and `pool`. The tests read `etc/app.json` (the functions' declarations).
@@ -156,7 +175,7 @@ Dependencies (`build.zig`): skein-overlay 0.6.0 by URL + hash (its `sk` VM helpe
 | `libp2p:tm_color_<txid>_0-live` (GossipSub topic) | none (0.4.0) | the runtime's liveness tool on a market host (`liveness`), read at `GET /amm/.live/tm_color_<txid>_0-live`; this program judges no beat |
 | `libp2p:/amm/proofs/1.0.0` (direct call) | `proofsByBlock` | answer one request frame with one reply frame |
 | `/amm/` (a read route, prefix, its filter `page`, shruggr/skein#143) | `serve` | the pages, `www/` of the app's tree; a filter's answer, anyone, signed or not, nothing logged |
-| `/amm/call` (HTTP row, APPS.md §4: a signed request) | `call` | `{fn, args}` → `{fn, result}` / `{fn, error}`; `amm.swap.submit` waits on its relay (0.11.0: `amm.pool.affirm` answers at once; `amm.pool.submit` gone) |
+| `/amm/call` (HTTP row, APPS.md §4: a signed request) | `call` | `{fn, args}` → `{fn, result}` / `{fn, error}`, at once (0.44.0: `amm.swap.submit` gone; 0.11.0: `amm.pool.submit` gone) |
 
 `<txid>` is the token's deploy txid, 64 lowercase hex characters in display order; the topic name is `tm_color_<txid>_0` (skein-1color 0.8.2: `tm_color_<assetId>`, `_0` included; until skein-amm 0.7.1 it had no suffix), and the liveness topic adds `-live`, in skein's `-admit`/`-proof` style. Bodies are dag-cbor; hashes and txids are 32 bytes in internal byte order.
 
@@ -214,125 +233,21 @@ answer       {stream, closed} | {error}; or the deadline → the next peer
 
 The pass is carried from step to step in the thread's result record (`catchup: {topic, height, to, peers, peer, dial, stream, until}`). At the batch's end the cursor moves; with nothing unsettled the cursor follows the tip. It is not exercised natively (it needs the kernel and the provider); the plan, the bodies and the answers are.
 
-## The marketplace relay (`amm.swap/1`)
+## The functions (`amm.swap/1`, `amm.pool/1`)
 
-The taker's own skein relays the swap so the browser never needs libp2p (docs/notes.md 2026-10-02, "Swap funding and signing", "Marketplace relay"). The page builds the **funding transaction** (BRC-100 `createAction` with `noSend`: one exact output, the swap's input) and the **swap** (the pool input with the contract pushes and the validator's slot empty, the funding output as its other input, signed by the page), and hands both to its skein, which checks them, records the swap in flight under the app's head, dials the pool's validator and waits on the answer.
-
-### The functions
-
-Declared in `etc/app.json` (`provides`, interface `amm.swap/1`), dispatched with skein-sdk's `app` helper (args checked against the shapes, `writes` enforced), reachable three ways (APPS.md §4): a message `{fn, args}` in box `amm` (answered with a message to the sender, `{fn, request, replyTo, result | error}`, when the address book reaches it), the route `/amm/call` (POST `{fn, args}`, JSON/dag-json or dag-cbor; bytes in JSON are dag-json `{"/": {"bytes": "<base64>"}}`), an in-VM `call`.
+Declared in `etc/app.json` (`provides`), dispatched with skein-sdk's `app` helper (args checked against the shapes, `writes` enforced), reachable as a message `{fn, args}` in box `amm/amm-p2p` (answered with a message in that box), on the route `/call` (signed, `kernel.brc104`) and in-VM.
 
 ```
-amm.swap.submit   writes: true
-  args    {funding: bytes, swap: bytes, pool: string, validator: bytes, peerId: string, expires: ms}
-  answer  the record (below)
-amm.swap.status   writes: false
-  args    {id: string}
-  answer  the record                      error `not_found`
 amm.swap.terms    writes: false
   args    {}
-  answer  {commissionPkh?: bytes,         the relay's commission pkh (20 bytes; 0.16.0: hash160 of the instance's own
-           minCommissionBps?: int}        key, BRC-43 level 1 `amm commission` / `relay`, counterparty anyone; null only
-                                          when the signer gives none), for the page to name as Swap's commissionPkh
-                                          before it builds the swap; and (0.16.0) this market's minimum commission, the
-                                          record `amm/market` root sets (0 when unset): the pools the Swap page lists
-record    {id: string, status: string, funding: bytes, swap: bytes, pool: string, validator: bytes,
-           expires: ms, created: ms, updated: ms, tx?: bytes, txid?: string, reason?: string,
-           detail?: string, poolState?: map}
-status    pending | accepted (tx: the validator's signed swap, txid) | refused (the validator's reason,
-          detail, poolState: its `pool`) | timeout (no answer by `expires`) | failed (the dial or the
-          stream failed, or the answer did not decode)
+  answer  {commissionPkh?: bytes,         this exchange's commission pkh (20 bytes; hash160 of the instance's own key,
+           minCommissionBps?: int}        BRC-43 level 1 `amm commission` / `relay`, counterparty anyone; null only when
+                                          the signer gives none), for the page to name as Swap's commissionPkh; and
+                                          (0.16.0) this market's minimum commission (0 when unset): the pools the Swap
+                                          page lists
+amm.pool.terms    writes: false           the validator's terms with this instance's identity and peer ID
+amm.pool.affirm   writes: false           a proposed pool to this instance's own validator, in-VM (0.13.0, above)
 ```
-
-- `funding`: the funding transaction, raw or a BEEF (V1, V2, Atomic: `createAction`'s `tx`) whose subject it is. **Send the BEEF**: the validator's overlay verifies every unproven transaction's inputs against a parent in the BEEF or one it holds, so a raw funding transaction is refused there (`submit_refused`, `MissingInput`) unless the validator holds its parents.
-- `swap`: the raw swap. `id` is sha256 of these bytes (hex): the swap with the validator's slot empty.
-- `pool`: the pool outpoint `<txid>_<vout>`; `validator`: the pool's ValidatorIdentity (33 bytes); `expires`: ms since the epoch.
-
-**Checks** (`relay.checkPair`; a refusal is the function's error, `failed`, message `<reason>[: <detail>]`, and nothing is written): `bad_validator`, `expired`, `bad_funding`, `bad_swap`, `bad_pool`; `pool_not_input_0` (input 0 spends `pool`); `funding_not_spent` (another input spends an output of the funding transaction); `funding_unsigned`, `swap_unsigned` (an input with no unlocking script; the validator verifies the signatures); `not_a_swap`, `bad_call` (the pool call is Rúnar's `Swap(validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh, commissionPkh)`, 11 pushes, 20-byte pkhs), `signature_slot_not_empty`; `bad_outputs` (output 0 a pool, then the payout, the LP and validator fees when nonzero, the commission when the pool's CommissionBps of amountIn is nonzero: in the input asset — sats, or a 1-sat BRC-162 value output — to the call's commissionPkh, then at most one change output when `_changeAmount > 0`), `wrong_validator` (the continuation's ValidatorIdentity is not `validator`); `commission_missing` (the pool charges a commission and the call's commissionPkh is not ours, the derived key's hash, 0.16.0; before, config `commission.pkh` when set; a pool whose CommissionBps is 0 has no commission output and passes); then `bad_peer` (0.4.0: `peerId` is not a peer ID's text; the relay dials it, or calls its own validator when it is this node's).
-
-**Submit** records `{status: "pending", …}` under the app's head and launches the relay thread (this program, args `{kind: "amm-swap-relay", id}`). Over `/amm/call` the request waits on that thread (`{wait: true}`) and answers the settled record when it comes to rest; a message caller is answered by the relay thread with the settled record; an in-VM call gets the pending record. The same swap again answers its record (a `/call` waits on the relay while it is pending); one that timed out or failed is relayed again.
-
-### The relay thread
-
-```
-launched              emit dial {peer: the validator's peer ID (as the caller named it), protocol: "/amm-validator/1/swap"}
-                      to the libp2p provider; await it; deadline `expires`
-{stream} (box dial)   emit send {stream, body: the package}; rest again
-{stream, body} (frame) the validator's answer: {ok: true, tx, txid} → accepted; {ok: false, reason, detail?, pool?}
-                      → refused; emit close; answer the message caller — or (0.41.0) when it carries
-                      `beef` (accepted; pool_spent): emit close, send {fn: "submit", args: {beef,
-                      topics: [the token topic]}} to this instance in box `amm/submit` (amm-validator's
-                      submit.zig message), await it; deadline `expires`
-the overlay's answer  (0.41.0) the validator's answer applied (accepted | refused); a rejection or
-                      error there said in `detail` ("this host's overlay refused the validator's
-                      transaction: …"), the verdict standing; answer the message caller
-{stream, closed} | {error}   failed (reason `unreachable`)
-woke at `expires`     timeout (close the stream if open); before it, rest again; while this
-                      overlay has not answered (0.41.0): the validator's answer applied, `detail`
-                      "this host's overlay did not answer before expires"
-```
-
-So when the page hears `accepted` or `pool_spent` from a remote validator, its own host already
-lists the pool where the validator says it is (0.41.0, David 2026-11-05). A local validator (this
-instance) needs none of it: its submission is this overlay's.
-
-**The package** (the frame): the signed-message package amm-validator opens (its README, "A direct call"): `{message, body, topic}`, the mail record `{kind: "mail", op: "put", sender: this instance's identity, recipient: validator, box: "swap", body: <cid>, nonce: sha256("amm-swap-relay" ‖ id)[0..16], signature}` signed BRC-169's way through the `wallet` import (`createSignature`, `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone, over sha256 of the record without `signature`), and the body `{tx: <one V2 BEEF: the funding transaction's ancestry from its BEEF, the funding transaction (unproven), the swap>, pool}`. The pool's own ancestry is not sent: the validator holds the pool (it is its overlay). `topic` (0.31.0) is this instance's token topic `tm_color_<assetId>` (head `amm/token`'s `tokenId`, `names.overlayOf`), at the frame's top level outside the signed record: the validator's host runs several instances on one libp2p node and picks the one a stream is for by the first frame's `topic` (skein `src/host/p2p.ts` `streamHandle`); without it such a host answers `topic required` and the swap times out.
-
-## The pool deploy through the relay (`amm.pool/1`) — gone in 0.11.0
-
-As 0.9.0–0.10.2 had it (superseded by "0.11.0" above):
-
-The LP's own skein carries a pool deploy to the pool's validator the same way (web/ui src/lp/poolDeploy.ts and poolRelay.ts; docs/notes.md 2026-10-02 "Swap funding and signing" applied to the deploy). The page builds the **funding transaction** (`createAction` with `noSend`: one exact output, the pool's sats + the deploy's miner fee) and the **deploy** (the LP's token inputs, then the funding output; output 0 the pool, ValidatorPubKey the validator identity's anyone-child for the first token input; every input signed by the LP), and hands both to its skein. Nobody signs a deploy but the LP: the validator consents and submits it to its own overlay, whose chain app broadcasts the funding parent with it.
-
-```
-amm.pool.submit   writes: true
-  args    {funding: bytes, deploy: bytes, validator: bytes, peerId: string, expires: ms}
-  answer  the record (below)
-amm.pool.status   writes: false
-  args    {id: string}
-  answer  the record                      error `not_found`
-record    {id: string, status: string, funding: bytes, deploy: bytes, pool: string, validator: bytes,
-           expires: ms, created: ms, updated: ms, tx?: bytes, txid?: string, reason?: string, detail?: string}
-status    pending | accepted (tx: the deploy itself, txid: its txid) | refused (the validator's reason, detail)
-          | timeout | failed
-```
-
-- `funding`: the funding transaction, raw or a BEEF (the wallet's AtomicBEEF) whose subject it is.
-- `deploy`: the deploy as a BEEF (AtomicBEEF, V1, V2) whose subject it is, carrying the funding transaction and the token inputs' source transactions. `id` is sha256 of the deploy's raw bytes (hex); `pool` in the record is `<deploy txid>_0`.
-- `validator`: the pool's ValidatorIdentity (33 bytes); `expires`: ms since the epoch.
-
-**Checks** (`relay.checkDeploy`; a refusal is the function's error, `failed`, message `<reason>[: <detail>]`, nothing written): `bad_validator`, `expired`, `bad_funding`, `bad_deploy` (not a BEEF whose subject is a transaction; a raw deploy; a pool at an output other than 0); `not_a_pool` (output 0 is not a pool as the pool checks see one (`pool.check`): a BRC-162 value output whose lock parses as the Pool, its prefix id the 32-byte AssetId and its amount the TokenReserve; detail which); `wrong_validator` (ValidatorIdentity is not `validator`); `funding_not_spent` (no input spends an output of the funding transaction); `funding_unsigned`, `deploy_unsigned` (an input with no unlocking script); `missing_parent` (an input other than the funding's whose source transaction is not in the deploy's BEEF, or is there by txid only); `no_token_input` (no input spends an output of the pool's token, 1Color's `bsv21.tokenOf`); `wrong_validator_key` (ValidatorPubKey is not the identity's anyone-child for the first token input's outpoint, `pool.validatorKey`: the derivation amm-validator checks, refused here before dialling); then `bad_peer`.
-
-**Submit** records `{kind: "amm-pool", status: "pending", …}` in the app's state map `pools` and launches the relay thread (`{kind: "amm-pool-relay", id}`), which runs the swap's steps (above) on `/amm-validator/1/deploy`. **The package**: box `deploy`, nonce sha256("amm-pool-relay" ‖ id)[0..16], body `{tx: <one V2 BEEF>, pool: 0}`: the deploy's BEEF as received (its entries and BUMPs, the deploy last as its subject), with the funding transaction's BEEF (its ancestry) merged in first when the deploy's does not carry the funding transaction (`relay.deployBeef`). **The answer**: `{ok: true, txid}` (the deploy admitted in the validator's overlay) → `accepted`, `tx` the deploy's raw bytes and `txid` its txid; an answer naming another txid, or a `tx` other than the deploy, is `failed` (`bad_reply`). `{ok: false, reason, detail?}` → `refused`. The same deploy again answers its record (a `/call` waits while it is pending); one that timed out or failed is relayed again. Declared in `etc/app.json` as a second `provides` entry, interface `amm.pool/1`.
-
-## AddLiquidity through the relay (`amm.liquidity/1`)
-
-The LP's own skein carries an AddLiquidity to the pool's validator (docs/notes.md 2026-10-02 "Swap funding and signing" applied to AddLiquidity). The page builds the **funding transaction** (`createAction` with `noSend`: one exact output, the sats added + the add's miner fee - the token inputs' sats) and the **add** (input 0 the pool with `AddLiquidity(lpSig, validatorSig, nextLpPubKey, nextValidatorPubKey, addBsv, addTokens)`, the LP's slot signed by the pool's LpPubKey and the validator's `OP_0`; the LP's token inputs and the funding output, each signed; output 0 the continuation, no change), and hands both to its skein. The validator signs last and submits the add to its overlay, whose chain app broadcasts the funding parent with it.
-
-```
-amm.liquidity.submit   writes: true
-  args    {funding: bytes, add: bytes, pool: string, validator: bytes, peerId: string, expires: ms}
-  answer  the record (below)
-amm.liquidity.status   writes: false
-  args    {id: string}
-  answer  the record                      error `not_found`
-record    {id: string, status: string, funding: bytes, add: bytes, pool: string, validator: bytes,
-           expires: ms, created: ms, updated: ms, tx?: bytes, txid?: string, reason?: string, detail?: string, poolState?: map}
-status    pending | accepted (tx: the validator-signed add, txid: its txid) | refused (the validator's reason, detail,
-          poolState) | timeout | failed
-```
-
-- `funding`: the funding transaction, raw or a BEEF (the wallet's AtomicBEEF) whose subject it is.
-- `add`: the add as a BEEF (AtomicBEEF, V1, V2) whose subject it is, carrying the funding transaction and the token inputs' source transactions (the pool's source may be there too; it is read from there, else from this instance's own overlay). `id` is sha256 of the add's raw bytes (the validator's slot empty), hex.
-- `pool`: the outpoint input 0 spends, `<txid>_<vout>`; `validator`: the pool's ValidatorIdentity (33 bytes); `expires`: ms since the epoch.
-
-**Checks** (`relay.checkAdd`, against pool/Pool.runar.go's `AddLiquidity`; a refusal is the function's error, `failed`, message `<reason>[: <detail>]`, nothing written): `bad_validator`, `expired`, `bad_funding`, `bad_add` (not a BEEF whose subject is a transaction; a raw add; fewer than two inputs), `bad_pool`; `pool_not_input_0`; `funding_not_spent`; `funding_unsigned`, `add_unsigned` (an input other than the pool's with no unlocking script); `not_add_liquidity` (the pool call's method index is not AddLiquidity, 1); `bad_call` (not Rúnar's 11 pushes; nextLpPubKey / nextValidatorPubKey not a compressed key; addBsv + addTokens = 0; a change amount without a 20-byte `_changePKH`); `signature_slot_not_empty` (the validator's slot); `lp_unsigned` (the LP's slot empty: the LP signs before the relay); `missing_parent` (an input other than the pool's and the funding's whose source is not in the add's BEEF or there by txid only; or the pool's source neither in the BEEF nor held here); `not_a_pool` (input 0 does not spend a pool as the pool checks see one (`pool.check`)); `wrong_validator` (the spent pool's ValidatorIdentity is not `validator`); `wrong_validator_key` (nextValidatorPubKey is not the identity's anyone-child for the pool outpoint: the validator's convention, refused before dialling); `bad_outputs` (output 0 the continuation: the pool's code and readonly fields, satoshis = the pool's + addBsv, TokenReserve = the pool's + addTokens, LpPubKey = nextLpPubKey, ValidatorPubKey = nextValidatorPubKey; then Rúnar's P2PKH change only when `_changeAmount > 0`; nothing else: the contract has no fee and no commission on AddLiquidity; detail which); then `bad_peer`.
-
-**Submit** records `{kind: "amm-liquidity", status: "pending", …}` in the app's state map `liquidity` and launches the relay thread (`{kind: "amm-liquidity-relay", id}`), which runs the swap's steps (above) on `/amm-validator/1/addLiquidity`. **The package**: box `addLiquidity`, nonce sha256("amm-liquidity-relay" ‖ id)[0..16], body `{tx: <one V2 BEEF>, pool}`: the add's BEEF as received, the funding transaction's merged in first when the add's does not carry it (`relay.deployBeef`). **The answer**: `{ok: true, tx, txid}` → `accepted`, but only if `tx` is the add with the validator's signature in its slot and every other byte as the LP sent it (`relay.signedAdd`) and `txid` (when given) is its txid; else `failed` (`bad_reply`). `{ok: false, reason, detail?, txid?, pool?}` → `refused`, `poolState` the validator's `pool`. The same add again answers its record (a `/call` waits while it is pending); one that timed out or failed is relayed again. Declared in `etc/app.json` as a third `provides` entry, interface `amm.liquidity/1`.
-
-### The app's head
-
-The app's state is `{kind: "amm-app-state", swaps: <MST: id → swap record>, pools: <MST: id → deploy record>, liquidity: <MST: id → AddLiquidity record>}` under the app's root head `amm/app` (an app's heads are `<app>/…`; `relay.app_head`, checked against skein-sdk's `app.headOf`): the installed app record's `state` (APPS.md §1: the head's root with `state` replaced), or, on an instance wired by its genesis (no app record at `amm/app`), the head's root itself. The record kept there adds the relay's own fields (`peer`, `dial`, `stream`, `thread`, `request`), which the answer leaves out.
 
 ### The market record (0.16.0)
 
@@ -391,18 +306,14 @@ etc/dispatch.json  {transport: "libp2p", address: "tm_color_<txid>_0-live",    s
 address book     the `libp2p` and `cron` providers (the node host seeds them)
 ```
 
-The write scope: `amm/p2p` (this state) and `amm/app` (the relay); an installed app advances only heads named `amm/…`. The state head is `amm/p2p` (`relay.p2p_head`). `ammP2p.topics` defaults to every served `tm_color_<txid>_0` topic. `peerId` is needed only for the heartbeat (a validator); a mistyped value makes every heartbeat `WrongPeer` at the receivers. State under the head `amm/p2p`: `{kind: "amm-p2p-state", maps: {live, cursor}}`.
+The write scope: `amm/p2p` (this state) and `amm/app`; an installed app advances only heads named `amm/…`. The state head is `amm/p2p` (`interface.p2p_head`). `ammP2p.topics` defaults to every served `tm_color_<txid>_0` topic. `peerId` is needed only for the heartbeat (a validator); a mistyped value makes every heartbeat `WrongPeer` at the receivers. State under the head `amm/p2p`: `{kind: "amm-p2p-state", maps: {live, cursor}}`.
 
 ## Open
 
 The end-to-end runs below are amm-poc's (its deploy/README.md); this port is tested natively only.
 
-- **The pool deploy, end to end (deploy/README.md "Pool deploy through the relay"):** amm2 relayed a deploy of a pool amm3 validates; `amm.pool.submit` answered `accepted` in one `/amm/call` (279 ms), the relay thread's three steps each advancing `amm/app`; amm3 broadcast the funding then the deploy and both instances index the pool. Not exercised: the message path (box `amm`) for `amm.pool.submit`, a refusal or a timeout from a live validator (natively only).
-- **AddLiquidity, end to end (deploy/README.md "AddLiquidity through the relay"):** amm2 relayed an AddLiquidity of the pool amm3 validates; `amm.liquidity.submit` answered `accepted` with the validator-signed add in one `/amm/call` (401 ms), the relay thread's three steps each advancing `amm/app`; amm3 broadcast the funding then the add, both instances admitted it (amm2 by gossip) and index the increased reserves. Not exercised live: the message path (box `amm`), the held-pool fallback (the page's AtomicBEEF carries the pool's source), a refusal or a timeout from a live validator (natively only).
-- **Run end to end once (2026-10-02, deploy/README.md "The relay round trip"):** amm2 relayed a swap against a pool amm3 validates; the record went pending → accepted in one `/amm/call` (456 ms), every advance under `amm/app`, amm3 broadcast the funding parent then the swap, both instances admitted it. Natively: the checks over pairs built from the fixtures, the BEEF, the package (verified with skein-sdk's `message.problem`, as the validator does), the record's lifecycle over faked provider answers, the dispatch by app.json. The VM path (the route's `{wait: true}` and `resolved`, the launched thread, the dial by peer ID, the `wallet` import signing under `[2, "metanet handles envelope"]`, advancing the head `amm/app`) needs a running instance.
 - **The SDK's dispatch helper answers in the step** (`app.serve`: the `/call` route answers at once, a message is answered at the end of its step). A function whose answer depends on later steps (a peer's reply) is outside it, so this program runs its own `/call` and message wrappers around `app.run` (the same checks, codes and answer shapes) with one addition: `amm.swap.submit` waits on its relay thread.
 - **No app record under a genesis-wired node**: the declarations come from `defaults.ammProvides` and the state is the head `amm/app`'s root itself (above).
-- **A timeout is not a refusal**: the validator may still answer (and submit) after `expires`; the record says `timeout`, and the late answer runs nothing.
 
 - **No first step.** The schedule cannot start itself (above): an install-time or start-time step for an app is not in skein's contract.
 - **Overlapping passes.** Each catch-up tick launches its own thread; a pass still resting when the next tick comes runs beside it (both ask, the first answer proves, the second finds nothing new). With the defaults a pass is bounded by `batch` × 3 peers × `replyTimeoutMs` = 9 min < `catchupSeconds`.
