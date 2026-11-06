@@ -227,7 +227,7 @@ const Fx = struct {
     cfg: validator.Config,
 
     fn raw(self: *Fx, name: []const u8) []const u8 {
-        inline for (.{ "fund", "token_deploy", "pool_deploy", "pool_deploy_unaffirmed", "pool_deploy_forged", "pool_deploy_own_key", "swap_bsv_in", "swap_bad_next", "swap_tokens_in", "close", "rescind", "close_rescinded" }) |n| {
+        inline for (.{ "fund", "token_deploy", "pool_deploy", "pool_deploy_unaffirmed", "pool_deploy_forged", "pool_deploy_own_key", "swap_bsv_in", "swap_bad_next", "swap_tokens_in", "swap_token_change", "close", "rescind", "close_rescinded" }) |n| {
             if (std.mem.eql(u8, n, name)) return unhex(self.a, @field(vec, n));
         }
         @panic("no fixture");
@@ -883,6 +883,54 @@ test "sign: a tokens-in swap (the key rotated once already)" {
     try testing.expectEqualSlices(u8, want, r.ok.tx.?);
 }
 
+test "sign (0.40.0): a tokens-in swap with token change — the change output after the fees, exactly the call's amount to the call's key, 1 sat; refused bad_outputs when it is not" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try Fx.init(a, &.{ "fund", "token_deploy", "pool_deploy", "swap_bsv_in" });
+    const want = f.raw("swap_token_change");
+    const op: Outpoint = .{ .txid = txidOf(f.raw("swap_bsv_in")), .vout = 0 };
+    const req = try request(a, want, 0);
+    const tx = try Transaction.parse(a, req);
+    // pool, payout, LP fee, validator fee, commission, the token change, the sats change
+    try testing.expectEqual(@as(usize, 7), tx.outputs.len);
+    const tc = brc162.decode(tx.outputs[5].locking_script.bytes).?;
+    try testing.expectEqual(@as(u64, vec.swap_token_change_tokens), tc.amount);
+    try testing.expectEqual(@as(i64, 1), tx.outputs[5].satoshis);
+    const call = (try unlock.parseCall(a, tx.inputs[0].unlocking_script.bytes, .swap)).?;
+    const args = validator.swapArgs(call).?;
+    try testing.expectEqual(@as(u64, vec.swap_token_change_tokens), args.token_change);
+    try testing.expectEqual(@as(u64, vec.swap_token_change_amount_in), args.amount_in);
+
+    try f.oracle.record(a, want, 0);
+    const r = try f.spend(.swap, req, op);
+    try testing.expect(r == .ok);
+    try testing.expectEqualSlices(u8, want, r.ok.tx.?);
+    f.oracle.calls = 0;
+
+    const S = struct {
+        fn expectBad(fx: *Fx, raw: []const u8, o: Outpoint, detail: []const u8) !void {
+            const rr = try fx.spend(.swap, raw, o);
+            try expectRefused(rr, .bad_outputs);
+            try testing.expect(std.mem.indexOf(u8, rr.refused.detail.?, detail) != null);
+        }
+    };
+    // The call names another amount (9,999) than output 5 holds.
+    try S.expectBad(f, try withPoolArg(a, req, 7, &.{ 0x0f, 0x27 }), op, "the token change");
+    // The call names another key than output 5 pays.
+    try S.expectBad(f, try withPoolArg(a, req, 6, &(.{0xc0} ** 20)), op, "the token change");
+    // The token change output with 2 sats.
+    var outs = try a.dupe(bsvz.transaction.Output, tx.outputs);
+    outs[5].satoshis = 2;
+    var t2 = tx;
+    t2.outputs = outs;
+    try S.expectBad(f, try t2.serialize(a), op, "the token change");
+    // The call names no token change (0) while output 5 is there: past the contract's (the sats change is not output 5).
+    const r0 = try f.spend(.swap, try withPoolArg(a, req, 7, &.{}), op);
+    try expectRefused(r0, .bad_outputs);
+    try testing.expectEqual(@as(usize, 0), f.oracle.calls);
+}
+
 test "sign: the current key (0.13.0): a deploy's keyed by its nonce (it attests itself), a Swap's continuation's by the pool outpoint the Swap spent; none for a pool that is neither, or rescinded" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1489,13 +1537,13 @@ fn relayPair(a: std.mem.Allocator, f: *Fx, funding_sig: FundingSig) !RelayPair {
     const pre = try unlock.preimage(a, &s, 0, unlock.poolScriptCode(lock).?, pool_sats, unlock.sighash_all_forkid);
     const call = (try unlock.parseCall(a, base.inputs[0].unlocking_script.bytes, .swap)).?;
     // _codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-    // commissionPkh, _changePKH, _changeAmount, txPreimage, methodIndex.
+    // commissionPkh, tokenChangePkh, tokenChange, _changePKH, _changeAmount, txPreimage, methodIndex.
     try testing.expectEqualSlices(u8, &key20(vec.commission_pkh), call.arg(5).data);
     var script: std.ArrayList(u8) = .empty;
     for (call.pushes, 0..) |p, i| try script.appendSlice(a, switch (i) {
         1 => &.{0}, // validatorSig: the slot, empty
-        8 => &.{0}, // _changeAmount = 0: no change output
-        9 => try unlock.pushData(a, pre),
+        10 => &.{0}, // _changeAmount = 0: no change output
+        11 => try unlock.pushData(a, pre),
         else => call.script[p.start..p.p.next],
     });
     ins[0].unlocking_script = bsvz.script.Script.init(script.items);
@@ -1969,6 +2017,64 @@ test "terms (0.15.0, David 2026-10-23): a runtime record root sets — root's fn
     try testing.expectEqual(p.set, terms.fromRecord(rec).?);
     try testing.expect(terms.fromRecord(.null) == null);
 }
+
+test "terms (0.40.0): minLegSats — optional, absent or 0 none; the record carries it only when nonzero; a non-integer refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const terms = @import("terms");
+    const base = [_]cbor.Entry{
+        .{ .key = "lpFeeBps", .value = .{ .uint = 30 } },
+        .{ .key = "validatorFeeBps", .value = .{ .uint = 5 } },
+        .{ .key = "commissionBps", .value = .{ .uint = 25 } },
+    };
+    const none = terms.parseArgs(.{ .map = try a.dupe(cbor.Entry, &base) });
+    try testing.expectEqual(@as(u64, 0), none.set.min_leg_sats);
+    try testing.expect((try terms.record(a, none.set)).get("minLegSats") == null);
+    const with = terms.parseArgs(.{ .map = try std.mem.concat(a, cbor.Entry, &.{ &base, &.{.{ .key = "minLegSats", .value = .{ .uint = 10_000 } }} }) });
+    try testing.expectEqual(@as(u64, 10_000), with.set.min_leg_sats);
+    const rec = try terms.record(a, with.set);
+    try testing.expectEqual(@as(u64, 10_000), rec.get("minLegSats").?.uint);
+    try testing.expectEqual(with.set, terms.fromRecord(rec).?);
+    const zero = terms.parseArgs(.{ .map = try std.mem.concat(a, cbor.Entry, &.{ &base, &.{.{ .key = "minLegSats", .value = .{ .uint = 0 } }} }) });
+    try testing.expectEqual(none.set, zero.set);
+    try testing.expect(terms.parseArgs(.{ .map = try std.mem.concat(a, cbor.Entry, &.{ &base, &.{.{ .key = "minLegSats", .value = .{ .text = "10" } }} }) }) == .bad);
+}
+
+test "minimum leg (0.40.0): the validator refuses below_minimum a leg whose sats side is under minLegSats — the amount in on a buy, the payout on a sell; at the minimum it signs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A buy: 20,000 sats in.
+    const f = try Fx.init(a, &.{ "fund", "token_deploy", "pool_deploy" });
+    const req = try request(a, f.raw("swap_bsv_in"), 0);
+    const op: Outpoint = .{ .txid = txidOf(f.raw("pool_deploy")), .vout = 0 };
+    f.cfg.terms.?.min_leg_sats = 20_000;
+    try testing.expect((try f.spend(.swap, req, op)) == .ok);
+    const calls = f.oracle.calls;
+    f.cfg.terms.?.min_leg_sats = 20_001;
+    const r = try f.spend(.swap, req, op);
+    try expectRefused(r, .below_minimum);
+    try testing.expect(std.mem.indexOf(u8, r.refused.detail.?, "20001") != null);
+    try testing.expectEqualStrings("below_minimum", (try messages.replyValue(a, r)).getText("reason").?);
+    try testing.expectEqual(calls, f.oracle.calls);
+
+    // A sell: the payout, the pool's sats out.
+    const g = try Fx.init(a, &.{ "fund", "token_deploy", "pool_deploy", "swap_bsv_in" });
+    const want = g.raw("swap_tokens_in");
+    const sreq = try request(a, want, 0);
+    const sop: Outpoint = .{ .txid = txidOf(g.raw("swap_bsv_in")), .vout = 0 };
+    const payout: u64 = @intCast((try Transaction.parse(a, want)).outputs[1].satoshis);
+    try testing.expect(payout < 50_000); // the amount in (tokens) is not what is measured
+    g.cfg.terms.?.min_leg_sats = payout + 1;
+    try expectRefused(try g.spend(.swap, sreq, sop), .below_minimum);
+    g.cfg.terms.?.min_leg_sats = payout;
+    try g.oracle.record(a, want, 0);
+    const ok = try g.spend(.swap, sreq, sop);
+    try testing.expect(ok == .ok);
+    try testing.expectEqualSlices(u8, want, ok.ok.tx.?);
+}
+
 
 test "no terms (0.15.0): a market only — a swap and an affirm refused not_validating, \"no terms: this skein validates nothing\", before anything is checked or signed" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

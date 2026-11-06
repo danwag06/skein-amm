@@ -37,6 +37,9 @@
 //!   trades, candles, stats
 //!                   the history reads (0.36.0, reads.zig `historyRead`): /trades (H1), /candles
 //!                   (H2), /stats (H3), over the pool lookup's trade rows
+//!   poolsAt, poolsHistory
+//!                   the pool history reads (0.40.0): /pools/at?t= (every pool listed at t), /pools/history
+//!                   (the events of a window), over the lookup's `history` and `closes`
 //!   amm.swap.submit, amm.swap.status, amm.swap.terms   an in-VM call of the interface amm.swap/1 (relay.zig)
 //!   amm.pool.terms, amm.pool.affirm   an in-VM call of the interface amm.pool/1 (the validator's terms,
 //!                   0.9.0; the affirmation of a proposed pool, 0.11.0: amm-validator's fn `affirm`
@@ -322,7 +325,7 @@ fn spendsRead(a: Allocator, in: Value, arg: Value) !Value {
 }
 
 /// The public read routes' functions (0.34.0; the manifest's filters name them).
-const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps, trades, candles, stats };
+const Read = enum { poolsBeef, positions, validatorFees, commissionFees, readTerms, tx, swaps, trades, candles, stats, poolsAt, poolsHistory };
 
 /// One public read (reads.zig): P3 to P7, P9, P10.
 fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
@@ -342,12 +345,14 @@ fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
         .trades => .trades,
         .candles => .candles,
         .stats => .stats,
+        .poolsAt => .poolsAt,
+        .poolsHistory => .poolsHistory,
         else => null,
     };
     if (hist) |h| return reads.historyRead(a, &svc, st.ch, st.map("placed"), token, h, q, @intCast(st.now));
     const list = switch (r) {
-        .poolsBeef => "lp",
-        .positions => "lp",
+        .poolsBeef => "pool",
+        .positions => "pool",
         .validatorFees => "id",
         .commissionFees => "pkh",
         else => unreachable,
@@ -362,7 +367,7 @@ fn publicRead(a: Allocator, in: Value, arg: Value, r: Read) !Value {
     }
     const ks = keys orelse return reads.httpError(a, 400, try std.fmt.allocPrint(a, "want ?{s}=k1,k2", .{list}));
     const field = switch (r) {
-        .positions => "lpPubKeys",
+        .positions => "poolIds",
         .validatorFees => "validatorIdentityKeys",
         .commissionFees => "commissionPkhs",
         else => unreachable,
@@ -387,6 +392,7 @@ fn termsRead(a: Allocator, in: Value) !Value {
         .lp_fee_bps = @intCast(tt.lp_fee_bps),
         .validator_fee_bps = @intCast(tt.validator_fee_bps),
         .commission_bps = @intCast(tt.commission_bps),
+        .min_leg_sats = tt.min_leg_sats,
     } else null;
     const com = try commissionKey(a);
     const m = try marketNow(a);

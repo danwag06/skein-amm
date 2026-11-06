@@ -84,11 +84,13 @@ order) ‖ vout, big-endian u32:
 |---|---|---|
 | `pools` | `tp ‖ outpoint → record` (a CID link) | an unspent listed pool output the topic admitted (0.13.0: a self-attesting pool, or a Swap's continuation of a listed pool naming the next key) |
 | `byValidator` | `validatorIdentityKey (33 bytes) ‖ tp ‖ outpoint → null` | a set index for the validator queries; from 0.33.0 a spent pool keeps its row (only `rejected` removes it), `{validatorIdentityKey}` filtering to the live ones |
-| `byLp` (0.33.0) | `lpPubKey (33 bytes) ‖ tp ‖ outpoint → null` | every listed pool of an LP key, live and spent; only `rejected` removes it |
-| `rescinded` (0.33.0) | `tp ‖ lpPubKey → pool record` (a CID link, as `pools`) | the output a validator's Rescind of a listed pool of that key wrote (not listed); removed when the Rescind is rejected |
+| `byPool` (0.40.0, was `byLp`) | `tp ‖ poolId (36 bytes) ‖ outpoint → null` | every listed hop of a pool, live and spent; only `rejected` removes it |
+| `rescinded` (0.33.0; 0.40.0 by pool id) | `tp ‖ poolId → pool record` (a CID link, as `pools`) | the output a validator's Rescind of a listed pool wrote (not listed), its record keeping the pool's id; removed when the Rescind is rejected |
 | `spentPools` | `tp ‖ outpoint → record` (a CID link) | a checked pool a spend consumed, kept for `rejected` to give back and for `{outpoint}` to follow |
-| `fees` (0.33.0) | `tp ‖ lpPubKey (33 bytes) ‖ swap txid → fee row` (a CID link) | one row per Swap admitted, under its pool's LP key: `{kind: "amm-swap-fees", lp, validator, commission, bsvIn, commissionPkh}` (0.36.0: the TRADE ROW, `{kind: "amm-trade", …, txid, lpPubKey, side, amountIn, amountOut, bsvReserve, tokenReserve, at}`, docs/AMM.md "The history reads"), the three fees in the input asset (src/pool.zig `feesOf`, the outputs where the relay's pair check finds them) |
-| `trades` (0.36.0) | `tp ‖ at (u64 BE, ms) ‖ swap txid → the same trade row` | every Swap admitted from 0.36.0 on, in time order (`at` the admitting step's time); read by `/trades`, `/candles`, `/stats` |
+| `fees` (0.33.0; 0.40.0 by pool id) | `tp ‖ poolId (36 bytes) ‖ swap txid → the Swap's event` (a CID link) | one row per Swap admitted, under its pool's id: the Swap's EVENT RECORD (below), carrying the trade's fields `{lp, validator, commission, bsvIn, commissionPkh, side, amountIn, amountOut, payoutPkh}`, the three fees in the input asset (src/pool.zig `feesOf`, the outputs where the relay's pair check finds them) |
+| `trades` (0.36.0) | `tp ‖ at (u64 BE, ms) ‖ swap txid → the same event` | every Swap admitted, in time order (`at` the admitting step's time); read by `/trades`, `/candles`, `/stats` |
+| `history` (0.40.0) | `tp ‖ poolId ‖ at (u64 BE) ‖ seq (u64 BE) → event` | every deploy, Swap, close and rescind of a pool, in time order, rows at one time in event order (seq: the swap count for a deploy or a Swap, + 1 for a close or a rescind); read by `/pools/at`, `/pools/history`, `/trades?pool=` |
+| `closes` (0.40.0) | `tp ‖ at (u64 BE) ‖ poolId → the close's or rescind's event` | the pools' ends in time order: a read at `t` touches only the live pools and the pools closed from `t` on |
 | `byCommission` (0.33.0) | `commissionPkh (20 bytes) ‖ tp ‖ swap txid → the same fee row` | the Swaps that paid a commission (not 0) to that key hash |
 
 The fee rows exist for Swaps admitted from 0.33.0 on: a Swap admitted
@@ -97,19 +99,33 @@ continuation; `rejected` removes them.
 
 The record (`{kind: "amm-pool", txid, vout, bsvReserve, tokenReserve,
 liquidityFeeBps, validationFeeBps, commissionBps, lpPubKey,
-validatorIdentityKey, admittedAt}`) carries every field `pool.zig` parses
-but the rotating ValidatorPubKey. `admittedAt` is always `null`: a hook has
-no time source.
+validatorIdentityKey, poolId, swaps, admittedAt}`) carries every field `pool.zig` parses
+but the rotating ValidatorPubKey. 0.40.0 (David Case 2026-11-05): `poolId` is the
+pool's id, its deploy's outpoint (36 bytes, as the index keys outpoints),
+assigned at the deploy and copied forward at each admitted Swap; `swaps` 0 at
+the deploy, +1 per Swap, copied forward; `admittedAt` the admitting step's time
+(ms, `now_ms`). The LP public key is a field, a lookup key nowhere.
+
+The event record (0.40.0): `{kind: "deploy"|"swap"|"close"|"rescind", poolId,
+txid, at, swaps, outpoint?, bsvReserve?, tokenReserve?, lpPubKey,
+liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey}` — the
+outpoint and reserves the pool's after the event (none for a close); a Swap's
+carries the trade's fields too, ONE record under `history`, `fees` and
+`trades`. Nothing derived is stored.
 
 **The hooks**:
 - `admitted`: run the pool checks; when they pass, index each output in
   `outputsToAdmit` that is a pool. When they fail, index nothing (the
   reason has no place in the contract: a hook returns `void`).
 - `spent`: move the spent pool from `pools` to `spentPools`. The
-  continuation arrives through its own `admitted` call.
+  continuation arrives through its own `admitted` call. 0.40.0: when the
+  spender (the hook's fifth argument) lists no continuation of that pool and
+  is not its Rescind, the pool's `close` event.
 - `rejected`: drop the transaction's own pools (live or spent) and move
   each pool it had spent from `spentPools` back to `pools`, as it was
-  indexed when first admitted.
+  indexed when first admitted; 0.40.0: every row it wrote goes (its Swap's
+  fee, trade and commission rows, its pools' `byPool` and events, the close or
+  rescind it wrote for a pool it spent).
 
 ## Queries (`/lookup`, service `ls_amm_<assetId>`)
 
@@ -136,19 +152,19 @@ The fee queries (0.33.0) take a list and answer one record per key, in the
 list's order; an unknown key answers zeros. From the fee rows only, so for
 Swaps admitted from 0.33.0 on:
 
-- `{tokenId, lpPubKeys: [<hex 33>]}` → `[{lpPubKey, status, outpoint?,
-  current?, sats, tokens, swaps}]`: the LP fees of the pool of that LpPubKey
-  (`sats` from sats-in Swaps, `tokens` from token-in) and its state:
-  `status: "live"` with `outpoint` and `current` (`PoolState` shape), found
-  through `byLp` (its pools, the live one in `pools`); `"rescinded"` with
-  `outpoint` and `current` (the Rescind's output and its pool state, what
-  the LP's Close takes back) when the
-  key's `rescinded` record names an output the chain state has unspent;
-  else `"closed"` (the Close spent it, or no pool of the key here);
+- `{tokenId, poolIds: ["<txid>_<vout>"]}` (0.40.0, replaces `{lpPubKeys}`)
+  → `[{poolId, lpPubKey, status, outpoint?, current?, sats, tokens, swaps}]`:
+  the LP fees of that pool (`sats` from sats-in Swaps, `tokens` from
+  token-in) and its state: `status: "live"` with `outpoint` and `current`
+  (`PoolState` shape), found through `byPool` (its hops, the live one in
+  `pools`); `"rescinded"` with `outpoint` and `current` (the Rescind's output
+  and its pool state, what the LP's Close takes back) when the id's
+  `rescinded` record names an output the chain state has unspent; else
+  `"closed"` (the Close spent it, or no pool of the id here: `lpPubKey` null);
 - `{tokenId, validatorIdentityKeys: [<hex 33>]}` →
   `[{validatorIdentityKey, sats, tokens, swaps, pools}]`: the validator fees
   over the rows of all its pools, closed included (`byValidator` → each
-  pool's LpPubKey → its rows); `pools` the distinct pools (LP keys) counted;
+  pool's id → its rows); `pools` the distinct pools counted;
 - `{tokenId, commissionPkhs: [<hex 20>]}` → `[{commissionPkh, sats, tokens,
   swaps}]`: the commissions the Swaps naming that key hash paid
   (`byCommission`).
@@ -157,7 +173,8 @@ Swaps admitted from 0.33.0 on:
 
 ```ts
 interface PoolState {
-  lpPubKey: string;        // 0.34.0: the pool's LpPubKey (hex), its id
+  poolId: string;          // 0.40.0: the pool's id, its deploy's outpoint `<txid>_<vout>`
+  lpPubKey: string;        // 0.34.0: the pool's LpPubKey (hex)
   outpoint: string;
   bsvReserve: bigint;
   tokenReserve: bigint;
@@ -165,6 +182,7 @@ interface PoolState {
   validationFeeBps: bigint;
   commissionBps: bigint;   // the Pool's CommissionBps (the relay's commission)
   validatorIdentityKey: string;
+  swaps: number;           // 0.40.0: the pool's Swaps so far
 }
 ```
 

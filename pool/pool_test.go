@@ -49,6 +49,7 @@ type fixture struct {
 	code          []byte // compiled code with readonly args spliced in (no state)
 	userPkh       []byte
 	commissionPkh []byte // the relay's payout address, passed per swap
+	changePkh     []byte // the taker's token change key hash (0.40.0), passed per swap
 	lpFeeBps      int64
 	validatorBps  int64
 	commissionBps int64
@@ -71,6 +72,7 @@ func newFixture(t *testing.T, lpFeeBps, validatorBps, commissionBps int64) *fixt
 	f := &fixture{
 		userPkh:       bytes.Repeat([]byte{0x33}, 20),
 		commissionPkh: bytes.Repeat([]byte{0x44}, 20),
+		changePkh:     bytes.Repeat([]byte{0x55}, 20),
 		lpFeeBps:      lpFeeBps,
 		validatorBps:  validatorBps,
 		commissionBps: commissionBps,
@@ -347,7 +349,9 @@ func (f *fixture) expectSwap(p pool, amountIn int64, bsvIn bool) swapResult {
 	return r
 }
 
-// swapCall builds a swap paying the commission (if any) to f.commissionPkh.
+// swapCall builds a swap paying the commission (if any) to f.commissionPkh,
+// with no token change (tokenChange 0: f.changePkh named, no output) and no
+// sats change.
 func (f *fixture) swapCall(p pool, amountIn int64, bsvIn bool, r swapResult) call {
 	// Fees are paid to the keys current at this spend.
 	outs := []out{{r.newBsv, f.poolScript(r.pool(p))}}
@@ -374,7 +378,7 @@ func (f *fixture) swapCall(p pool, amountIn int64, bsvIn bool, r swapResult) cal
 	return call{
 		method: methodSwap,
 		args: [][]byte{nil, pushData(r.nextValidator.PubKey().Compressed()), pushNum(amountIn), pushBool(bsvIn),
-			pushData(f.userPkh), pushData(f.commissionPkh)},
+			pushData(f.userPkh), pushData(f.commissionPkh), pushData(f.changePkh), pushNum(0)},
 		outs:     outs,
 		signers:  []*ec.PrivateKey{p.validator},
 		sigSlots: []int{0},
@@ -840,6 +844,91 @@ func TestSwapZeroCommission(t *testing.T) {
 		t.Run(name+": a zero-value commission output is rejected", func(t *testing.T) {
 			c := f.swapCall(p, 20_000, bsvIn, r)
 			c.outs = append(c.outs, out{0, p2pkh(f.commissionPkh)})
+			mustFail(t, f.run(t, p, c))
+		})
+	}
+}
+
+// withChange is a swap call with tokenChange tokens to f.changePkh (the output
+// after the fees, when nonzero) and sats change to satsPkh (Rúnar's change, the
+// last output, when nonzero).
+func (f *fixture) withChange(c call, tokenChange int64, satsPkh []byte, sats int64) call {
+	c.args = append([][]byte{}, c.args...)
+	c.args[len(c.args)-1] = pushNum(tokenChange)
+	if tokenChange != 0 {
+		c.outs = append(append([]out{}, c.outs...), out{1, tokenP2pkh(tokenChange, f.changePkh)})
+	}
+	if sats != 0 {
+		c.outs = append(c.outs, out{sats, p2pkh(satsPkh)})
+		c.change = &struct {
+			pkh  []byte
+			sats int64
+		}{satsPkh, sats}
+	}
+	return c
+}
+
+// The taker's token change (skein-amm 0.40.0): Swap writes one more token
+// output, tokenChange tokens to tokenChangePkh (1 sat), after the commission and
+// before Rúnar's sats change, exactly when tokenChange is nonzero.
+func TestSwapChange(t *testing.T) {
+	f := newFixture(t, 30, 5, 10)
+	p := pool{bsv: 1_000_000, tokens: 5_000_000, lp: key(t, 10), validator: key(t, 20)}
+	satsPkh := pkh(key(t, 70))
+	for _, bsvIn := range []bool{true, false} {
+		name := map[bool]string{true: "bsv in", false: "tokens in"}[bsvIn]
+		r := f.expectSwap(p, 20_000, bsvIn)
+		base := f.swapCall(p, 20_000, bsvIn, r)
+
+		t.Run(name+": neither change", func(t *testing.T) {
+			mustPass(t, f.run(t, p, f.withChange(base, 0, nil, 0)))
+		})
+		t.Run(name+": token change", func(t *testing.T) {
+			c := f.withChange(base, 7_777, nil, 0)
+			if len(c.outs) != 6 {
+				t.Fatalf("expected the token change as the sixth output: %d outputs", len(c.outs))
+			}
+			mustPass(t, f.run(t, p, c))
+		})
+		t.Run(name+": sats change", func(t *testing.T) {
+			mustPass(t, f.run(t, p, f.withChange(base, 0, satsPkh, 12_345)))
+		})
+		t.Run(name+": both, the token change before the sats change", func(t *testing.T) {
+			c := f.withChange(base, 3, satsPkh, 12_345) // 3: an OP_3 amount push
+			mustPass(t, f.run(t, p, c))
+			n := len(c.outs)
+			c.outs[n-2], c.outs[n-1] = c.outs[n-1], c.outs[n-2]
+			mustFail(t, f.run(t, p, c))
+		})
+		t.Run(name+": token change named, its output missing", func(t *testing.T) {
+			c := f.withChange(base, 7_777, nil, 0)
+			c.outs = c.outs[:len(c.outs)-1]
+			mustFail(t, f.run(t, p, c))
+		})
+		t.Run(name+": token change output with no argument", func(t *testing.T) {
+			c := base
+			c.outs = append(append([]out{}, base.outs...), out{1, tokenP2pkh(7_777, f.changePkh)})
+			mustFail(t, f.run(t, p, c))
+		})
+		t.Run(name+": token change of another amount", func(t *testing.T) {
+			c := f.withChange(base, 7_777, nil, 0)
+			c.outs[len(c.outs)-1].script = tokenP2pkh(7_778, f.changePkh)
+			mustFail(t, f.run(t, p, c))
+		})
+		t.Run(name+": token change to another key", func(t *testing.T) {
+			c := f.withChange(base, 7_777, nil, 0)
+			c.outs[len(c.outs)-1].script = tokenP2pkh(7_777, pkh(key(t, 71)))
+			mustFail(t, f.run(t, p, c))
+		})
+		t.Run(name+": token change of more than 1 sat", func(t *testing.T) {
+			c := f.withChange(base, 7_777, nil, 0)
+			c.outs[len(c.outs)-1].sats = 2
+			mustFail(t, f.run(t, p, c))
+		})
+		t.Run(name+": a negative token change", func(t *testing.T) {
+			c := base
+			c.args = append([][]byte{}, base.args...)
+			c.args[len(c.args)-1] = pushNum(-5)
 			mustFail(t, f.run(t, p, c))
 		})
 	}

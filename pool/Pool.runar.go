@@ -92,10 +92,13 @@ type Pool struct {
 // enters the pool. A CommissionBps of 0 means no commission output.
 //
 // Outputs: 0 pool, 1 user payout, then LP fee, validator fee and commission,
-// each only when nonzero.
-func (c *Pool) Swap(validatorSig runar.Sig, nextValidatorPubKey runar.PubKey, amountIn runar.Bigint, bsvIn runar.Bool, userPkh runar.Addr, commissionPkh runar.Addr) {
+// each only when nonzero; then (skein-amm 0.40.0) the taker's token change,
+// tokenChange tokens to tokenChangePkh (1 sat), only when nonzero; then
+// Rúnar's sats change.
+func (c *Pool) Swap(validatorSig runar.Sig, nextValidatorPubKey runar.PubKey, amountIn runar.Bigint, bsvIn runar.Bool, userPkh runar.Addr, commissionPkh runar.Addr, tokenChangePkh runar.Addr, tokenChange runar.Bigint) {
 	runar.Assert(runar.CheckSig(validatorSig, c.ValidatorPubKey))
 	runar.Assert(amountIn > 0)
+	runar.Assert(tokenChange >= 0)
 	lpPkh := runar.Hash160(c.LpPubKey)
 	validatorPkh := runar.Hash160(c.ValidatorPubKey)
 
@@ -127,6 +130,7 @@ func (c *Pool) Swap(validatorSig runar.Sig, nextValidatorPubKey runar.PubKey, am
 	lpScript := c.payoutScript(lpFee, lpPkh, bsvIn)
 	validatorScript := c.payoutScript(validatorFee, validatorPkh, bsvIn)
 	commissionScript := c.payoutScript(commission, commissionPkh, bsvIn)
+	tokenChangeScript := c.tokenP2pkh(tokenChange, tokenChangePkh)
 	if lpFee > 0 {
 		c.AddRawOutput(c.payoutSats(lpFee, bsvIn), lpScript)
 	}
@@ -135,6 +139,9 @@ func (c *Pool) Swap(validatorSig runar.Sig, nextValidatorPubKey runar.PubKey, am
 	}
 	if commission > 0 {
 		c.AddRawOutput(c.payoutSats(commission, bsvIn), commissionScript)
+	}
+	if tokenChange > 0 {
+		c.AddRawOutput(1, tokenChangeScript)
 	}
 }
 

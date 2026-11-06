@@ -4,11 +4,16 @@
 //! it, the overlay engine copies it into each topic's beat (skein-overlay 0.16.0, `<app>/terms`).
 //!
 //! Root sets them with the message `{fn: "terms", args: {lpFeeBps, validatorFeeBps,
-//! commissionBps}}` in the box `amm/validator` and clears them with `{fn: "terms", args: null}`
-//! (the role `root` gates `terms`). The record is the root of the head `<app>/terms`:
+//! commissionBps, minLegSats?}}` in the box `amm/validator` and clears them with `{fn: "terms",
+//! args: null}` (the role `root` gates `terms`). The record is the root of the head `<app>/terms`:
 //!
-//!   {lpFeeBps: uint, validatorFeeBps: uint, commissionBps: uint}     set
-//!   null                                                             cleared (no head delete)
+//!   {lpFeeBps: uint, validatorFeeBps: uint, commissionBps: uint, minLegSats?: uint}   set
+//!   null                                                                               cleared (no head delete)
+//!
+//! `minLegSats` (0.40.0, David Case 2026-11-05): the validator's minimum leg in sats, on the leg's
+//! sats side (the amount in on a buy, the payout on a sell); absent or 0, none. The validator
+//! refuses to sign a leg under it (`below_minimum`); the record carries it only when nonzero, so
+//! the beat announces it with the fees.
 //!
 //! Terms set: this skein is a validator (amm.pool.affirm and the swap signing take them; its beat
 //! carries them). Unset (no head, or the record `null`): a market only — the validator refuses
@@ -49,6 +54,8 @@ pub const no_validator = "no validator here";
 pub const max_bps: u64 = 10_000;
 
 const fields = [_][]const u8{ "lpFeeBps", "validatorFeeBps", "commissionBps" };
+/// The optional field (0.40.0): the minimum leg, sats, any uint; absent or 0, none.
+const field_min_leg = "minLegSats";
 
 pub const Parsed = union(enum) {
     set: Terms,
@@ -58,7 +65,8 @@ pub const Parsed = union(enum) {
 };
 
 /// Root's `args`: `null` (or absent) clears; a map of the three fees, each an integer 0 to 10 000,
-/// sets (other keys refused); anything else is refused.
+/// and optionally `minLegSats` (an integer, sats), sets (other keys refused); anything else is
+/// refused.
 pub fn parseArgs(args: ?Value) Parsed {
     const v = args orelse return .clear;
     if (v == .null) return .clear;
@@ -66,8 +74,8 @@ pub fn parseArgs(args: ?Value) Parsed {
     for (v.map) |e| {
         const known = for (fields) |f| {
             if (std.mem.eql(u8, f, e.key)) break true;
-        } else false;
-        if (!known) return .{ .bad = "want args {lpFeeBps, validatorFeeBps, commissionBps} only" };
+        } else std.mem.eql(u8, field_min_leg, e.key);
+        if (!known) return .{ .bad = "want args {lpFeeBps, validatorFeeBps, commissionBps, minLegSats?} only" };
     }
     var out: [3]i64 = undefined;
     for (fields, &out) |f, *o| {
@@ -75,16 +83,25 @@ pub fn parseArgs(args: ?Value) Parsed {
         if (x != .uint or x.uint > max_bps) return .{ .bad = "each fee is an integer, 0 to 10000 basis points" };
         o.* = @intCast(x.uint);
     }
-    return .{ .set = .{ .lp_fee_bps = out[0], .validator_fee_bps = out[1], .commission_bps = out[2] } };
+    var min_leg: u64 = 0;
+    if (v.get(field_min_leg)) |x| {
+        if (x != .uint) return .{ .bad = "minLegSats is an integer, sats" };
+        min_leg = x.uint;
+    }
+    return .{ .set = .{ .lp_fee_bps = out[0], .validator_fee_bps = out[1], .commission_bps = out[2], .min_leg_sats = min_leg } };
 }
 
-/// The record for `t`: `{lpFeeBps, validatorFeeBps, commissionBps}`.
+/// The record for `t`: `{lpFeeBps, validatorFeeBps, commissionBps}`, and `minLegSats` when it is
+/// not 0.
 pub fn record(a: Allocator, t: Terms) !Value {
-    return .{ .map = try a.dupe(cbor.Entry, &.{
+    var es: std.ArrayList(cbor.Entry) = .empty;
+    try es.appendSlice(a, &.{
         .{ .key = "lpFeeBps", .value = .{ .uint = @intCast(t.lp_fee_bps) } },
         .{ .key = "validatorFeeBps", .value = .{ .uint = @intCast(t.validator_fee_bps) } },
         .{ .key = "commissionBps", .value = .{ .uint = @intCast(t.commission_bps) } },
-    }) };
+    });
+    if (t.min_leg_sats > 0) try es.append(a, .{ .key = field_min_leg, .value = .{ .uint = t.min_leg_sats } });
+    return .{ .map = es.items };
 }
 
 /// The terms a record holds, or null: the record `null` (cleared), or not the shape.
