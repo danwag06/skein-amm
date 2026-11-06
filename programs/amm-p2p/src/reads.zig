@@ -16,10 +16,13 @@
 //! routes answer from the pool lookup's own answers (amm-lookup index.zig `answer`, the same code
 //! over the same index, the head `amm/ls_amm`):
 //!
-//! - P3 `/pools/beef?lp=k1,k2`: `{pools: [<the lookup's PoolState rows>], beef: <base64 BEEF of their
-//!   transactions>}`; no `lp`, every live pool;
-//! - P4 `/positions?lp=`, P5 `/fees/validator?id=`, P6 `/fees/commission?pkh=`: the lookup's
-//!   `{lpPubKeys}`, `{validatorIdentityKeys}`, `{commissionPkhs}` answers as JSON;
+//! - P3 `/pools/beef?pool=id1,id2` (0.40.0: by pool id, `<txid>_<vout>`; `?lp=` gone): `{pools:
+//!   [<the lookup's PoolState rows>], beef: <base64 BEEF of their transactions>}`; no `pool`, every
+//!   live pool;
+//! - P4 `/positions?pool=`, P5 `/fees/validator?id=`, P6 `/fees/commission?pkh=`: the lookup's
+//!   `{poolIds}`, `{validatorIdentityKeys}`, `{commissionPkhs}` answers as JSON;
+//! - (0.40.0) `/pools/at?t=<ms>` and `/pools/history?from=&to=&pool=&limit=`: the pool history
+//!   (`historyRead`);
 //! - P7 `/terms`: the validator's terms and the market's, in one (`termsJson`);
 //! - P9 `/tx?id=`: a transaction's BEEF (`imm` when proven);
 //! - P10 `/swaps?id=`: the relay record (main.zig).
@@ -275,12 +278,12 @@ pub fn lookupAnswer(a: Allocator, svc: *lookup.Service, ch: *Chain, token: []con
     };
 }
 
-/// The pools a P3 answer carries: the current pools of the LP keys `lps` (the lookup's `{lpPubKeys}`
+/// The pools a P3 answer carries: the current pools of the pool ids `ids` (the lookup's `{poolIds}`
 /// records whose status is live or rescinded: their `current`, the output a Swap or a Close spends;
-/// a key with neither, nothing), in query order; `lps` null, every live pool (`{tokenId}`).
-pub fn currentPools(a: Allocator, svc: *lookup.Service, ch: *Chain, token: []const u8, lps: ?[]const []const u8) ![]const Value {
-    const keys = lps orelse return (try lookupAnswer(a, svc, ch, token, null, &.{})).array;
-    const recs = try lookupAnswer(a, svc, ch, token, "lpPubKeys", keys);
+/// an id with neither, nothing), in query order; `ids` null, every live pool (`{tokenId}`).
+pub fn currentPools(a: Allocator, svc: *lookup.Service, ch: *Chain, token: []const u8, ids: ?[]const []const u8) ![]const Value {
+    const keys = ids orelse return (try lookupAnswer(a, svc, ch, token, null, &.{})).array;
+    const recs = try lookupAnswer(a, svc, ch, token, "poolIds", keys);
     var out: std.ArrayList(Value) = .empty;
     for (recs.array) |r| if (r.get("current")) |c| if (c == .map) try out.append(a, c);
     return out.items;
@@ -384,8 +387,8 @@ pub fn placedHeight(placed: *w.store.Map, tp: []const u8, txid: [32]u8) !?u32 {
     return std.mem.readInt(u32, v.bytes[0..4], .big);
 }
 
-/// The history reads' functions.
-pub const History = enum { trades, candles, stats };
+/// The history reads' functions (0.40.0: the pool history, `/pools/at` and `/pools/history`).
+pub const History = enum { trades, candles, stats, poolsAt, poolsHistory };
 
 /// The resolutions `/candles` takes, in ms.
 pub fn timeframe(text: []const u8) ?u64 {
@@ -414,6 +417,8 @@ fn writeTrade(a: Allocator, jw: *std.json.Stringify, t: idx.Trade, height: ?u32)
     try jw.beginObject();
     try jw.objectField("txid");
     try jw.write(&w.header.toHex(t.txid));
+    try jw.objectField("poolId");
+    try jw.write(try idx.poolIdText(a, r.getBytes("poolId") orelse return error.BadIndex));
     try jw.objectField("lpPubKey");
     try jw.write(try hexAlloc(a, r.getBytes("lpPubKey") orelse return error.BadIndex));
     try jw.objectField("side");
@@ -422,6 +427,8 @@ fn writeTrade(a: Allocator, jw: *std.json.Stringify, t: idx.Trade, height: ?u32)
         try jw.objectField(f[0]);
         try jw.write(r.getUint(f[1]) orelse return error.BadIndex);
     }
+    try jw.objectField("payoutPkh");
+    try jw.write(try hexAlloc(a, r.getBytes("payoutPkh") orelse return error.BadIndex));
     try jw.objectField("at");
     try jw.write(t.at);
     try jw.objectField("height");
@@ -444,33 +451,114 @@ pub fn parseCursor(text: []const u8) ?idx.Cursor {
     return .{ .at = std.mem.readInt(u64, b[0..8], .big), .txid = b[8..].* };
 }
 
+/// A signed integer field of a record (the fee rates are written as dag-cbor ints).
+fn intField(rec: Value, key: []const u8) !i64 {
+    return switch (rec.get(key) orelse return error.BadIndex) {
+        .uint => |n| std.math.cast(i64, n) orelse error.BadIndex,
+        .nint => |n| -1 - (std.math.cast(i64, n) orelse return error.BadIndex),
+        else => error.BadIndex,
+    };
+}
+
+/// An outpoint key (36 bytes) as `<txid>_<vout>`.
+fn outpointText(a: Allocator, key: []const u8) ![]const u8 {
+    return idx.poolIdText(a, key);
+}
+
+/// The fields every pool row of the history reads carries (0.40.0): `poolId`, `outpoint` (when the
+/// event has one), the reserves, `lpPubKey`, the three rates, `validatorIdentityKey`, `at`, `swaps`.
+fn writePoolFields(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
+    try jw.objectField("poolId");
+    try jw.write(try idx.poolIdText(a, r.getBytes("poolId") orelse return error.BadIndex));
+    if (r.getBytes("outpoint")) |op| {
+        try jw.objectField("outpoint");
+        try jw.write(try outpointText(a, op));
+        try jw.objectField("bsvReserve");
+        try jw.write(r.getUint("bsvReserve") orelse return error.BadIndex);
+        try jw.objectField("tokenReserve");
+        try jw.write(r.getUint("tokenReserve") orelse return error.BadIndex);
+    }
+    try jw.objectField("lpPubKey");
+    try jw.write(try hexAlloc(a, r.getBytes("lpPubKey") orelse return error.BadIndex));
+    inline for (.{ "liquidityFeeBps", "validationFeeBps", "commissionBps" }) |f| {
+        try jw.objectField(f);
+        try jw.write(try intField(r, f));
+    }
+    try jw.objectField("validatorIdentityKey");
+    try jw.write(try hexAlloc(a, r.getBytes("validatorIdentityKey") orelse return error.BadIndex));
+    try jw.objectField("at");
+    try jw.write(r.getUint("at") orelse return error.BadIndex);
+    try jw.objectField("swaps");
+    try jw.write(r.getUint("swaps") orelse return error.BadIndex);
+}
+
+/// A `/pools/at` row (0.40.0): `{poolId, outpoint, bsvReserve, tokenReserve, lpPubKey,
+/// liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}` — the pool's
+/// state after its last event at or before `t`.
+fn writePoolAt(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
+    try jw.beginObject();
+    try writePoolFields(a, jw, r);
+    try jw.endObject();
+}
+
+/// A `/pools/history` event (0.40.0): `{kind, txid, poolId, outpoint?, bsvReserve?, tokenReserve?,
+/// lpPubKey, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, at, swaps}`, a
+/// Swap's with its trade's fields too: `side, amountIn, amountOut, feeLp, feeValidator,
+/// feeCommission, commissionPkh, payoutPkh`.
+fn writeEvent(a: Allocator, jw: *std.json.Stringify, r: Value) !void {
+    try jw.beginObject();
+    try jw.objectField("kind");
+    const kind = r.getText("kind") orelse return error.BadIndex;
+    try jw.write(kind);
+    try jw.objectField("txid");
+    try jw.write(&w.header.toHex((r.getBytes("txid") orelse return error.BadIndex)[0..32].*));
+    try writePoolFields(a, jw, r);
+    if (eql(u8, kind, "swap")) {
+        try jw.objectField("side");
+        try jw.write(r.getText("side") orelse return error.BadIndex);
+        inline for (.{ .{ "amountIn", "amountIn" }, .{ "amountOut", "amountOut" }, .{ "feeLp", "lp" }, .{ "feeValidator", "validator" }, .{ "feeCommission", "commission" } }) |f| {
+            try jw.objectField(f[0]);
+            try jw.write(r.getUint(f[1]) orelse return error.BadIndex);
+        }
+        try jw.objectField("commissionPkh");
+        try jw.write(try hexAlloc(a, r.getBytes("commissionPkh") orelse return error.BadIndex));
+        try jw.objectField("payoutPkh");
+        try jw.write(try hexAlloc(a, r.getBytes("payoutPkh") orelse return error.BadIndex));
+    }
+    try jw.endObject();
+}
+
+/// A query's `pool` parameter (0.40.0): one pool id `<txid>_<vout>`, as its outpoint key; null absent.
+fn poolParam(a: Allocator, q: []const u8) !?[36]u8 {
+    const text = (try queryParam(a, q, "pool")) orelse return null;
+    if (text.len < 66 or text[64] != '_') return error.BadParam;
+    const op = parseOutpoint(text) orelse return error.BadParam;
+    return w.store.outpointKey(op.txid, op.vout);
+}
+
 fn intParam(a: Allocator, q: []const u8, name: []const u8) !?u64 {
     const t = (try queryParam(a, q, name)) orelse return null;
     return std.fmt.parseInt(u64, t, 10) catch error.BadParam;
 }
 
-/// One history read (H1 `/trades`, H2 `/candles`, H3 `/stats`) over the pool lookup's index
+/// One history read (H1 `/trades`, H2 `/candles`, H3 `/stats`; 0.40.0 `/pools/at`, `/pools/history`) over the pool lookup's index
 /// `svc`, the overlay's `placed` map (each trade's `height`), the token `token`, the query `q`, at
 /// `now` (ms, the read's clock: `/stats`' windows). JSON, cache `state`.
-pub fn historyRead(a: Allocator, svc: *lookup.Service, ch: *Chain, placed: *w.store.Map, token: []const u8, h: History, q: []const u8, now: u64) !Value {
+pub fn historyRead(a: Allocator, svc: *lookup.Service, _: *Chain, placed: *w.store.Map, token: []const u8, h: History, q: []const u8, now: u64) !Value {
     const tp = try idx.tokenPrefix(a, token);
     var out: std.Io.Writer.Allocating = .init(a);
     var jw: std.json.Stringify = .{ .writer = &out.writer };
     switch (h) {
         .trades => {
-            // ?txid=: one row (its LP key from the Swap's continuation at output 0, in the chain state).
+            // ?txid=: one row (its pool id from the Swap's continuation's record, 0.40.0).
             if (try queryParam(a, q, "txid")) |text| {
                 const txid = parseTxid(text) orelse return httpError(a, 400, "want ?txid=<txid>: 64 hex characters");
-                const raw = (try ch.txRaw(txid)) orelse return httpError(a, 404, "no trade for this txid");
-                const t = Transaction.parse(a, raw) catch return httpError(a, 404, "no trade for this txid");
-                if (t.outputs.len == 0) return httpError(a, 404, "no trade for this txid");
-                const p = pool.poolOfScript(t.outputs[0].locking_script.bytes) orelse return httpError(a, 404, "no trade for this txid");
-                const tr = (try idx.tradeOf(a, svc, tp, p.lp, txid)) orelse return httpError(a, 404, "no trade for this txid");
+                const tr = (try idx.tradeOf(a, svc, tp, txid)) orelse return httpError(a, 404, "no trade for this txid");
                 try writeTrade(a, &jw, tr, try placedHeight(placed, tp, txid));
                 return httpCached(a, 200, "application/json", .state, out.written());
             }
             var tq: idx.TradeQuery = .{};
-            const bad = "want ?from=<ms>&to=<ms>&limit=<n≤500>&before=<cursor>&lp=<hex33>";
+            const bad = "want ?from=<ms>&to=<ms>&limit=<n≤500>&before=<cursor>&pool=<txid>_<vout>";
             tq.from = intParam(a, q, "from") catch return httpError(a, 400, bad);
             tq.to = intParam(a, q, "to") catch return httpError(a, 400, bad);
             if (intParam(a, q, "limit") catch return httpError(a, 400, bad)) |n| {
@@ -478,12 +566,7 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, ch: *Chain, placed: *w.st
                 tq.limit = @intCast(n);
             }
             if (try queryParam(a, q, "before")) |c| tq.before = parseCursor(c) orelse return httpError(a, 400, bad);
-            if (try queryParam(a, q, "lp")) |k| {
-                if (k.len != 66) return httpError(a, 400, bad);
-                var lp: [33]u8 = undefined;
-                _ = std.fmt.hexToBytes(&lp, k) catch return httpError(a, 400, bad);
-                tq.lp = lp;
-            }
+            tq.pool = poolParam(a, q) catch return httpError(a, 400, bad);
             const rows = try idx.trades(a, svc, tp, tq);
             try jw.beginObject();
             try jw.objectField("trades");
@@ -529,8 +612,9 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, ch: *Chain, placed: *w.st
             try jw.beginObject();
             try jw.objectField("tokenId");
             try jw.write(token);
-            try jw.objectField("price");
-            if (s.price) |p| try writePrice(&jw, p) else try jw.write(null);
+            // 0.40.0: the last fill's price as `lastTradePrice` (the host sets `price`).
+            try jw.objectField("lastTradePrice");
+            if (s.last_trade_price) |p| try writePrice(&jw, p) else try jw.write(null);
             try jw.objectField("change1h");
             try jw.write(s.change1h);
             try jw.objectField("change24h");
@@ -551,6 +635,34 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, ch: *Chain, placed: *w.st
             try jw.write(s.tvl_tokens);
             try jw.objectField("pools");
             try jw.write(s.pools);
+            try jw.endObject();
+        },
+        .poolsAt => {
+            const bad = "want ?t=<ms>";
+            const t = (intParam(a, q, "t") catch return httpError(a, 400, bad)) orelse return httpError(a, 400, bad);
+            try jw.beginArray();
+            for (try idx.poolsAt(a, svc, tp, t)) |r| try writePoolAt(a, &jw, r);
+            try jw.endArray();
+        },
+        .poolsHistory => {
+            const bad = "want ?from=<ms>&to=<ms>&pool=<txid>_<vout>&limit=<n≤500>";
+            const from = intParam(a, q, "from") catch return httpError(a, 400, bad);
+            const to = intParam(a, q, "to") catch return httpError(a, 400, bad);
+            const one = poolParam(a, q) catch return httpError(a, 400, bad);
+            var limit: usize = idx.max_events;
+            if (intParam(a, q, "limit") catch return httpError(a, 400, bad)) |n| {
+                if (n == 0 or n > idx.max_events) return httpError(a, 400, bad);
+                limit = @intCast(n);
+            }
+            try jw.beginObject();
+            try jw.objectField("events");
+            try jw.beginArray();
+            for (try idx.poolHistory(a, svc, tp, from, to, one, limit)) |ev| try writeEvent(a, &jw, ev.rec);
+            try jw.endArray();
+            // Paging (`before`, `next`): not built — the brief leaves its direction open (a page of an
+            // oldest-first list, a `before` cursor). `next` is null.
+            try jw.objectField("next");
+            try jw.write(null);
             try jw.endObject();
         },
     }

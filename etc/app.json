@@ -128,7 +128,9 @@
     "swaps": "amm-p2p.swaps",
     "trades": "amm-p2p.trades",
     "candles": "amm-p2p.candles",
-    "stats": "amm-p2p.stats"
+    "stats": "amm-p2p.stats",
+    "poolsAt": "amm-p2p.poolsAt",
+    "poolsHistory": "amm-p2p.poolsHistory"
   },
   "roles": {
     "root": [
@@ -314,6 +316,20 @@
       "address": "/stats",
       "filters": [
         "stats"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/pools/at",
+      "filters": [
+        "poolsAt"
+      ]
+    },
+    {
+      "transport": "http",
+      "address": "/pools/history",
+      "filters": [
+        "poolsHistory"
       ]
     }
   ],
