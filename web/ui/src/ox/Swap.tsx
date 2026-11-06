@@ -1,14 +1,16 @@
 /**
  * Swap one token: you pay / you receive, the quote routed across the token's pools, and the Route
  * panel. 0.34.0 (D11–D16): the page holds the token's pools route as a stream (`useTokenPools`);
- * a quote is computed from it (no request); the fee line is the pool's own; a leg with no answer
- * yet offers "Check again".
+ * a quote is computed from it (no request). 0.40.0 (agent-env plans/swap-balance-build-2026-11-05.md
+ * Builder 2 item 6): the quote shows what Swap stages (the swap amount, the fee sats with two legs
+ * of leeway) and the miner fee per leg; price and impact from the engine's `priceOf`; each leg's
+ * fee line from its own pool; while a swap runs, its legs as they fill and Cancel; at the end the
+ * summary, what went back to the wallet and why it stopped.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Id } from "../components/Id";
 import { sameToken } from "../lib/tokenId";
 import {
-  checkSwapAgain,
   executeSwap,
   poolFees,
   poolViews,
@@ -16,12 +18,14 @@ import {
   useMyTokens,
   useTokenPools,
   useWalletSats,
-  withLeg,
+  type Fees,
   type HostedToken,
+  type LegResult,
   type Quote,
   type Session,
   type Side,
   type SwapResult,
+  type SwapStop,
 } from "../data/exchange";
 import { compactAmount, compactSats, fmtAmount, fmtBps, fmtPrice, fmtSats, parseInput } from "./format";
 import { LiveDot, Notice, TokenMark, TokenName } from "./bits";
@@ -31,6 +35,29 @@ const DEFAULT_SLIPPAGE_BPS = 50;
 
 function impactClass(bps: number): string {
   return bps >= 300 ? "bad" : bps >= 50 ? "warn" : "";
+}
+
+/** Why a swap stopped, in plain words (0.40.0). */
+export function stopText(stop: SwapStop): string {
+  switch (stop) {
+    case "filled":
+      return "Every unit filled.";
+    case "cancelled":
+      return "Stopped: you cancelled the swap.";
+    case "floor":
+      return "Stopped: the pools now pay less than your minimum.";
+    case "min":
+      return "Stopped: what is left is under every pool's minimum leg.";
+    case "no_pool":
+      return "Stopped: no pool could take the rest.";
+    case "fees":
+      return "Stopped: the sats set aside for fees ran out.";
+  }
+}
+
+/** A leg's fee line, from its own pool (0.40.0). */
+export function feeText(f: Fees): string {
+  return `LP ${f.lpBps} · validator ${f.validatorBps} · commission ${f.commissionBps} bps`;
 }
 
 function PickToken({ tokens }: { tokens: HostedToken[] | null }) {
@@ -87,9 +114,10 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
   const [slippageText, setSlippageText] = useState((DEFAULT_SLIPPAGE_BPS / 100).toString());
   const [allowPartial, setAllowPartial] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [checking, setChecking] = useState<string | null>(null);
+  const [filling, setFilling] = useState<LegResult[]>([]);
   const [result, setResult] = useState<SwapResult | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
+  const cancel = useRef<AbortController | null>(null);
 
   const sats = useWalletSats(connected);
   const mine = useMyTokens(connected);
@@ -135,12 +163,23 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
     setBusy(true);
     setSwapError(null);
     setResult(null);
+    setFilling([]);
+    const ctl = new AbortController();
+    cancel.current = ctl;
     try {
-      setResult(await executeSwap(quote));
+      setResult(
+        await executeSwap(quote, {
+          signal: ctl.signal,
+          onProgress: (x) => {
+            if ("filled" in x) setFilling(x.filled);
+          },
+        }),
+      );
       setAmountText("");
     } catch (e) {
       setSwapError(e instanceof Error ? e.message : String(e));
     } finally {
+      cancel.current = null;
       setBusy(false);
     }
   }
@@ -217,7 +256,7 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
           <dl className="kv">
             <dt>Effective price</dt>
             <dd className="num">{quote ? `${fmtPrice(quote.effectivePrice)} sats per ${token.sym}` : "—"}</dd>
-            <dt>Marginal price</dt>
+            <dt>Price</dt>
             <dd className="num">{quote ? fmtPrice(quote.marginalPrice) : token.marginalPrice === null ? "—" : fmtPrice(token.marginalPrice)}</dd>
             <dt>Price impact</dt>
             <dd className={`num ${quote ? impactClass(quote.impactBps) : ""}`}>{quote ? fmtBps(quote.impactBps) : "—"}</dd>
@@ -266,6 +305,13 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
               You receive at least {fmtAmount(quote.minAmountOut, recvDec)} {recvUnit}, or the swap stops.
             </p>
           )}
+          {quote && (
+            <p className="help">
+              Swap first sets aside {side === "buy" ? `${fmtSats(quote.stage.amount + quote.stage.feeSats)} sats` : `${fmtAmount(quote.stage.amount, token.dec)} ${token.sym} and ${fmtSats(quote.stage.feeSats)} sats`} in the swap basket
+              {side === "buy" ? ` (${fmtSats(quote.stage.amount)} to swap, ${fmtSats(quote.stage.feeSats)} for fees)` : " (the sats for fees)"}, enough for the
+              planned legs and two more. Miner fee per leg: about {fmtSats(quote.legMinerFeeSats)} sats. What is left goes back to your wallet.
+            </p>
+          )}
           {quoteError && <Notice kind="bad">{quoteError}</Notice>}
           {connected ? (
             <button type="submit" className="btn btn-primary btn-lg" disabled={!quote || busy || tooMuch}>
@@ -276,45 +322,36 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
               Connect a wallet to swap
             </button>
           )}
+          {busy && (
+            <div className="notice" role="status">
+              <p>{filling.length === 0 ? "Swapping: the first leg is on its way." : `Swapping: ${filling.length} ${filling.length === 1 ? "leg" : "legs"} filled so far.`}</p>
+              <LegList legs={filling} payDec={payDec} recvDec={recvDec} payUnit={payUnit} recvUnit={recvUnit} />
+              <button type="button" className="btn btn-outline" onClick={() => cancel.current?.abort()} aria-label="Cancel the swap">
+                Cancel
+              </button>
+            </div>
+          )}
           {swapError && <Notice kind="bad">The swap failed: {swapError}</Notice>}
           {result && (
             <div className={`notice notice-${result.status === "failed" ? "bad" : "ok"}`} role="status">
               <p>
-                {result.status === "filled" ? "Swapped. Every leg filled." : result.status === "partial" ? "Partly swapped: some legs failed." : "No leg filled."}
+                {result.status === "failed" ? "Nothing swapped." : `Swapped ${fmtAmount(result.totalIn, payDec)} ${payUnit} for ${fmtAmount(result.totalOut, recvDec)} ${recvUnit}.`} {stopText(result.stop)}
               </p>
-              {result.legs.some((l) => l.repriced) && <p>One leg was repriced after another swap moved the pool.</p>}
-              <ul className="txids">
-                {result.legs.map((l) => (
-                  <li key={l.poolOutpoint}>
-                    {l.txid ? <Id value={l.txid} kind="txid" label="transaction id" /> : <span>{l.error}</span>}
-                    {l.checkId && (
-                      <>
-                        {" "}
-                        <button
-                          type="button"
-                          className="btn-link"
-                          disabled={checking === l.poolOutpoint}
-                          onClick={() => {
-                            setChecking(l.poolOutpoint);
-                            checkSwapAgain(l).then(
-                              (next) => {
-                                setResult((r) => (r ? withLeg(r, next) : r));
-                                setChecking(null);
-                              },
-                              (e: unknown) => {
-                                setResult((r) => (r ? withLeg(r, { ...l, error: e instanceof Error ? e.message : String(e) }) : r));
-                                setChecking(null);
-                              },
-                            );
-                          }}
-                        >
-                          {checking === l.poolOutpoint ? "Checking…" : "Check again"}
-                        </button>
-                      </>
-                    )}
-                  </li>
+              {result.unfilled > 0n && result.status !== "failed" && (
+                <p>
+                  Not swapped: {fmtAmount(result.unfilled, payDec)} {payUnit}.
+                </p>
+              )}
+              <LegList legs={result.legs} payDec={payDec} recvDec={recvDec} payUnit={payUnit} recvUnit={recvUnit} />
+              {result.returned &&
+                ("txid" in result.returned ? (
+                  <p>
+                    Back to your wallet: {result.returned.tokens > 0n ? `${fmtAmount(result.returned.tokens, token.dec)} ${token.sym} and ` : ""}the sats left in the swap basket{" "}
+                    <Id value={result.returned.txid} kind="txid" label="transaction id" />
+                  </p>
+                ) : (
+                  <p>What is left stays in the swap basket ({result.returned.error}). Move back on Your tokens returns it.</p>
                 ))}
-              </ul>
             </div>
           )}
         </form>
@@ -340,12 +377,12 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
                       <LiveDot live={l.validator.live} label={l.validator.live ? "validator live" : "validator offline"} />
                     </span>
                     <span className="sub r">{Math.round(l.shareBps / 100)} %</span>
+                    <span className="sub">{feeText(l.fees)}</span>
                   </li>
                 ))}
               </ol>
               <p className="muted small">
-                Each leg is its own transaction.{" "}
-                {allowPartial ? "With partial fill allowed, a leg that fails leaves the others standing." : "Without partial fill, a leg that fails stops the swap."}
+                Each leg is its own transaction, sent one at a time; a leg a pool refuses goes to another pool. Fees are taken from the amount in.
               </p>
             </>
           ) : (
@@ -361,25 +398,29 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
                     <span className="sub">
                       <LiveDot live={p.validator.live} label={p.validator.live ? "validator live" : "validator offline"} />
                     </span>
+                    {pools.data?.pools.find((x) => x.poolId === p.poolId) && <span className="sub">{feeText(poolFees(pools.data.pools.find((x) => x.poolId === p.poolId)!))}</span>}
                   </li>
                 ))}
               </ul>
             </>
           )}
           {pools.error && <p className="muted small">{pools.error}</p>}
-          {(() => {
-            // D13: the fee line from the pool's own record.
-            const first = pools.data?.pools[0];
-            const fees = quote?.fees ?? (first ? poolFees(first) : undefined);
-            if (!fees) return null;
-            return (
-              <p className="muted small">
-                Fees per leg: LP {fees.lpBps} · validator {fees.validatorBps} bps, taken from the amount in.
-              </p>
-            );
-          })()}
         </section>
       </div>
     </>
+  );
+}
+
+/** The legs of a swap as they fill (0.40.0): each its amounts and its transaction. */
+function LegList({ legs, payDec, recvDec, payUnit, recvUnit }: { legs: LegResult[]; payDec: number; recvDec: number; payUnit: string; recvUnit: string }) {
+  if (legs.length === 0) return null;
+  return (
+    <ul className="txids">
+      {legs.map((l) => (
+        <li key={l.txid}>
+          {fmtAmount(l.amountIn, payDec)} {payUnit} → {fmtAmount(l.amountOut, recvDec)} {recvUnit} <Id value={l.txid} kind="txid" label="transaction id" />
+        </li>
+      ))}
+    </ul>
   );
 }

@@ -42,7 +42,7 @@
  */
 import { Beef, Transaction, type WalletInterface } from "@bsv/sdk";
 import { send1Color, type Send1ColorResult } from "@1sat/actions";
-import { computeSwap, type PoolState, type Plan } from "@dcasegr/amm-engine";
+import { nextLeg, priceOf, type Leg, type PoolState, type Plan, type PricePair } from "@dcasegr/amm-engine";
 import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "./lib/tokenId.js";
 import { DEFAULT_FEE_RATE_SATS_PER_KB, appName, exchangeBase, tokenBase } from "./lib/config.js";
 import {
@@ -60,9 +60,12 @@ import {
   readAllStats,
   readCandles,
   readHolders,
+  readPoolHistory,
+  readPoolsAt,
   readPoolsBeef,
   readPools,
   readPositions,
+  readSpendsAll,
   readStats,
   readTerms,
   readTrade,
@@ -70,7 +73,11 @@ import {
   readTx,
   watchPools,
   type Candle,
+  type CandleSeries,
   type CandleTf,
+  type PoolAt,
+  type PoolHistoryPage,
+  type SpendAll,
   type DiscoveryRow,
   type Holders,
   type TokenPosition,
@@ -86,13 +93,13 @@ import {
 } from "./lib/overlay.js";
 import { authFetchPerInstance, instanceBase, readDefaults, readDiscovery, readTokens, sendMessage, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "./lib/skein.js";
 import { depthOf } from "./market/prices.js";
-import { buildPlanRequest, goneFromLookup, quote as planQuote } from "./market/plan.js";
+import { buildPlanRequest, legMinerFeeSats, quote as planQuote } from "./market/plan.js";
 import { validatorStatus } from "./market/view.js";
 import type { AuthFetchLike } from "./market/relay.js";
-import { planSwapLeg, prepareSwap, selectExactSatsInput, selectExactTokenInputs, type PlanLegInput, type PlannedLeg, type PreparedSwap, type SatsInput, type TokenInput } from "./market/swapAction.js";
-import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapTotals, type MovedBack } from "./market/activeSwap.js";
-import { checkAgain, relaySwap, swapIdOf, type SwapOutcome } from "./market/swapFlow.js";
-import { settleStagedSwaps } from "./wallet/swapPayouts.js";
+import { prepareSwap, selectLegInputs, type PlanLegInput, type PreparedSwap } from "./market/swapAction.js";
+import { fileStagedToken, moveBack, moveBackSats, stage, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapSatsTotal, swapTotals, unfiledStagedTokens, type MovedBack } from "./market/activeSwap.js";
+import { relaySwap, swapIdOf, type SwapOutcome } from "./market/swapFlow.js";
+import { resolveFromOverlay, type ResolvedLeg } from "./wallet/swapPayouts.js";
 import { formatAmount } from "./lp/amounts.js";
 import { basketRows } from "./lp/wallet.js";
 import { buildInventory, decodeTokenRow, deployIcon } from "./lp/inventory.js";
@@ -102,7 +109,7 @@ import { rebalancePool } from "./lp/rebalance.js";
 import { historyPoolRows, mergePoolRows, positionRowsOf, type PositionRow } from "./lp/positions.js";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "./wallet/color.js";
 import { prepareClose, submitToOverlay } from "./lp/close.js";
-import { ClientError, errorKind, kindOfOutcome, toClientError, type ClientErrorKind } from "./errors.js";
+import { ClientError, toClientError } from "./errors.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -124,7 +131,10 @@ export interface HostedToken {
   dec: number;
   /** An image URL (a data: URL of the deploy's embedded icon, or an ORDFS URL). */
   icon?: string;
-  /** Sats per whole token across the token's pools: what the next small swap pays. Null with no open pool. */
+  /**
+   * Sats per whole token (0.40.0: the stats' `price`, the midpoint of what a buy and a sell of 1% of
+   * the pooled sats would pay now). Null with no open pool.
+   */
   marginalPrice: number | null;
   depth: Depth | null;
   /** Number of open pools. */
@@ -139,6 +149,8 @@ export interface HostedToken {
 export interface PoolView {
   /** `<txid>.<vout>` */
   outpoint: string;
+  /** The pool's id (0.40.0): its deploy outpoint, `<txid>_<vout>`. */
+  poolId: string;
   tokenId: TokenId;
   sats: bigint;
   tokens: bigint;
@@ -166,6 +178,8 @@ export interface QuoteRequest {
 export interface QuoteLeg {
   /** The pool, `<txid>.<vout>`. */
   poolOutpoint: string;
+  /** The pool's id (0.40.0). */
+  poolId: string;
   amountIn: bigint;
   amountOut: bigint;
   /** Share of the amount in, basis points (the legs sum to 10000). */
@@ -173,40 +187,64 @@ export interface QuoteLeg {
   /** The pool's reserves before the leg. */
   reserves: { sats: bigint; tokens: bigint };
   validator: ValidatorRef;
+  /** The leg's own pool's fees (0.40.0: the fee line per leg). */
+  fees: Fees;
+}
+
+/** What Swap stages into the swap basket before its first leg (0.40.0): the swap amount exact, and the fee sats. */
+export interface QuoteStage {
+  /** The swap amount: sats on a buy, token base units on a sell. */
+  amount: bigint;
+  /** The sats for the carriers and miner fees of the planned legs and two more legs. */
+  feeSats: bigint;
 }
 
 export interface Quote {
   request: QuoteRequest;
   legs: QuoteLeg[];
   amountOut: bigint;
-  /** The least amount out the swap accepts: amountOut less max slippage. */
+  /** The least amount out the swap accepts (the floor): the route's amount out less max slippage. */
   minAmountOut: bigint;
   /** Sats per whole token this swap pays (fees included). */
   effectivePrice: number;
-  /** Sats per whole token before the swap. */
+  /**
+   * Sats per whole token now (0.40.0: the engine's `priceOf` over the pools the page holds — what a
+   * buy of 1% of the pooled sats would pay on a buy, a sell of 1% of the pooled tokens on a sell).
+   */
   marginalPrice: number;
   /** |effective − marginal| / marginal, basis points. */
   impactBps: number;
-  /** The validator's fees applied to every leg. */
-  fees: Fees;
+  /** What Swap stages (0.40.0). */
+  stage: QuoteStage;
+  /** The miner fee estimate of one leg, sats. */
+  legMinerFeeSats: bigint;
 }
 
+/** One leg of a swap that filled (0.40.0). */
 export interface LegResult {
+  /** The pool output it spent, `<txid>.<vout>`. */
   poolOutpoint: string;
-  status: "filled" | "failed";
-  txid?: string;
-  error?: string;
-  /** 0.31.1: the leg was refused `pool_spent`, repriced against the pool's newest state and sent again. */
-  repriced?: true;
-  /** 0.34.0 (D15): no answer yet — the swap's id, for "Check again" (`checkSwapAgain`). */
-  checkId?: string;
-  /** 0.38.0 (D13): the failure's kind, when it has one (`error` stays the text). */
-  kind?: ClientErrorKind;
+  poolId: string;
+  amountIn: bigint;
+  amountOut: bigint;
+  txid: string;
 }
+
+/** Why a swap stopped (0.40.0). */
+export type SwapStop = "filled" | "cancelled" | "floor" | "min" | "no_pool" | "fees";
 
 export interface SwapResult {
+  /** "filled": every unit filled; "partial": some; "failed": none. */
   status: "filled" | "partial" | "failed";
+  stop: SwapStop;
+  /** The legs that filled, in order. */
   legs: LegResult[];
+  totalIn: bigint;
+  totalOut: bigint;
+  /** The swap amount not filled. */
+  unfilled: bigint;
+  /** What went back to the wallet when the swap stopped early (the Move back's), or why it did not. */
+  returned?: { txid: string; tokens: bigint } | { error: string };
 }
 
 /** The validator's fees, basis points of the amount in. The LP accepts them; there is no fee input. */
@@ -241,12 +279,18 @@ export interface ValidatorTerms {
   /** "this exchange's" when the validator is this skein. */
   isThisExchange: boolean;
   fees: Fees;
+  /** The validator's minimum leg, sats on the leg's sats side (0.40.0; 0: none). */
+  minLegSats: number;
 }
 
 /** One of the user's pools. A position is only deployed or closed (no add, no partial remove). */
 export interface Position {
   /** The pool, `<txid>.<vout>`. */
   outpoint: string;
+  /** The pool's id (0.40.0): its deploy outpoint, `<txid>_<vout>`. */
+  poolId: string;
+  /** The pool's swaps so far. */
+  swaps: number;
   tokenId: TokenId;
   sym: string;
   dec: number;
@@ -321,8 +365,6 @@ export interface WalletToken {
   outputs: number;
   /** Held in the exchange's active swap basket (`amm-swap`): spent by swap legs, or moved back. */
   inSwaps: bigint;
-  /** Sats staged in `amm-swap` for the token's swap legs (0.29.6): spent by swap legs, or moved back. */
-  swapSats: number;
   /** Registered on this exchange. */
   onExchange: boolean;
 }
@@ -345,7 +387,8 @@ export interface RegisteredToken {
   status: EnabledToken["status"];
 }
 
-export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer, Candle, CandleTf, Holders, TokenPosition, TokenStats, Trade, TradesPage };
+export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer, Candle, CandleSeries, CandleTf, Holders, PoolAt, PoolHistoryPage, SpendAll, TokenPosition, TokenStats, Trade, TradesPage };
+export type { PoolEvent } from "./lib/overlay.js";
 export type { PoolChange, Price } from "./lib/overlay.js";
 export { applyPoolChange, parseChange } from "./lib/overlay.js";
 
@@ -422,6 +465,7 @@ export function hostedFrom(list: EnabledToken[], stats: TokenStats[] | null): Ho
 export function poolViews(answer: PoolsAnswer | null, tokenId: TokenId): PoolView[] {
   return (answer?.pools ?? []).map((p) => ({
     outpoint: outpointText(p.outpoint),
+    poolId: p.poolId,
     tokenId,
     sats: p.bsvReserve,
     tokens: p.tokenReserve,
@@ -434,14 +478,31 @@ export function poolFees(p: Pick<PoolState, "liquidityFeeBps" | "validationFeeBp
   return { lpBps: Number(p.liquidityFeeBps), validatorBps: Number(p.validationFeeBps), commissionBps: Number(p.commissionBps ?? 0n) };
 }
 
-function swapResultOf(legs: LegResult[]): SwapResult {
-  const filled = legs.filter((l) => l.status === "filled").length;
-  return { status: filled === legs.length && legs.length > 0 ? "filled" : filled === 0 ? "failed" : "partial", legs };
+/**
+ * A pools answer's rows as the planner takes them (0.40.0): each pool with its validator's
+ * minimum leg (`validators[].minLegSats`, the validator's announced terms).
+ */
+export function poolsWithMinimums(answer: PoolsAnswer): PoolRow[] {
+  const min = new Map(answer.validators.map((v) => [v.identity, v.minLegSats]));
+  return answer.pools.map((p) => {
+    const m = min.get(p.validatorIdentityKey.toLowerCase());
+    return m ? { ...p, minLegSats: m } : p;
+  });
 }
 
-/** A swap's result with one leg replaced (after "Check again"). */
-export function withLeg(r: SwapResult, leg: LegResult): SwapResult {
-  return swapResultOf(r.legs.map((l) => (l.poolOutpoint === leg.poolOutpoint ? leg : l)));
+/** Sats per whole token of an exact pair (`sats` per `tokens` base units), 0 when `tokens` is 0. */
+export function pairPrice(p: PricePair, dec: number): number {
+  return p.tokens > 0n ? Number(p.sats) / (Number(p.tokens) / 10 ** dec) : 0;
+}
+
+/**
+ * A leg's sats beyond its amount in (0.40.0, the stage's fee sats): the miner fee estimate plus its
+ * 1-sat carriers — on a buy the token payout; on a sell the token fee and commission outputs that
+ * are not zero, and the token change.
+ */
+export function legCarrySats(leg: Pick<Leg, "liquidityFee" | "validationFee" | "commission">, buy: boolean, minerFeeSats: bigint): bigint {
+  const carriers = buy ? 1n : BigInt([leg.liquidityFee, leg.validationFee, leg.commission].filter((x) => x > 0n).length + 1);
+  return minerFeeSats + carriers;
 }
 
 /**
@@ -542,20 +603,27 @@ export function enableCandidates(listed: ListedToken[], walletIds: string[], onL
   return out;
 }
 
-/** The three fees root sets (basis points, integers 0 to 10 000). */
+/** The three fees root sets (basis points, integers 0 to 10 000), and (0.40.0) the minimum leg in sats (absent or 0: none). */
 export interface TermsInput {
   lpBps: number;
   validatorBps: number;
   commissionBps: number;
+  minLegSats?: number;
 }
 
+
+/** The terms as root's messages carry them (0.40.0: `minLegSats` only when above 0). Refused unless each fee is an integer 0 to 10 000 and the minimum a whole number of sats. */
+function termsArgs(t: TermsInput): Record<string, number> {
+  for (const [k, v] of Object.entries({ lpBps: t.lpBps, validatorBps: t.validatorBps, commissionBps: t.commissionBps })) if (!Number.isInteger(v) || v < 0 || v > 10_000) throw new Error(`${k}: an integer, 0 to 10000 basis points`);
+  const min = t.minLegSats ?? 0;
+  if (!Number.isSafeInteger(min) || min < 0) throw new Error("minLegSats: a whole number of sats, 0 for none");
+  return { lpFeeBps: t.lpBps, validatorFeeBps: t.validatorBps, commissionBps: t.commissionBps, ...(min > 0 ? { minLegSats: min } : {}) };
+}
 
 /** What a quote was planned from: kept for its execution. */
 interface Planned {
   plan: Plan;
-  pools: PoolRow[];
-  live: LiveAnswer;
-  market: PoolsAnswer["market"];
+  answer: PoolsAnswer;
   dec: number;
   sym: string;
 }
@@ -589,17 +657,25 @@ export interface ClientOptions {
   identityKey?: string | null;
 }
 
-/** Where a swap is (`executeSwap`'s `onProgress`, D12), in this order; `leg` the pool outpoint (`<txid>.<vout>`) of a leg event. */
+/**
+ * Where a swap is (`executeSwap`'s `onProgress`, D12; 0.40.0): `staging` (what the swap basket
+ * lacks is staged), `relaying` (a leg sent: its pool outpoint `<txid>.<vout>` and amounts, and the
+ * legs filled so far), `repricing` (a leg refused `pool_spent`, the pool's row replaced),
+ * `returning` (a swap that stopped early moves its rows back), then `done` or `failed`.
+ */
 export type SwapProgress =
-  | { phase: "staging" }
-  | { phase: "relaying"; leg: string }
-  | { phase: "repricing"; leg: string }
+  | { phase: "staging"; sats: bigint; tokens: bigint }
+  | { phase: "relaying"; leg: string; amountIn: bigint; amountOut: bigint; filled: LegResult[] }
+  | { phase: "repricing"; leg: string; amountIn: bigint; amountOut: bigint; filled: LegResult[] }
+  | { phase: "returning"; filled: LegResult[] }
   | { phase: "done"; result: SwapResult }
   | { phase: "failed"; result?: SwapResult; error?: ClientError | Error };
 
 export interface SwapOptions {
-  /** Called as the swap moves (D12): `staging` (the swap basket is filled for the legs), `relaying` (per leg), `repricing` (a leg refused `pool_spent`, re-quoted), then `done` (a leg filled) or `failed` (none did, or it threw). */
+  /** Called as the swap moves (see `SwapProgress`). */
   onProgress?: (p: SwapProgress) => void;
+  /** Aborted: the swap stops before its next leg (`cancelled`). */
+  signal?: AbortSignal;
 }
 
 /** What a client remembers between calls; shared by `withWallet`'s clients. */
@@ -610,15 +686,15 @@ interface Shared {
   claimRead: ClaimStatus | null;
   /** What each quote was planned from: kept for its execution. */
   planned: WeakMap<Quote, Planned>;
-  /** The legs whose answer did not come: their prepared swap, for "Check again" (D15). */
-  checks: Map<string, { prepared: PreparedSwap; base: string; af: Signed }>;
+  /** A swap is running (0.40.0: one at a time). */
+  swapping: boolean;
   /** The positions last loaded, by the output a Close acts on (`<txid>.<vout>`): the wallet's row (its LP key) and the token. */
   loaded: Map<string, PositionRow>;
   /** `onDataChange`'s listeners. */
   listeners: Set<() => void>;
 }
 
-const newShared = (): Shared => ({ listRead: null, claimRead: null, planned: new WeakMap(), checks: new Map(), loaded: new Map(), listeners: new Set() });
+const newShared = (): Shared => ({ listRead: null, claimRead: null, planned: new WeakMap(), swapping: false, loaded: new Map(), listeners: new Set() });
 
 /**
  * The client of one exchange (D9): its reads over `origin` (src/lib/overlay.ts, src/lib/skein.ts),
@@ -642,7 +718,6 @@ function makeClient(opts: ClientOptions, s: Shared) {
   const boundWallet = opts.wallet ?? null;
   const signedFor: ((base: string) => Signed) | null = boundWallet ? (opts.signedFor ?? (authFetchPerInstance(boundWallet, f as typeof fetch) as unknown as (base: string) => Signed)) : null;
   const planned = s.planned;
-  const checks = s.checks;
   const loaded = s.loaded;
 
   function needWallet(): { wallet: WalletInterface; signedFor: (base: string) => Signed } {
@@ -877,8 +952,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
 
   // ---------------------------------------------------------------- history (0.39.0, H1–H6)
 
-  /** H1: a token's trades, newest first (`from ≤ at < to` ms, `limit` 1–500, `before` the cursor `next`, `lp` one LP key's). */
-  async function trades(tokenId: TokenId, o: { from?: number; to?: number; limit?: number; before?: string; lp?: string } = {}): Promise<TradesPage> {
+  /** H1: a token's trades, newest first (`from ≤ at < to` ms, `limit` 1–500, `before` the cursor `next`, 0.40.0 `pool` one pool's by id). */
+  async function trades(tokenId: TokenId, o: { from?: number; to?: number; limit?: number; before?: string; pool?: string } = {}): Promise<TradesPage> {
     return readTrades(tokenBase(tokenId, swapBase), o, ff);
   }
 
@@ -887,9 +962,24 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return readTrade(tokenBase(tokenId, swapBase), txid, ff);
   }
 
-  /** H2: a token's candles, one per non-empty bucket of `tf` over `from ≤ at < to` (ms). */
-  async function candles(tokenId: TokenId, o: { tf: CandleTf; from: number; to: number }): Promise<Candle[]> {
+  /** H2: a token's candles, one per non-empty bucket of `tf` over `from ≤ at < to` (ms); 0.40.0 `series`: `fill` (the trades', default) or `market` (the price after each pool event, the host's). */
+  async function candles(tokenId: TokenId, o: { tf: CandleTf; from: number; to: number; series?: CandleSeries }): Promise<Candle[]> {
     return readCandles(tokenBase(tokenId, swapBase), o, ff);
+  }
+
+  /** H7 (0.40.0): every pool of the token listed at `t` (ms). */
+  async function poolsAt(tokenId: TokenId, t: number): Promise<PoolAt[]> {
+    return readPoolsAt(tokenBase(tokenId, swapBase), t, ff);
+  }
+
+  /** H8 (0.40.0): the token's pool events in `from ≤ at < to`, oldest first (`pool` one pool's; forward paging: the page's `next` as `after`). */
+  async function poolHistory(tokenId: TokenId, o: { from?: number; to?: number; pool?: string; limit?: number; after?: string } = {}): Promise<PoolHistoryPage> {
+    return readPoolHistory(tokenBase(tokenId, swapBase), o, ff);
+  }
+
+  /** H9 (0.40.0): each outpoint's spender as the host's `/amm/spends` answers it (every enabled token's `/spends`). */
+  async function spendsAll(outpoints: string[]): Promise<SpendAll[]> {
+    return readSpendsAll(swapBase, outpoints, ff);
   }
 
   /** H3: a token's stats. */
@@ -907,22 +997,25 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return readHolders(tokenBase(tokenId, swapBase), tokenId, o, ff);
   }
 
-  /** H5: the LP keys' positions on every enabled token. */
-  async function positionsAll(lpKeys: string[]): Promise<TokenPosition[]> {
-    return readAllPositions(swapBase, lpKeys, ff);
+  /** H5: the pools' positions on every enabled token (0.40.0: by pool id). */
+  async function positionsAll(poolIds: string[]): Promise<TokenPosition[]> {
+    return readAllPositions(swapBase, poolIds, ff);
   }
 
 
   /**
    * A quote for one token (D12): the matching engine's plan over the pools the Swap page holds
    * (`held`: the token's pools route's answer — the host listed only pools whose validator is beating
-   * and whose commission meets the market's minimum); no request. `meta`: the token's symbol and
-   * decimals.
+   * and whose commission meets the market's minimum), each pool with its validator's minimum leg
+   * (0.40.0); no request. `meta`: the token's symbol and decimals. 0.40.0: the price and impact from
+   * the engine's `priceOf` over the same pools (the buy side for a buy, the sell side for a sell);
+   * each leg's own fees; what Swap will stage (the swap amount exact, the fee sats of the planned
+   * legs and two more) and the per-leg miner fee estimate.
    */
   function quoteSwap(req: QuoteRequest, held: PoolsAnswer | null, meta: { sym: string; dec: number }): Quote {
     if (req.amountIn <= 0n) throw new Error("Enter an amount");
-    const pools = held?.pools ?? [];
-    if (pools.length === 0) throw new Error("No pool to swap against");
+    if (!held || held.pools.length === 0) throw new Error("No pool to swap against");
+    const pools = poolsWithMinimums(held);
     const live = liveOfPools(pools);
     const dec = meta.dec;
     const buy = req.side === "buy";
@@ -936,66 +1029,69 @@ function makeClient(opts: ClientOptions, s: Shared) {
     );
     if (!r.ok) throw new Error(r.error);
     const { plan, view } = planQuote(r.request, live, dec);
+    if (plan.unfillable === "min") throw new ClientError("below_minimum", `No pool here takes a swap this small: at least ${formatAmount(plan.minAmountIn ?? 0n, buy ? 0 : dec)} ${buy ? "sats" : meta.sym}.`);
     const used = view.legs.filter((l) => l.amountIn > 0n);
     if (used.length === 0 || view.totalOut === 0n) throw new Error("The amount is too small to receive anything");
-    const sumSats = pools.reduce((a, p) => a + p.bsvReserve, 0n);
-    const sumTokens = pools.reduce((a, p) => a + p.tokenReserve, 0n);
-    const marginal = sumTokens > 0n ? Number(sumSats) / (Number(sumTokens) / 10 ** dec) : 0;
+    const price = priceOf(pools);
+    const marginal = price ? pairPrice(buy ? price.buy : price.sell, dec) : 0;
     const totalIn = used.reduce((a, l) => a + l.amountIn, 0n);
     const sats = buy ? totalIn : view.totalOut;
     const tokens = buy ? view.totalOut : totalIn;
     const effective = Number(sats) / (Number(tokens) / 10 ** dec);
-    const first = used[0]!.pool;
+    const minerFee = legMinerFeeSats(feeRate);
+    const carry = plan.legs.map((l) => legCarrySats(l, buy, minerFee));
+    const feeSats = carry.reduce((a, x) => a + x, 0n) + 2n * carry.reduce((a, x) => (x > a ? x : a), 0n);
     const q: Quote = {
       request: req,
       legs: used.map((l) => ({
         poolOutpoint: outpointText(l.outpoint),
+        poolId: (l.pool as PoolRow).poolId,
         amountIn: l.amountIn,
         amountOut: l.amountOut,
         shareBps: Number((l.amountIn * 10_000n) / req.amountIn),
         reserves: { sats: l.pool.bsvReserve, tokens: l.pool.tokenReserve },
         validator: { identityKey: l.pool.validatorIdentityKey, live: l.validator.live },
+        fees: poolFees(l.pool),
       })),
       amountOut: view.totalOut,
       minAmountOut: view.minAmountOut,
       effectivePrice: effective,
       marginalPrice: marginal,
       impactBps: marginal ? Math.round((Math.abs(effective - marginal) / marginal) * 10_000) : 0,
-      fees: { lpBps: Number(first.liquidityFeeBps), validatorBps: Number(first.validationFeeBps), commissionBps: Number(first.commissionBps ?? 0n) },
+      stage: { amount: req.amountIn, feeSats },
+      legMinerFeeSats: minerFee,
     };
-    planned.set(q, { plan, pools, live, market: held!.market, dec, sym: meta.sym });
+    planned.set(q, { plan, answer: held, dec, sym: meta.sym });
     return q;
   }
 
-  /** A relay outcome on a leg's result (0.31.1's mapping; 0.34.0: no answer carries its id for "Check again"). */
-  function onLeg(result: LegResult, o: SwapOutcome, prepared: PreparedSwap, base: string, af: Signed): void {
-    delete result.checkId;
-    if (o.status === "accepted") {
-      result.status = "filled";
-      result.txid = o.txid;
-      delete result.error;
-      delete result.kind;
-      checks.delete(o.id);
-      return;
-    }
-    result.status = "failed";
-    const kind = kindOfOutcome(o);
-    if (kind) result.kind = kind;
-    const rest = o.status === "unknown" ? o.reason.replace(/^no answer yet:? ?/, "") : "";
-    result.error = o.status === "refused" ? `refused: ${o.reason}` : o.status === "unknown" ? `no answer yet${rest ? `: ${rest}` : ""}` : o.status;
-    if (o.status === "unknown") {
-      result.checkId = o.id;
-      checks.set(o.id, { prepared, base, af });
-    } else if ("id" in o) checks.delete(o.id);
+  /** The overlay pass over the swap basket (item 5, src/wallet/swapPayouts.ts): ONE `/amm/spends`, each spender's `/tx`, this wallet's legs taken in. */
+  function resolve(wallet: WalletInterface): Promise<ResolvedLeg[]> {
+    return resolveFromOverlay(wallet, { spendsAll: (ops) => readSpendsAll(swapBase, ops, freshFetch), tx: (tokenId, txid) => readTx(tokenBase(tokenId, swapBase), txid, freshFetch) });
   }
 
   /**
-   * Runs a quoted swap with the connected wallet (D14, D15): ONE `GET /@<token>/amm/pools/beef?lp=`
-   * for the legs' LP keys — a leg whose key is missing or whose outpoint moved is gone since the
-   * quote (as before 0.34.0) — the commission key hash and each validator's peer ID from the pools
-   * the page holds; then one transaction per leg, relayed to the leg's validator (`amm.swap.submit`,
-   * its answer the settled record), the payout taken in on acceptance. A planned pool gone stops the
-   * swap unless partial fills are allowed.
+   * Runs a quoted swap with the connected wallet (0.40.0, agent-env plans/swap-balance-build-2026-11-05.md
+   * §0 7, Builder 2 item 4): ONE swap at a time, legs ONE AT A TIME.
+   *
+   *   1. The overlay pass (`resolve`); then what `amm-swap` lacks of what the plan needs — the swap
+   *      amount exact, the sats for the carriers and miner fees of the planned legs and two more —
+   *      staged by ONE `stage` (`staging`).
+   *   2. The loop: cancelled → `cancelled`; `nextLeg` over the pools held now (the token's pools
+   *      stream, any state a refusal returned, minus the excluded outpoints), `minOut` the quote's
+   *      floor less what has filled → its stop ends the swap; the pool's current output read by its
+   *      id (`GET /pools/beef?pool=`; moved → its row replaced, planned again); the staged rows that
+   *      cover the leg, else `fees`; built, signed, relayed (`relaying`):
+   *      - accepted → taken in (ONE internalizeAction) before the next leg;
+   *      - refused `pool_spent` with the pool's state → its row replaced (`repricing`);
+   *      - refused otherwise (`below_minimum` included) → that outpoint excluded;
+   *      - no answer → (a) the overlay: a staged input spent → the leg landed (taken in by the
+   *        pass), the pool spent by another's swap → continue with the same rows; (b) else the
+   *        same leg sent ONCE more to the same validator; (c) still none → that outpoint excluded
+   *        (the next leg races it with the same rows);
+   *      - after any refusal: the overlay pass.
+   *   3. Filled completely: the last leg's change went to the wallet, nothing left. Stopped early with
+   *      rows left: `moveBack` (one wallet action, `returning`); declined or failed → the rows stay.
    */
   async function executeSwap(quote: Quote, o: SwapOptions = {}): Promise<SwapResult> {
     const progress = (x: SwapProgress) => {
@@ -1005,225 +1101,187 @@ function makeClient(opts: ClientOptions, s: Shared) {
         /* the caller's callback: not the swap's failure */
       }
     };
+    if (s.swapping) throw new Error("A swap is already running: one at a time");
+    s.swapping = true;
     let result: SwapResult;
     try {
-      result = await runSwap(quote, progress);
+      result = await runSwap(quote, progress, o.signal);
     } catch (e) {
       const err = toClientError(e);
       progress({ phase: "failed", error: err instanceof Error ? err : new Error(String(err)) });
       throw err;
+    } finally {
+      s.swapping = false;
     }
+    emit();
     progress(result.status === "failed" ? { phase: "failed", result } : { phase: "done", result });
     return result;
   }
 
-  /** A leg failed with `e`: its text, and its kind when it has one (D13). */
-  function failLeg(result: LegResult, e: unknown): void {
-    result.error = errText(e);
-    const kind = errorKind(e);
-    if (kind) result.kind = kind;
-  }
-
-  async function runSwap(quote: Quote, progress: (x: SwapProgress) => void): Promise<SwapResult> {
+  async function runSwap(quote: Quote, progress: (x: SwapProgress) => void, signal?: AbortSignal): Promise<SwapResult> {
     const { wallet, signedFor } = needWallet();
     const p = planned.get(quote);
     if (!p) throw new Error("Quote again: this quote was not planned here");
     const tokenId = quote.request.tokenId;
     const base = tokenBase(tokenId, swapBase);
     const af = signedFor(base);
-    const lpOf = (outpoint: string) => p.pools.find((x) => x.outpoint === outpoint)?.lpPubKey ?? "";
-    const keys = [...new Set(p.plan.legs.map((l) => lpOf(l.outpoint)).filter((k) => k !== ""))];
-    const fresh = await readPoolsBeef(base, keys, freshFetch);
-    const gone = goneFromLookup(p.plan, fresh.pools);
-    if (gone.length > 0 && !quote.request.allowPartial) throw new ClientError("pool_spent", `${gone.map(outpointText).join(", ")} ${gone.length === 1 ? "was" : "were"} spent since the quote: quote again`);
-    const commissionPkh = p.market.commissionPkh;
-    const direction = quote.request.side === "buy" ? "bsvToToken" : "tokenToBsv";
+    const buy = quote.request.side === "buy";
+    const direction = buy ? "bsvToToken" : "tokenToBsv";
+    const minerFee = legMinerFeeSats(feeRate);
+    const meta = { sym: p.sym, dec: p.dec };
+
+    // The pools held now: the stream's answer (from the quote's), rows a refusal or a fresh read replaced, outpoints excluded.
+    let answer = p.answer;
+    const stop = watchTokenPools(tokenId, (a) => (answer = a));
+    const replaced = new Map<string, PoolRow>();
+    const excluded = new Set<string>();
+    const poolsNow = (): PoolRow[] =>
+      poolsWithMinimums(answer)
+        .map((r) => replaced.get(r.poolId) ?? r)
+        .filter((r) => !excluded.has(r.outpoint));
+
     const legs: LegResult[] = [];
-    const running: Promise<void>[] = [];
-    // The legs that can run: not spent since the quote, their validator live.
-    const runnable: { leg: Plan["legs"][number]; result: LegResult; pool: PoolRow; peerId: string }[] = [];
-    for (const leg of p.plan.legs) {
-      const poolOutpoint = outpointText(leg.outpoint);
-      if (gone.includes(leg.outpoint)) {
-        legs.push({ poolOutpoint, status: "failed", error: "spent since the quote", kind: "pool_spent" });
-        continue;
-      }
-      const pool = p.pools.find((x) => x.outpoint === leg.outpoint)!;
-      const validator = validatorStatus(pool.validatorIdentityKey, p.live);
-      if (!validator.live || !validator.peerId) {
-        legs.push({ poolOutpoint, status: "failed", error: "the pool's validator is no longer live" });
-        continue;
-      }
-      const result: LegResult = { poolOutpoint, status: "failed" };
-      legs.push(result);
-      runnable.push({ leg, result, pool, peerId: validator.peerId });
-    }
-    // 0.29.0: every leg spends only `amm-swap` outputs — tokens in, outputs carrying exactly its
-    // amount in (0.12.0); and one sats output of exactly the leg's sats. What the basket does not
-    // cover is staged by ONE send (tokens missing: the module send, the sats with it; else a plain
-    // sats send), then each leg is built from the basket.
-    const tokensIn = direction === "tokenToBsv";
-    if (runnable.length > 0) progress({ phase: "staging" });
-    let tokenCandidates = tokensIn && runnable.length > 0 ? await swapHoldings(wallet, tokenId) : [];
-    let satsCandidates = runnable.length > 0 ? await swapSatsHoldings(wallet) : [];
-    const staged: { r: (typeof runnable)[number]; poolOutput: NonNullable<ReturnType<typeof poolOutputOf>>; planned: PlannedLeg; tokens: TokenInput[] | null; sats: SatsInput | null }[] = [];
-    for (const r of runnable) {
-      try {
-        const poolOutput = poolOutputOf(fresh, r.leg.outpoint);
-        if (!poolOutput) throw new Error("the pools read has no transaction for this pool");
-        let tokens: TokenInput[] | null = null;
-        if (tokensIn) {
-          tokens = selectExactTokenInputs(tokenCandidates, r.leg.amountIn);
-          if (tokens) tokenCandidates = tokenCandidates.filter((c) => !tokens!.includes(c));
-        }
-        // A leg whose tokens are still to be staged gets one output of 1 sat (sendToSwapBasket).
-        const planned = await planSwapLeg({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg: r.leg, pool: r.pool, poolOutput, commissionPkh, ...(tokensIn ? { tokenInputs: tokens ?? [{ satoshis: 1, amount: r.leg.amountIn }] } : {}), satsPerKb: feeRate });
-        const sats = selectExactSatsInput(satsCandidates, planned.funding.satoshis);
-        if (sats) satsCandidates = satsCandidates.filter((c) => c !== sats);
-        staged.push({ r, poolOutput, planned, tokens, sats });
-      } catch (e) {
-        failLeg(r.result, e);
-      }
-    }
-    const shortTokens = staged.filter((x) => tokensIn && !x.tokens);
-    const shortSats = staged.filter((x) => !x.sats);
-    let sent: number[] | undefined;
-    if (shortTokens.length > 0) {
-      const s = await sendToSwapBasket(wallet, base, tokenId, { tokens: shortTokens.map((x) => ({ amount: x.r.leg.amountIn, pool: x.r.leg.outpoint })), sats: shortSats.map((x) => ({ satoshis: x.planned.funding.satoshis, pool: x.r.leg.outpoint })) }, { sym: p.sym }, submitAt(base));
-      sent = s.tx;
-      const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
-      shortTokens.forEach((x, n) => {
-        const h = s.holdings[n];
-        if (h) x.tokens = [h];
-        else x.r.result.error = `the swap basket send has no output for this leg${why}`;
-      });
-      shortSats.forEach((x, n) => {
-        const h = s.sats[n];
-        if (h) x.sats = h;
-        else x.r.result.error ??= `the swap basket send has no sats output for this leg${why}`;
-      });
-    } else if (shortSats.length > 0) {
-      const s = await sendSatsToSwapBasket(wallet, tokenId, shortSats.map((x) => ({ satoshis: x.planned.funding.satoshis, pool: x.r.leg.outpoint })), { sym: p.sym });
-      sent = s.tx;
-      const why = s.errors.length ? ` (${s.errors.join("; ")})` : "";
-      shortSats.forEach((x, n) => {
-        const h = s.sats[n];
-        if (h) x.sats = h;
-        else x.r.result.error = `the swap basket send has no sats output for this leg${why}`;
-      });
-    }
-    const holdingBeef = staged.length > 0 ? await swapHoldingBeef(wallet, sent) : undefined;
-    // The legs sent to the relay: their expected amountOut, and whether their outcome is known.
-    const tracks: { result: LegResult; amountOut: bigint; done: boolean }[] = [];
-    /** Relays the leg (0.34.0: no browser note; the staged rows are the leg's record, D24). */
-    const relayLeg = (prepared: PreparedSwap, peerId: string): Promise<SwapOutcome> =>
-      relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", id: swapIdOf(prepared), reason: errText(e) }));
-    /**
-     * 0.31.1: one retry of a leg refused `pool_spent` — re-quoted alone against the validator's
-     * newest pool state (the engine's single-pool math, same side and amountIn), sent only while
-     * the order's bound holds (filled legs + this one + the legs still out ≥ the plan's
-     * resolvedMinAmountOut), rebuilt on the new pool output with the same staged rows (0.34.0: its
-     * BEEF from `GET /pools/beef?lp=<the pool's LP key>`, constant along its continuations). Null:
-     * the leg failed here (its error set); else the second relay's outcome.
-     */
-    const retryLeg = async (x: { leg: Plan["legs"][number]; track: (typeof tracks)[number]; was: PoolRow; pool: PoolState; peerId: string; tokens: TokenInput[] | null; sats: SatsInput }): Promise<{ o: SwapOutcome; prepared: PreparedSwap } | null> => {
-      const { track, pool } = x;
-      const result = track.result;
-      const priced = computeSwap(pool, direction, x.leg.amountIn);
-      const amountOut = priced?.amountOut ?? 0n;
-      const others = tracks.filter((t) => t !== track).reduce((a, t) => a + (t.result.status === "filled" || !t.done ? t.amountOut : 0n), 0n);
-      if (!priced || others + amountOut < p.plan.resolvedMinAmountOut) {
-        result.error = `repriced below your minimum: ${formatAmount(amountOut, direction === "bsvToToken" ? p.dec : 0)} for this leg`;
-        result.kind = "slippage";
-        return null;
-      }
-      let peerId = x.peerId;
-      if (pool.validatorIdentityKey !== x.was.validatorIdentityKey) {
-        const v = validatorStatus(pool.validatorIdentityKey, p.live);
-        if (!v.live || !v.peerId) {
-          result.error = "the pool's validator changed";
-          return null;
-        }
-        peerId = v.peerId;
-      }
-      const leg: Plan["legs"][number] = { outpoint: pool.outpoint, amountIn: x.leg.amountIn, ...priced };
-      try {
-        const poolOutput = poolOutputOf(await readPoolsBeef(base, [x.was.lpPubKey], freshFetch), pool.outpoint);
-        if (!poolOutput) throw new Error("the pool moved again: quote again");
-        const common: PlanLegInput & { tokenInputs?: TokenInput[] } = { wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh, ...(x.tokens ? { tokenInputs: x.tokens } : {}), satsPerKb: feeRate };
-        const planned = await planSwapLeg(common);
-        const prepared = await prepareSwap({ ...common, satsInput: x.sats, ...(holdingBeef ? { holdingBeef } : {}), planned });
-        track.amountOut = amountOut;
-        result.repriced = true;
-        return { o: await relayLeg(prepared, peerId), prepared };
-      } catch (e) {
-        failLeg(result, e);
-        return null;
+    let filledIn = 0n;
+    let filledOut = 0n;
+    let order: string | undefined;
+    /** Legs sent with no answer yet: what they spend, to account a later take-in by the overlay pass. */
+    const pending: { prepared: PreparedSwap; leg: Leg; poolId: string }[] = [];
+    const accountResolved = (taken: ResolvedLeg[]) => {
+      for (const t of taken) {
+        const i = pending.findIndex((x) => x.prepared.satsInputs.some((r) => t.inputs.includes(r.outpoint)));
+        if (i < 0) continue;
+        const [x] = pending.splice(i, 1);
+        order ??= x!.prepared.order;
+        filledIn += x!.leg.amountIn;
+        filledOut += x!.leg.amountOut;
+        legs.push({ poolOutpoint: outpointText(x!.leg.outpoint), poolId: x!.poolId, amountIn: x!.leg.amountIn, amountOut: x!.leg.amountOut, txid: t.txid });
       }
     };
-    for (const { r, poolOutput, planned, tokens, sats } of staged) {
-      const { leg, result, pool, peerId } = r;
-      if (tokensIn && !tokens) {
-        result.error ??= `no ${p.sym} in the swap basket for exactly ${formatAmount(leg.amountIn, p.dec)}`;
-        continue;
+
+    try {
+      accountResolved(await resolve(wallet));
+      // 1. Stage what the basket lacks.
+      const needTokens = buy ? 0n : quote.stage.amount;
+      const needSats = (buy ? quote.stage.amount : 0n) + quote.stage.feeSats;
+      const haveSats = BigInt(await swapSatsTotal(wallet));
+      const haveTokens = buy ? 0n : (await swapHoldings(wallet, tokenId)).reduce((a, t) => a + t.amount, 0n);
+      const lackSats = needSats > haveSats ? needSats - haveSats : 0n;
+      const lackTokens = needTokens > haveTokens ? needTokens - haveTokens : 0n;
+      if (lackSats > 0n || lackTokens > 0n) {
+        progress({ phase: "staging", sats: lackSats, tokens: lackTokens });
+        await stage(wallet, { sats: Number(lackSats), ...(lackTokens > 0n ? { tokens: { tokenId, amount: lackTokens } } : {}) }, { sym: p.sym, submit: submitAt(base) });
       }
-      if (!sats) {
-        result.error ??= `no sats in the swap basket for this leg`;
-        continue;
+
+      // 2. The loop.
+      let why: SwapStop = "filled";
+      for (;;) {
+        if (signal?.aborted) {
+          why = "cancelled";
+          break;
+        }
+        const remaining = quote.request.amountIn - filledIn;
+        const pools = poolsNow();
+        const minOut = quote.minAmountOut > filledOut ? quote.minAmountOut - filledOut : 0n;
+        const next = nextLeg({ pools, direction, remaining, fixedCost: { minerFeeSats: minerFee }, minOut });
+        if ("stop" in next) {
+          why = next.stop;
+          break;
+        }
+        const leg = next.leg;
+        const row = pools.find((x) => x.outpoint === leg.outpoint)!;
+        const fresh = await readPoolsBeef(base, [row.poolId], freshFetch);
+        const now = fresh.pools.find((x) => x.poolId === row.poolId);
+        if (!now) {
+          excluded.add(row.outpoint);
+          continue;
+        }
+        if (now.outpoint !== row.outpoint) {
+          replaced.set(row.poolId, { ...row, ...now });
+          continue;
+        }
+        const poolOutput = poolOutputOf(fresh, leg.outpoint);
+        const peerId = row.validatorPeerId ?? answer.validators.find((v) => v.identity === row.validatorIdentityKey.toLowerCase())?.peerId;
+        if (!poolOutput || !peerId) {
+          excluded.add(row.outpoint);
+          continue;
+        }
+        const common: PlanLegInput = { wallet, tokenId, meta, direction, leg, pool: row, poolOutput, commissionPkh: answer.market.commissionPkh, satsPerKb: feeRate };
+        const inputs = selectLegInputs(common, await swapSatsHoldings(wallet), buy ? [] : await swapHoldings(wallet, tokenId));
+        if (!inputs) {
+          why = "fees";
+          break;
+        }
+        const prepared = await prepareSwap({ ...common, inputs, ...(order ? { order } : {}), last: leg.amountIn === remaining, holdingBeef: await swapHoldingBeef(wallet) });
+        const at = { leg: outpointText(leg.outpoint), amountIn: leg.amountIn, amountOut: leg.amountOut };
+        progress({ phase: "relaying", ...at, filled: [...legs] });
+        let outcome = await relayLeg(wallet, af, base, prepared, peerId);
+        if (outcome.status === "unknown" || outcome.status === "timeout") {
+          // (a) The overlay: what the leg spends.
+          const spent = await readSpendsAll(swapBase, [outpointText(leg.outpoint), ...inputs.sats.map((r) => r.outpoint), ...inputs.tokens.map((r) => r.outpoint)], freshFetch).catch(() => [] as SpendAll[]);
+          const ours = spent.find((x) => x.spentBy && x.outpoint !== outpointText(leg.outpoint));
+          if (ours) {
+            pending.push({ prepared, leg, poolId: row.poolId });
+            accountResolved(await resolve(wallet));
+            continue;
+          }
+          if (spent.some((x) => x.spentBy && x.outpoint === outpointText(leg.outpoint))) continue;
+          // (b) Once more to the same validator.
+          outcome = await relayLeg(wallet, af, base, prepared, peerId);
+          if (outcome.status === "unknown" || outcome.status === "timeout") {
+            // (c) Race: the next leg to another pool with the same rows.
+            pending.push({ prepared, leg, poolId: row.poolId });
+            excluded.add(row.outpoint);
+            continue;
+          }
+        }
+        if (outcome.status === "accepted") {
+          if (!outcome.completed.internalized) {
+            pending.push({ prepared, leg, poolId: row.poolId });
+            accountResolved(await resolve(wallet));
+            continue;
+          }
+          order ??= prepared.order;
+          filledIn += leg.amountIn;
+          filledOut += leg.amountOut;
+          legs.push({ poolOutpoint: at.leg, poolId: row.poolId, amountIn: leg.amountIn, amountOut: leg.amountOut, txid: outcome.txid });
+          continue;
+        }
+        if (outcome.status === "refused" && outcome.reason.startsWith("pool_spent") && outcome.pool) {
+          progress({ phase: "repricing", ...at, filled: [...legs] });
+          replaced.set(row.poolId, { ...row, ...outcome.pool });
+        } else {
+          excluded.add(row.outpoint);
+        }
+        accountResolved(await resolve(wallet));
       }
-      try {
-        const prepared = await prepareSwap({ wallet, tokenId, meta: { sym: p.sym, dec: p.dec }, direction, leg, pool, poolOutput, commissionPkh, ...(tokens ? { tokenInputs: tokens } : {}), satsInput: sats, ...(holdingBeef ? { holdingBeef } : {}), planned, satsPerKb: feeRate });
-        const track = { result, amountOut: leg.amountOut, done: false };
-        tracks.push(track);
-        running.push(
-          (async () => {
-            progress({ phase: "relaying", leg: result.poolOutpoint });
-            let o = await relayLeg(prepared, peerId);
-            let sentAs = prepared;
-            // 0.31.1: refused `pool_spent` with the pool's newest state attached → repriced against
-            // that state and sent once more (the staged `amm-swap` rows are still there).
-            if (o.status === "refused" && o.reason.startsWith("pool_spent") && o.pool) {
-              progress({ phase: "repricing", leg: result.poolOutpoint });
-              const again = await retryLeg({ leg, track, was: pool, pool: o.pool, peerId, tokens, sats });
-              if (!again) {
-                track.done = true;
-                return;
-              }
-              o = again.o;
-              sentAs = again.prepared;
-            }
-            track.done = true;
-            onLeg(result, o, sentAs, base, af);
-          })(),
-        );
-      } catch (e) {
-        failLeg(result, e);
+
+      // 3. The end.
+      const out: SwapResult = { status: filledIn >= quote.request.amountIn ? "filled" : legs.length > 0 ? "partial" : "failed", stop: why, legs, totalIn: filledIn, totalOut: filledOut, unfilled: quote.request.amountIn - filledIn };
+      if (why !== "filled" && pending.length === 0) {
+        const left = (await swapSatsHoldings(wallet)).length + (await swapHoldings(wallet, tokenId)).length;
+        if (left > 0) {
+          progress({ phase: "returning", filled: [...legs] });
+          try {
+            const m = await moveBack({ wallet, base: swapBase, tokenId, meta: { sym: p.sym }, submit: submitAt(swapBase) });
+            out.returned = { txid: m.txid, tokens: m.amount };
+          } catch (e) {
+            out.returned = { error: errText(e) };
+          }
+        }
       }
+      return out;
+    } finally {
+      stop();
     }
-    await Promise.all(running);
-    emit();
-    return swapResultOf(legs);
+  }
+
+  /** One relay of a prepared leg (0.34.0: no browser note); a thrown error is no answer. */
+  function relayLeg(wallet: WalletInterface, af: Signed, base: string, prepared: PreparedSwap, peerId: string): Promise<SwapOutcome> {
+    return relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", id: swapIdOf(prepared), reason: errText(e) }));
   }
 
   /** A plain GET past the browser's short cache (`state` class: max-age 5): what a swap is about to spend must be read now. */
   const freshFetch = (url: string, init?: RequestInit) => f(url, { ...init, cache: "no-cache" });
-
-  /**
-   * "Check again" (D15) for a leg with no answer yet: its record read ONCE (`GET
-   * /@<token>/amm/swaps?id=`, plain), acted on (accepted: the payout taken in). → the leg's result
-   * now (`poolOutpoint` as given).
-   */
-  async function checkSwapAgain(leg: LegResult): Promise<LegResult> {
-    const { wallet } = needWallet();
-    const id = leg.checkId;
-    const c = id ? checks.get(id) : undefined;
-    if (!id || !c) throw new Error("Nothing to check: this leg is not waiting on an answer here");
-    const o = await checkAgain({ wallet, authFetch: c.af, base: c.base, fetch: freshFetch }, c.prepared, id);
-    const next: LegResult = { poolOutpoint: leg.poolOutpoint, status: "failed", ...(leg.repriced ? { repriced: true as const } : {}) };
-    onLeg(next, o, c.prepared, c.base, c.af);
-    if (next.status === "filled") emit();
-    return next;
-  }
 
   /** The connected wallet's spendable sats: the toolbox's balance special operation (`Wallet.balance()`'s call), its `totalOutputs`; a page may not read the admin-only `default` basket. */
   async function walletSats(): Promise<bigint> {
@@ -1248,13 +1306,14 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const [poolRows, history, list] = await Promise.all([basketRows(wallet, POOLS_BASKET), historyPoolRows(wallet), enabledList().catch(() => [] as EnabledToken[])]);
     const enabled = new Map(list.filter((t) => t.status === "enabled").map((t) => [t.tokenId, t]));
     const filed = new Set(poolRows.map((r) => r.outpoint.replace("_", ".")));
-    // The rows by token, one per LP key (the pool's key for its life: a filed row and a history row of one pool are one).
+    // The rows by token, one per pool id (0.40.0: the deploy outpoint is the pool's id).
     const byToken = new Map<string, Map<string, PositionRow>>();
     for (const row of positionRowsOf(mergePoolRows(history, poolRows))) {
-      if (!row.lpPubKey || !enabled.has(row.tokenId)) continue;
-      const keys = byToken.get(row.tokenId) ?? new Map<string, PositionRow>();
-      if (!keys.has(row.lpPubKey)) keys.set(row.lpPubKey, row);
-      byToken.set(row.tokenId, keys);
+      if (!enabled.has(row.tokenId)) continue;
+      const ids = byToken.get(row.tokenId) ?? new Map<string, PositionRow>();
+      const poolId = row.deployOutpoint.replace(".", "_");
+      if (!ids.has(poolId)) ids.set(poolId, row);
+      byToken.set(row.tokenId, ids);
     }
     const out: Position[] = [];
     const closed: Position[] = [];
@@ -1271,10 +1330,11 @@ function makeClient(opts: ClientOptions, s: Shared) {
       const meta = { sym: t?.sym ?? tokenId.slice(0, 8), dec: t?.dec ?? 0, ...(t?.icon ? { icon: t.icon } : {}) };
       const beating = new Set((await readPools(base, f).catch(() => null))?.validators.map((x) => x.identity) ?? []);
       for (const p of pools) {
-        const row = keys.get(p.lpPubKey)!;
+        const row = keys.get(p.poolId);
         const fees = { feesEarnedSats: p.sats, feesEarnedTokens: p.tokens };
+        if (!row) continue;
         if (p.status === "closed" || !p.outpoint || !p.current) {
-          closed.push({ outpoint: row.deployOutpoint, tokenId, ...meta, sats: 0n, tokens: 0n, validator: { identityKey: row.validatorIdentity ?? "", live: false }, closed: true, ...fees });
+          closed.push({ outpoint: row.deployOutpoint, poolId: p.poolId, swaps: p.swaps, tokenId, ...meta, sats: 0n, tokens: 0n, validator: { identityKey: row.validatorIdentity ?? "", live: false }, closed: true, ...fees });
           continue;
         }
         const outpoint = p.outpoint.replace("_", ".");
@@ -1283,6 +1343,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
         if (p.status === "live" && outpoint === row.deployOutpoint && !filed.has(outpoint)) await fileDeployRow(wallet, base, history, outpoint, meta);
         out.push({
           outpoint,
+          poolId: p.poolId,
+          swaps: p.swaps,
           tokenId,
           ...meta,
           sats: p.current.bsvReserve,
@@ -1329,7 +1391,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
   async function validatorTerms(tokenId: TokenId): Promise<ValidatorTerms | NoTerms> {
     const t = (await instanceTerms(tokenId)).validator;
     if (!t) return { none: true };
-    return { validator: { identityKey: t.identity, live: Boolean(t.peerId) }, isThisExchange: true, fees: { lpBps: t.lpFeeBps, validatorBps: t.validatorFeeBps, commissionBps: t.commissionBps } };
+    return { validator: { identityKey: t.identity, live: Boolean(t.peerId) }, isThisExchange: true, fees: { lpBps: t.lpFeeBps, validatorBps: t.validatorFeeBps, commissionBps: t.commissionBps }, minLegSats: t.minLegSats };
   }
 
   /**
@@ -1366,8 +1428,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
 
   /**
    * Closes a position (src/lp/close.ts): everything in the pool returns to the wallet (its own action
-   * pays the miner fee). 0.34.0: the pool's current output and its BEEF by its LP key (`GET
-   * /@<token>/amm/pools/beef?lp=<key>`, D2: the pool's id); the page's submit at the host root (D19).
+   * pays the miner fee). 0.40.0: the pool's current output and its BEEF by its pool id (`GET
+   * /@<token>/amm/pools/beef?pool=<deploy outpoint>`); the page's submit at the host root (D19).
    */
   async function closePosition(req: CloseRequest): Promise<CloseResult> {
     const { wallet } = needWallet();
@@ -1376,10 +1438,10 @@ function makeClient(opts: ClientOptions, s: Shared) {
       await myPositions();
       row = loaded.get(req.outpoint);
     }
-    if (!row || !row.lpPubKey) throw new Error("No such position");
+    if (!row) throw new Error("No such position");
     const [meta, base] = await Promise.all([tokenMeta(), tokenBaseOf(row.tokenId)]);
     const m = meta.get(row.tokenId);
-    const poolOutput = poolOutputOf(await readPoolsBeef(base, [row.lpPubKey], freshFetch), req.outpoint);
+    const poolOutput = poolOutputOf(await readPoolsBeef(base, [row.deployOutpoint.replace(".", "_")], freshFetch), req.outpoint);
     if (!poolOutput) throw new Error(`the pool is no longer at ${req.outpoint}: reload your positions`);
     const prepared = await prepareClose({
       wallet,
@@ -1400,8 +1462,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
    * `sats` deployed in ONE wallet createAction — the old pool the explicit input (as Close spends
    * it), the new one output 0 affirmed by the validator at its terms now (`amm.pool.affirm`, as a
    * deploy), the token difference through the wallet's module, the sats difference to or from the
-   * wallet's change. The old pool's output and BEEF by its LP key (`GET
-   * /@<token>/amm/pools/beef?lp=<key>`); the page's submit at the host root; the new pool's row
+   * wallet's change. The old pool's output and BEEF by its pool id (`GET
+   * /@<token>/amm/pools/beef?pool=<id>`); the page's submit at the host root; the new pool's row
    * filed in `amm-pools`.
    */
   async function rebalancePosition(req: RebalanceRequest): Promise<RebalanceResult> {
@@ -1412,12 +1474,12 @@ function makeClient(opts: ClientOptions, s: Shared) {
       await myPositions();
       row = loaded.get(req.outpoint);
     }
-    if (!row || !row.lpPubKey) throw new Error("No such position");
+    if (!row) throw new Error("No such position");
     const [terms, held, meta, base] = await Promise.all([instanceTerms(row.tokenId), heldOutputs(wallet), tokenMeta(), tokenBaseOf(row.tokenId)]);
     const v = terms.validator;
     if (!v) throw new Error(NO_VALIDATOR);
     const m = meta.get(row.tokenId);
-    const poolOutput = poolOutputOf(await readPoolsBeef(base, [row.lpPubKey], freshFetch), req.outpoint);
+    const poolOutput = poolOutputOf(await readPoolsBeef(base, [row.deployOutpoint.replace(".", "_")], freshFetch), req.outpoint);
     if (!poolOutput) throw new ClientError("stale_pool", `the pool is no longer at ${req.outpoint}: reload your positions`);
     const r = await rebalancePool({
       wallet,
@@ -1451,7 +1513,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const { wallet } = needWallet();
     const [held, swaps, meta] = await Promise.all([
       heldOutputs(wallet),
-      swapTotals(wallet).catch(() => new Map<string, { amount: bigint; outputs: number; sats: number }>()),
+      swapTotals(wallet).catch(() => new Map<string, { amount: bigint; outputs: number }>()),
       tokenMeta(),
     ]);
     const registered = new Set((await enabledTokens().catch(() => [] as EnabledToken[])).map((t) => t.tokenId));
@@ -1472,24 +1534,47 @@ function makeClient(opts: ClientOptions, s: Shared) {
         balance,
         outputs: t?.valueOutputs ?? 0,
         inSwaps: swaps.get(tokenId)?.amount ?? 0n,
-        swapSats: swaps.get(tokenId)?.sats ?? 0,
         onExchange: registered.has(tokenId),
       };
     });
-    return out.filter((t) => t.balance > 0n || t.inSwaps > 0n || t.swapSats > 0).sort((a, b) => a.sym.localeCompare(b.sym) || a.tokenId.localeCompare(b.tokenId));
+    return out.filter((t) => t.balance > 0n || t.inSwaps > 0n).sort((a, b) => a.sym.localeCompare(b.sym) || a.tokenId.localeCompare(b.tokenId));
   }
 
   /**
-   * The silent pass over the swap basket's staged legs (0.34.0, D18, D24; src/wallet/swapPayouts.ts):
-   * per token ONE `GET /spends?outpoint=` over the pools its rows were staged for, the spenders'
-   * transactions, this wallet's payouts taken in. Nothing shown; a payout taken in reloads the
-   * pages' data. Never throws.
+   * The pass on load (0.40.0, src/wallet/swapPayouts.ts, src/market/activeSwap.ts): a labelled
+   * staged token output the swap basket lacks filed from its action's description (its BEEF `GET
+   * /@<token>/amm/tx?id=`), then the overlay pass over every `amm-swap` row (ONE `/amm/spends`, each
+   * spender's `/tx`, this wallet's legs taken in). Nothing shown; a take-in reloads the pages' data.
+   * Never throws. → the txids taken in.
    */
   async function settleSwaps(): Promise<string[]> {
     if (!boundWallet) return [];
-    const taken = await settleStagedSwaps(boundWallet, (t) => tokenBase(t, swapBase), f);
-    if (taken.length > 0) emit();
+    let filed = false;
+    try {
+      for (const u of await unfiledStagedTokens(boundWallet)) {
+        const beef = await readTx(tokenBase(u.tokenId, swapBase), u.txid, freshFetch).catch(() => null);
+        if (beef && (await fileStagedToken(boundWallet, u, beef).catch(() => false))) filed = true;
+      }
+    } catch {
+      /* the next load */
+    }
+    const taken = (await resolve(boundWallet)).map((t) => t.txid);
+    if (filed || taken.length > 0) emit();
     return taken;
+  }
+
+  /** The sats in the swap basket (0.40.0: shown once, not per token). */
+  async function swapBasketSats(): Promise<number> {
+    const { wallet } = needWallet();
+    return swapSatsTotal(wallet);
+  }
+
+  /** "Move back" of the swap basket's sats alone (0.40.0, src/market/activeSwap.ts `moveBackSats`): one plain createAction, the sats rows its inputs, no outputs. */
+  async function moveBackStagedSats(): Promise<MovedBack> {
+    const { wallet } = needWallet();
+    const r = await moveBackSats(wallet);
+    emit();
+    return r;
   }
 
   /**
@@ -1624,13 +1709,13 @@ function makeClient(opts: ClientOptions, s: Shared) {
 
   /**
    * Sets the default validator terms (0.17.0): root's `{fn: "defaults", args: {terms: {lpFeeBps,
-   * validatorFeeBps, commissionBps}}}` to the config instance's `<app>/admin` — a new token
-   * instance's initial terms (its own `amm/terms`, root's message to `/@<tokenId>`, wins once
-   * written). Refused here unless each fee is an integer 0 to 10 000.
+   * validatorFeeBps, commissionBps, minLegSats?}}}` to the config instance's `<app>/admin` — a new
+   * token instance's initial terms (its own `amm/terms`, root's message to `/@<tokenId>`, wins once
+   * written). Refused here unless each fee is an integer 0 to 10 000 (0.40.0: and the minimum leg a
+   * whole number of sats; 0 or absent is none and is not sent).
    */
   async function setDefaultTerms(t: TermsInput): Promise<void> {
-    for (const [k, v] of Object.entries(t)) if (!Number.isInteger(v) || v < 0 || v > 10_000) throw new Error(`${k}: an integer, 0 to 10000 basis points`);
-    await sendDefaults({ terms: { lpFeeBps: t.lpBps, validatorFeeBps: t.validatorBps, commissionBps: t.commissionBps } });
+    await sendDefaults({ terms: termsArgs(t) });
   }
 
   /** One token's validator terms as its instance holds them (0.35.0; P7 `GET /@<token>/amm/terms`, plain): the three fees, or null (a market only). */
@@ -1640,16 +1725,15 @@ function makeClient(opts: ClientOptions, s: Shared) {
 
   /**
    * Sets one token's validator terms (0.35.0, open-exchange 0.12.0): root's `{fn: "terms", args:
-   * {tokenId, terms: {lpFeeBps, validatorFeeBps, commissionBps} | null}}` to the swap instance's
+   * {tokenId, terms: {lpFeeBps, validatorFeeBps, commissionBps, minLegSats?} | null}}` to the swap instance's
    * `<app>/admin`; swap emits it as a fact and the host sends it to the token's instance as root's
    * `terms` (null: a market only). Nothing answers back: the token's `/terms` shows the result.
    * Refused here unless each fee is an integer 0 to 10 000.
    */
   async function setTokenTerms(tokenId: TokenId, t: TermsInput | null): Promise<void> {
-    if (t) for (const [k, v] of Object.entries(t)) if (!Number.isInteger(v) || v < 0 || v > 10_000) throw new Error(`${k}: an integer, 0 to 10000 basis points`);
+    const terms = t ? termsArgs(t) : null;
     const { signedFor } = needWallet();
     const me = await swapIdentity();
-    const terms = t ? { lpFeeBps: t.lpBps, validatorFeeBps: t.validatorBps, commissionBps: t.commissionBps } : null;
     await sendMessage(signedFor(swapBase), swapBase, me, `${app()}/admin`, { fn: "terms", args: { tokenId: sdkTokenId(tokenId), terms } });
   }
 
@@ -1715,6 +1799,9 @@ function makeClient(opts: ClientOptions, s: Shared) {
     trades: guard(trades),
     trade: guard(trade),
     candles: guard(candles),
+    poolsAt: guard(poolsAt),
+    poolHistory: guard(poolHistory),
+    spendsAll: guard(spendsAll),
     stats: guard(stats),
     statsAll: guard(statsAll),
     holders: guard(holders),
@@ -1723,7 +1810,6 @@ function makeClient(opts: ClientOptions, s: Shared) {
     // swap
     quoteSwap,
     executeSwap,
-    checkSwapAgain: guard(checkSwapAgain),
     walletSats: guard(walletSats),
     // liquidity
     myPositions: guard(myPositions),
@@ -1734,6 +1820,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
     // your tokens
     myTokens: guard(myTokens),
     settleSwaps: guard(settleSwaps),
+    swapBasketSats: guard(swapBasketSats),
+    moveBackStagedSats: guard(moveBackStagedSats),
     moveBackTokens: guard(moveBackTokens),
     sendTokens: guard(sendTokens),
     // settings

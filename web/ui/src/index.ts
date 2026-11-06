@@ -20,11 +20,23 @@ export { SWAP_BASKET } from "./wallet/color.js";
 export { SWAP_PROTOCOL } from "./wallet/color.js";
 /** The keyID prefix of an `amm-swap` row's key (`amm-swap-`). */
 export { SWAP_KEY_PREFIX } from "./market/activeSwap.js";
-/** The keyID of a staged `amm-swap` row: `amm-swap-<pool txid>.<vout>` (token row) or `…:sats` (its sats row). */
-export { swapKeyID } from "./market/activeSwap.js";
-/** customInstructions of an `amm-swap` token row (asset, amount and the key that spends it). */
+/** A staged `amm-swap` row's keyID (0.40.0): `amm-swap-<16 random bytes, hex>`. */
+export { newSwapKeyID } from "./market/activeSwap.js";
+/** The label of a staging action that carries tokens (`amm-swap-stage`, 0.40.0). */
+export { SWAP_STAGE_LABEL } from "./market/activeSwap.js";
+/** The marker a staged token output's description ends with (` · amm-swap <hex>`): it names the key id. */
+export { SWAP_KEY_MARK } from "./market/activeSwap.js";
+/** A staged token output's description: the readable text, then `SWAP_KEY_MARK` and the keyID's hex. */
+export { swapKeyDescription } from "./market/activeSwap.js";
+/** The keyID a staged token output's description names, or null. */
+export { swapKeyIdOfDescription } from "./market/activeSwap.js";
+/** The keyID of a leg's change kept in `amm-swap`: `amm-swap-<txid>.<vout>:change`, the leg's first input of that kind. */
+export { changeKeyID } from "./market/swapAction.js";
+/** An order's payout, own-commission and last-leg change derivation: from the order's key input. */
+export { legDerivation } from "./market/swapAction.js";
+/** customInstructions of an `amm-swap` token row (asset, amount, the key that spends it; a change row's `order`). */
 export { swapInstructions } from "./wallet/color.js";
-/** customInstructions of an `amm-swap` sats row (`sats: true`, the token it was staged for, its key). */
+/** customInstructions of an `amm-swap` sats row (`sats: true`, its key; a change row's `order`). */
 export { swapSatsInstructions } from "./wallet/color.js";
 /** The key protocol of a pool's LP key (BRC-29, to self): the `amm-pools` row's protocolID. */
 export { LP_KEY_PROTOCOL } from "./lp/poolDeploy.js";

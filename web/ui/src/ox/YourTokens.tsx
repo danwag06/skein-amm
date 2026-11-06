@@ -3,14 +3,15 @@
  * this exchange or not; beside the balance, what the swap basket holds of it,
  * with "Move back" (0.12.0: the recovery path for a stuck swap). 0.34.0 (D18, D24): no
  * "Unfinished" card: on load a silent pass settles the swap basket's staged legs (a payout this
- * wallet's swap left is taken in; nothing is shown). 0.29.6: the swap-basket line shows the sats
- * staged for the token, Move back offered for tokens or sats. 0.30.0: "Send" on a token with a balance — an inline form (handle, amount, memo)
+ * wallet's swap left is taken in; nothing is shown). 0.40.0: the sats in the swap basket are shown
+ * once, above the list, with their own Move back (they are no token's); a token's swap-basket line
+ * shows its tokens. 0.30.0: "Send" on a token with a balance — an inline form (handle, amount, memo)
  * under the row, one open at a time; @1sat/actions `send1Color` builds the send through the wallet's
  * 1Color module and delivers it to the handle's messagebox (BRC-232); the row then says what happened.
  */
 import { useState } from "react";
 import type { Send1ColorResult } from "@1sat/actions";
-import { COLOR_DEPLOY_HREF, moveBackTokens, sendTokens, useMyTokens, useSettleSwaps, type Session, type WalletToken } from "../data/exchange";
+import { COLOR_DEPLOY_HREF, moveBackStagedSats, moveBackTokens, sendTokens, useMyTokens, useSettleSwaps, useSwapBasketSats, type Session, type WalletToken } from "../data/exchange";
 import { fmtAmount, fmtSats, parseInput } from "./format";
 import { NeedWallet, Notice, TokenName } from "./bits";
 
@@ -22,12 +23,11 @@ function Status({ t }: { t: WalletToken }) {
 function SwapBasket({ t, onStart }: { t: WalletToken; onStart?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (t.inSwaps === 0n && t.swapSats === 0) return null;
+  if (t.inSwaps === 0n) return null;
   return (
     <span className="status-cell">
       <span className="muted small">
-        In the swap basket {fmtAmount(t.inSwaps, t.dec)}
-        {t.swapSats > 0 ? ` · ${fmtSats(BigInt(t.swapSats))} sats staged` : ""}{" "}
+        In the swap basket {fmtAmount(t.inSwaps, t.dec)}{" "}
         <button
           type="button"
           className="btn btn-outline"
@@ -229,9 +229,42 @@ function TokenRow({ t, sending, setSending }: { t: WalletToken; sending: boolean
   );
 }
 
+/** The sats in the swap basket (0.40.0): one line, with Move back (one plain wallet action, no outputs: the wallet's change takes them). */
+function StagedSats({ sats }: { sats: number }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (sats === 0) return null;
+  return (
+    <p className="muted small">
+      {fmtSats(BigInt(sats))} sats in the swap basket{" "}
+      <button
+        type="button"
+        className="btn btn-outline"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          moveBackStagedSats().then(
+            () => setBusy(false),
+            (e: unknown) => {
+              setError(e instanceof Error ? e.message : String(e));
+              setBusy(false);
+            },
+          );
+        }}
+        aria-label="Move the sats in the swap basket back into your wallet"
+      >
+        {busy ? "Moving…" : "Move back"}
+      </button>
+      {error && <span className="bad small"> {error}</span>}
+    </p>
+  );
+}
+
 export function YourTokens({ session }: { session: Session }) {
   const connected = session.status === "connected";
   const mine = useMyTokens(connected);
+  const staged = useSwapBasketSats(connected);
   useSettleSwaps(connected);
   const [sending, setSending] = useState<string | null>(null);
   return (
@@ -251,6 +284,7 @@ export function YourTokens({ session }: { session: Session }) {
       ) : (
         <>
           {mine.error && <Notice kind="bad">Could not read your tokens: {mine.error}</Notice>}
+          <StagedSats sats={staged.data ?? 0} />
           <section className="panel ttable" aria-label="Your tokens">
             <div className="ttable-head" aria-hidden="true">
               <span>Token</span>

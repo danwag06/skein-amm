@@ -157,7 +157,8 @@ export async function readTokens(base: string, fetchFn: typeof fetch = fetch): P
 
 /** The defaults a new token instance is created with (0.17.0, `GET <config>/defaults`): each absent when unset. */
 export interface Defaults {
-  terms?: { lpFeeBps: number; validatorFeeBps: number; commissionBps: number };
+  /** 0.40.0: `minLegSats` present when the defaults set one. */
+  terms?: { lpFeeBps: number; validatorFeeBps: number; commissionBps: number; minLegSats?: number };
   market?: { minCommissionBps: number };
 }
 
@@ -178,7 +179,7 @@ export async function readDefaults(base: string, fetchFn: typeof fetch = fetch):
   const a = (await getJson(`${base}/defaults`, fetchFn)) as Record<string, unknown> | null;
   const out: Defaults = {};
   const t = a?.terms as Record<string, unknown> | undefined;
-  if (t && typeof t.lpFeeBps === "number" && typeof t.validatorFeeBps === "number" && typeof t.commissionBps === "number") out.terms = { lpFeeBps: t.lpFeeBps, validatorFeeBps: t.validatorFeeBps, commissionBps: t.commissionBps };
+  if (t && typeof t.lpFeeBps === "number" && typeof t.validatorFeeBps === "number" && typeof t.commissionBps === "number") out.terms = { lpFeeBps: t.lpFeeBps, validatorFeeBps: t.validatorFeeBps, commissionBps: t.commissionBps, ...(typeof t.minLegSats === "number" && t.minLegSats > 0 ? { minLegSats: t.minLegSats } : {}) };
   const m = a?.market as Record<string, unknown> | undefined;
   if (m && typeof m.minCommissionBps === "number") out.market = { minCommissionBps: m.minCommissionBps };
   return out;

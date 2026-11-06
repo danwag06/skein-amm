@@ -48,6 +48,10 @@
           "description": "Label the swaps you build, their funding and their payouts so they are listed together in your wallet."
         },
         {
+          "protocolID": [1, "action label amm-swap-stage"],
+          "description": "Label the action that sets aside the tokens and sats a swap needs, so a token set aside is found again if the page closes."
+        },
+        {
           "protocolID": [1, "action label amm-pool-deploy"],
           "description": "Label the pools you create so they are listed together in your wallet."
         },

@@ -189,15 +189,36 @@ function bps(text: string): number | null {
   return n <= 10_000 ? n : null;
 }
 
-/** The three fee fields' text (0.35.0: one form for the defaults card and each token's terms). */
-export function useTermsFields(): { lp: string; val: string; com: string; setLp: (v: string) => void; setVal: (v: string) => void; setCom: (v: string) => void; terms: TermsInput | null } {
+/** The minimum leg's text (0.40.0): empty is none (0), else a whole number of sats; null when it is neither. */
+function sats(text: string): number | null {
+  const t = text.trim();
+  if (t === "") return 0;
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/** The three fee fields' text (0.35.0: one form for the defaults card and each token's terms) and (0.40.0) the minimum leg's. */
+export function useTermsFields(): { lp: string; val: string; com: string; min: string; setLp: (v: string) => void; setVal: (v: string) => void; setCom: (v: string) => void; setMin: (v: string) => void; terms: TermsInput | null } {
   const [lp, setLp] = useState("");
   const [val, setVal] = useState("");
   const [com, setCom] = useState("");
+  const [min, setMin] = useState("");
   const lpN = bps(lp);
   const valN = bps(val);
   const comN = bps(com);
-  return { lp, val, com, setLp, setVal, setCom, terms: lpN !== null && valN !== null && comN !== null ? { lpBps: lpN, validatorBps: valN, commissionBps: comN } : null };
+  const minN = sats(min);
+  return {
+    lp,
+    val,
+    com,
+    min,
+    setLp,
+    setVal,
+    setCom,
+    setMin,
+    terms: lpN !== null && valN !== null && comN !== null && minN !== null ? { lpBps: lpN, validatorBps: valN, commissionBps: comN, ...(minN > 0 ? { minLegSats: minN } : {}) } : null,
+  };
 }
 
 /**
@@ -219,6 +240,10 @@ export function TermsFields({ f, idPrefix, busy, setLabel, clearLabel, onClear, 
         <div className="field">
           <label htmlFor={`${idPrefix}-com`}>Commission (bps)</label>
           <input id={`${idPrefix}-com`} inputMode="numeric" value={f.com} onChange={(e) => f.setCom(e.target.value)} aria-invalid={(f.com !== "" && bps(f.com) === null) || undefined} />
+        </div>
+        <div className="field">
+          <label htmlFor={`${idPrefix}-min`}>Minimum leg (sats)</label>
+          <input id={`${idPrefix}-min`} inputMode="numeric" placeholder="none" value={f.min} onChange={(e) => f.setMin(e.target.value)} aria-invalid={sats(f.min) === null || undefined} />
         </div>
       </div>
       <div className="row row-wrap">
@@ -271,7 +296,7 @@ function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
         <p className="muted">{terms.error ? `Could not read the defaults: ${terms.error}` : "Reading the defaults…"}</p>
       ) : t ? (
         <p className="fg2">
-          LP {t.lpFeeBps} · validator {t.validatorFeeBps} · commission {t.commissionBps} bps. A token enabled from now on starts validating at these terms.
+          {tokenTermsText(t)}. A token enabled from now on starts validating at these terms.
         </p>
       ) : (
         <p className="fg2">No default terms: a token enabled from now on validates nothing until its own terms are set.</p>
@@ -295,7 +320,10 @@ function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
             }
           : {})}
       />
-      <span className="help">Each fee is an integer from 0 to 10000 basis points: a new token instance&apos;s initial terms. Each token&apos;s own terms, once set there, win.</span>
+      <span className="help">
+        Each fee is an integer from 0 to 10000 basis points: a new token instance&apos;s initial terms. Each token&apos;s own terms, once set there, win. Minimum leg: the
+        smallest leg the validator signs, in sats on the leg&apos;s sats side; empty for none.
+      </span>
       {error && <Notice kind="bad">Could not send: {error}</Notice>}
       {done && <Notice kind="ok">{done}</Notice>}
     </form>
@@ -421,12 +449,12 @@ function DiscoveryCard({ discovery }: { discovery: Data<Discovery> }) {
   );
 }
 
-/** A token's terms as its instance holds them (P7's `validator`). */
-type LiveTerms = { lpFeeBps: number; validatorFeeBps: number; commissionBps: number } | null;
+/** A token's terms as its instance holds them (P7's `validator`; 0.40.0 `minLegSats`, 0 or absent: none). */
+type LiveTerms = { lpFeeBps: number; validatorFeeBps: number; commissionBps: number; minLegSats?: number } | null;
 
-/** A token's terms, in a few words: `LP <n> · validator <n> · commission <n> bps`, or "market only". */
+/** A token's terms, in a few words: `LP <n> · validator <n> · commission <n> bps` (0.40.0: then `· minimum leg <n> sats` when set), or "market only". */
 export function tokenTermsText(v: LiveTerms): string {
-  return v ? `LP ${v.lpFeeBps} · validator ${v.validatorFeeBps} · commission ${v.commissionBps} bps` : "market only";
+  return v ? `LP ${v.lpFeeBps} · validator ${v.validatorFeeBps} · commission ${v.commissionBps} bps${v.minLegSats ? ` · minimum leg ${v.minLegSats} sats` : ""}` : "market only";
 }
 
 /** The line shown when the token's `/terms` has not followed a sent change within 10 s. */
@@ -435,7 +463,7 @@ export const TERMS_NOT_APPLIED_TEXT = "sent, not applied yet";
 /** Whether the read terms are the ones sent (null: market only). */
 export function termsApplied(v: LiveTerms, want: TermsInput | null): boolean {
   if (!want) return v === null;
-  return !!v && v.lpFeeBps === want.lpBps && v.validatorFeeBps === want.validatorBps && v.commissionBps === want.commissionBps;
+  return !!v && v.lpFeeBps === want.lpBps && v.validatorFeeBps === want.validatorBps && v.commissionBps === want.commissionBps && (v.minLegSats ?? 0) === (want.minLegSats ?? 0);
 }
 
 /**

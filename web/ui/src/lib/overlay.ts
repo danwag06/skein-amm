@@ -9,12 +9,12 @@
  * | # | route | answer |
  * |---|---|---|
  * | P1 | `GET <origin>/amm/pools` (and as an event stream) | `[{tokenId, …P2 row}]`, every enabled token's live pools (the host's) |
- * | P2 | `GET <origin>/@<token>/amm/pools` (and as an event stream) | `{market: {commissionPkh, minCommissionBps}, validators: [{identity, peerId}] (0.34.1: beating now), pools: [{lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId}]}`: only pools whose validator beats now and whose commission is at or above the market's minimum (the host's) |
- * | P3 | `GET /@<token>/amm/pools/beef?lp=k1,k2` | `{pools: [P2 row without validatorPeerId], beef: <base64 BEEF of their transactions>}` |
- * | P4 | `GET /@<token>/amm/positions?lp=k1,k2` | `[{lpPubKey, status: live|rescinded|closed, outpoint?, current?, sats, tokens, swaps}]` |
+ * | P2 | `GET <origin>/@<token>/amm/pools` (and as an event stream) | `{market: {commissionPkh, minCommissionBps}, validators: [{identity, peerId, minLegSats?}] (0.34.1: beating now; 0.40.0: the minimum leg its terms announce), pools: [{poolId, lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId, swaps}]}`: only pools whose validator beats now and whose commission is at or above the market's minimum (the host's) |
+ * | P3 | `GET /@<token>/amm/pools/beef?pool=id1,id2` (0.40.0: by pool id) | `{pools: [P2 row without validatorPeerId], beef: <base64 BEEF of their transactions>}` |
+ * | P4 | `GET /@<token>/amm/positions?pool=id1,id2` (0.40.0) | `[{poolId, lpPubKey, status: live|rescinded|closed, outpoint?, current?, sats, tokens, swaps}]` |
  * | P5 | `GET /@<token>/amm/fees/validator?id=k1,k2` | `[{validatorIdentityKey, sats, tokens, swaps, pools}]` |
  * | P6 | `GET /@<token>/amm/fees/commission?pkh=h1,h2` | `[{commissionPkh, sats, tokens, swaps}]` |
- * | P7 | `GET /@<token>/amm/terms` | `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps} | null, market: {commissionPkh, minCommissionBps}}` |
+ * | P7 | `GET /@<token>/amm/terms` | `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps, minLegSats} | null, market: {commissionPkh, minCommissionBps}}` |
  * | P8 | `GET /@<token>/amm/spends?outpoint=a,b` | `[{outpoint, spentBy?, current?, hops, closed}]` (one outpoint: the object) |
  * | P9 | `GET /@<token>/amm/tx?id=<txid>` | the transaction's BEEF (bytes) |
  * | P10 | `GET /@<token>/amm/swaps?id=<id>` | the relay record, as `amm.swap.status` answers it |
@@ -25,16 +25,23 @@
  * | P15 | `GET /@discovery/1color/<token>/icon` | the icon's bytes |
  * | P16 | `GET /@discovery/1color/<token>/deploy` | the deploy's BEEF (bytes) |
  * | P17 | `GET <origin>/.well-known/skein`, `/skeins?key=`, `/amm/admin`, `/amm/defaults`, `/amm/discovery` | as before |
- * | H1 | `GET /@<token>/amm/trades?from=&to=&limit=&before=&lp=` (or `?txid=`) | `{trades: [Trade], next}` newest first (one txid: the row) |
- * | H2 | `GET /@<token>/amm/candles?tf=&from=&to=` | `[{t, o, h, l, c, volumeSats, volumeTokens, n}]`, one per non-empty bucket |
- * | H3 | `GET /@<token>/amm/stats` | `{tokenId, price, change1h, change24h, volume24hSats, volume24hTokens, buys24h, sells24h, lastTradeAt, tvlSats, tvlTokens, pools}` |
+ * | H1 | `GET /@<token>/amm/trades?from=&to=&limit=&before=&pool=` (or `?txid=`) | `{trades: [Trade], next}` newest first (one txid: the row) |
+ * | H2 | `GET /@<token>/amm/candles?tf=&from=&to=&series=fill|market` | `[{t, o, h, l, c, volumeSats, volumeTokens, n}]`, one per non-empty bucket (0.40.0: `market`, the host's: the price after each pool event) |
+ * | H3 | `GET /@<token>/amm/stats` | `{tokenId, price, buyPrice, sellPrice, lastTradePrice, change1h, change24h, volume24hSats, volume24hTokens, buys24h, sells24h, lastTradeAt, tvlSats, tvlTokens, pools}` |
  * | H4 | `GET <origin>/amm/stats?ids=` | `[H3]`, every enabled token's (the host's) |
- * | H5 | `GET <origin>/amm/positions?lp=` | `[{tokenId, …P4 row}]`, every enabled token's (the host's) |
+ * | H5 | `GET <origin>/amm/positions?pool=` | `[{tokenId, …P4 row}]`, every enabled token's (the host's) |
+ * | H7 | `GET /@<token>/amm/pools/at?t=<ms>` (0.40.0) | `[{poolId, outpoint, bsvReserve, tokenReserve, lpPubKey, …the three bps, validatorIdentityKey, at, swaps}]`: every pool listed at `t` |
+ * | H8 | `GET /@<token>/amm/pools/history?from=&to=&pool=&limit=&after=` (0.40.0) | `{events: [PoolEvent], next}` oldest first; `next` → `after` |
+ * | H9 | `GET <origin>/amm/spends?outpoint=a,b` (0.40.0, the host's) | `[{outpoint, tokenId?, spentBy?}]`: each enabled token's `/spends`, the first that names a spender |
  * | H6 | `GET /@<token>/amm/color/<token>/holders?limit=&skip=` | `{count, rows: [{address, balance}]}` largest first |
  *
  * 0.39.0 (agent-env plans/history-api-2026-11-05.md D7): P2's stream sends the whole answer once
- * (`pools`), then ONE `change` per pool change (`{kind, outpoint, pool?, trade?}`); the host-wide
- * stream is gone (P1, H4 and H5 are plain reads).
+ * (`pools`), then ONE `change` per pool change (`{kind, poolId, outpoint, pool?, trade?}`, 0.40.0:
+ * `poolId`); the host-wide stream is gone (P1, H4 and H5 are plain reads).
+ *
+ * 0.40.0 (agent-env plans/swap-balance-build-2026-11-05.md §0 3): a pool's id is its deploy outpoint
+ * `<txid>_<vout>` (`poolId`, copied forward along its swaps); every read by LP key is by pool id
+ * now (`?pool=`), the LP key a field. A clean break: no `?lp=` here.
  *
  * Writes stay what they were: `POST <origin>/submit` (BRC-22, plain), `/call` and `/sendMessage`
  * (signed, the wallet's BRC-104 client).
@@ -85,7 +92,9 @@ export function parseTokenTopic(name: string): TokenTopic | null {
 
 /** A pool row on the wire (P2, P3, P4's `current`): JSON numbers, bigints here. */
 interface WirePool {
+  poolId?: string;
   lpPubKey?: string;
+  swaps?: number | string;
   outpoint: string;
   bsvReserve: number | string;
   tokenReserve: number | string;
@@ -110,9 +119,13 @@ export function toPoolState(raw: WirePool): PoolState {
   };
 }
 
-/** A pool of the pools routes: the engine's PoolState, its LP key (the pool's id, D2), and (P2) its validator's peer ID. */
+/** A pool of the pools routes: the engine's PoolState, its id (0.40.0: the deploy outpoint `<txid>_<vout>`), its LP key, its swap count, and (P2) its validator's peer ID. */
 export interface PoolRow extends PoolState {
+  /** The pool's id: its deploy outpoint, `<txid>_<vout>` (0.40.0). */
+  poolId: string;
   lpPubKey: string;
+  /** The pool's swaps so far (0 at the deploy). */
+  swaps: number;
   /** P2: the validator's libp2p peer ID, from its beat (what the relay dials). */
   validatorPeerId?: string;
   /** P1: the token. */
@@ -129,7 +142,9 @@ export function toPoolRow(raw: unknown): PoolRow | null {
   if (!isWirePool(raw)) return null;
   return {
     ...toPoolState(raw),
+    poolId: typeof raw.poolId === "string" ? raw.poolId.toLowerCase() : "",
     lpPubKey: typeof raw.lpPubKey === "string" ? raw.lpPubKey.toLowerCase() : "",
+    swaps: Number(raw.swaps ?? 0),
     ...(typeof raw.validatorPeerId === "string" && raw.validatorPeerId ? { validatorPeerId: raw.validatorPeerId } : {}),
     ...(typeof raw.tokenId === "string" ? { tokenId: raw.tokenId } : {}),
   };
@@ -152,10 +167,11 @@ function toMarket(x: unknown): Market {
   return { commissionPkh: pkh, minCommissionBps: min };
 }
 
-/** A validator beating on the token's topic now (P2's `validators`, 0.34.1): its identity key and libp2p peer ID. */
+/** A validator beating on the token's topic now (P2's `validators`, 0.34.1): its identity key and libp2p peer ID; 0.40.0, the minimum leg its terms announce (sats on the leg's sats side; absent: none). */
 export interface BeatingValidator {
   identity: string;
   peerId: string;
+  minLegSats?: bigint;
 }
 
 /** P2's answer: the market, the pools a swap may use now, and (0.34.1) the validators beating on the token's topic now. */
@@ -170,7 +186,10 @@ export function parsePools(x: unknown): PoolsAnswer {
   const a = x as { market?: unknown; pools?: unknown; validators?: unknown } | null;
   const validators = (Array.isArray(a?.validators) ? (a!.validators as Record<string, unknown>[]) : [])
     .filter((v) => v && typeof v.identity === "string")
-    .map((v) => ({ identity: String(v.identity).toLowerCase(), peerId: typeof v.peerId === "string" ? v.peerId : "" }));
+    .map((v) => {
+      const min = typeof v.minLegSats === "number" || typeof v.minLegSats === "string" ? BigInt(v.minLegSats) : 0n;
+      return { identity: String(v.identity).toLowerCase(), peerId: typeof v.peerId === "string" ? v.peerId : "", ...(min > 0n ? { minLegSats: min } : {}) };
+    });
   return { market: toMarket(a?.market), pools: poolRows(a?.pools), validators };
 }
 
@@ -342,15 +361,15 @@ export function watchPools<T>(
   };
 }
 
-/** P3's answer: the LP keys' current pools and one BEEF of their transactions. */
+/** P3's answer: the pools' current outputs and one BEEF of their transactions. */
 export interface PoolsBeef {
   pools: PoolRow[];
   beef: number[];
 }
 
-/** P3: `GET <base>/pools/beef?lp=k1,k2` (no `lpKeys`: every live pool). */
-export async function readPoolsBeef(base: string, lpKeys?: string[], fetchFn?: FetchFn): Promise<PoolsBeef> {
-  const url = `${trim(base)}/pools/beef${lpKeys ? `?lp=${list(lpKeys)}` : ""}`;
+/** P3: `GET <base>/pools/beef?pool=id1,id2` (0.40.0: by pool id; no `poolIds`: every live pool). */
+export async function readPoolsBeef(base: string, poolIds?: string[], fetchFn?: FetchFn): Promise<PoolsBeef> {
+  const url = `${trim(base)}/pools/beef${poolIds ? `?pool=${list(poolIds)}` : ""}`;
   const a = (await getJson(url, fetchFn)) as { pools?: unknown; beef?: unknown } | null;
   return { pools: poolRows(a?.pools), beef: typeof a?.beef === "string" && a.beef ? Utils.toArray(a.beef, "base64") : [] };
 }
@@ -370,9 +389,12 @@ export function poolOutputOf(pb: PoolsBeef, outpoint: string): LookupOutput | nu
   return { beef: beef.toBinaryAtomic(m[1]!.toLowerCase()), outputIndex: Number(m[2]) };
 }
 
-/** One LP key's pool and fees (P4): `live` (its live pool), `rescinded` (the validator's Rescind wrote `outpoint`: the LP's Close takes it back), `closed`. */
+/** One pool's state and fees (P4, 0.40.0: by pool id): `live` (its live output), `rescinded` (the validator's Rescind wrote `outpoint`: the LP's Close takes it back), `closed`. */
 export interface LpPool {
-  lpPubKey: string;
+  /** The pool's id, `<txid>_<vout>` (its deploy outpoint). */
+  poolId: string;
+  /** Its LP key (null for an id this instance does not know). */
+  lpPubKey: string | null;
   status: "live" | "rescinded" | "closed";
   /** The output a Close acts on, `<txid>_<vout>` (live and rescinded). */
   outpoint: string | null;
@@ -387,28 +409,33 @@ export interface LpPool {
 
 const wireBig = (x: unknown): bigint => (typeof x === "number" || typeof x === "string" || typeof x === "bigint" ? BigInt(x) : 0n);
 
-/** P4: `GET <base>/positions?lp=k1,k2` → one record per key in the same order. */
-export async function readPositions(base: string, lpPubKeys: string[], fetchFn?: FetchFn): Promise<LpPool[]> {
-  const url = `${trim(base)}/positions?lp=${list(lpPubKeys)}`;
+/** One P4 / H5 record. */
+function lpPoolOf(r: Record<string, unknown>, poolId: string): LpPool {
+  const status = r.status === "live" || r.status === "rescinded" ? r.status : "closed";
+  return {
+    poolId: typeof r.poolId === "string" ? r.poolId.toLowerCase() : poolId,
+    lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey.toLowerCase() : null,
+    status,
+    outpoint: typeof r.outpoint === "string" ? r.outpoint : null,
+    current: isWirePool(r.current) ? toPoolState(r.current) : null,
+    sats: wireBig(r.sats),
+    tokens: wireBig(r.tokens),
+    swaps: Number(r.swaps ?? 0),
+  };
+}
+
+/** P4: `GET <base>/positions?pool=id1,id2` (0.40.0) → one record per pool id in the same order. */
+export async function readPositions(base: string, poolIds: string[], fetchFn?: FetchFn): Promise<LpPool[]> {
+  const url = `${trim(base)}/positions?pool=${list(poolIds)}`;
   const a = await getJson(url, fetchFn);
-  if (!Array.isArray(a) || a.length !== lpPubKeys.length) throw new Error(`GET ${url}: not one record per key`);
-  return (a as Record<string, unknown>[]).map((r, i) => {
-    const status = r.status === "live" || r.status === "rescinded" ? r.status : "closed";
-    return {
-      lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey : lpPubKeys[i]!,
-      status,
-      outpoint: typeof r.outpoint === "string" ? r.outpoint : null,
-      current: isWirePool(r.current) ? toPoolState(r.current) : null,
-      sats: wireBig(r.sats),
-      tokens: wireBig(r.tokens),
-      swaps: Number(r.swaps ?? 0),
-    };
-  });
+  if (!Array.isArray(a) || a.length !== poolIds.length) throw new Error(`GET ${url}: not one record per pool`);
+  return (a as Record<string, unknown>[]).map((r, i) => lpPoolOf(r, poolIds[i]!));
 }
 
 /** P7's answer: this instance's validator terms (null: none set, a market only) and its market. */
 export interface InstanceTerms {
-  validator: { identity: string; peerId: string | null; lpFeeBps: number; validatorFeeBps: number; commissionBps: number } | null;
+  /** 0.40.0: `minLegSats` the minimum leg (sats on the leg's sats side), 0 = none. */
+  validator: { identity: string; peerId: string | null; lpFeeBps: number; validatorFeeBps: number; commissionBps: number; minLegSats: number } | null;
   market: Market;
 }
 
@@ -430,6 +457,7 @@ export async function readTerms(base: string, fetchFn?: FetchFn): Promise<Instan
             lpFeeBps: int(v.lpFeeBps, "lpFeeBps"),
             validatorFeeBps: int(v.validatorFeeBps, "validatorFeeBps"),
             commissionBps: int(v.commissionBps, "commissionBps"),
+            minLegSats: typeof v.minLegSats === "number" && Number.isInteger(v.minLegSats) ? v.minLegSats : 0,
           }
         : null,
     market: toMarket(a?.market),
@@ -538,7 +566,11 @@ export interface Price {
 /** A Swap's trade row (H1; the `swap` change's `trade`): amounts in base units, fees in the input asset, the pool's reserves after it. */
 export interface Trade {
   txid: string;
+  /** The pool's id, `<txid>_<vout>` (0.40.0). */
+  poolId: string;
   lpPubKey: string;
+  /** The hash160 (hex) the payout went to (the call's `userPkh`, 0.40.0): an order's legs share it. */
+  payoutPkh: string;
   /** `buy`: sats in, tokens out; `sell`: tokens in. */
   side: "buy" | "sell";
   amountIn: bigint;
@@ -578,8 +610,17 @@ export type CandleTf = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 /** A token at the read's time (H3, H4): the changes in bps (null without a trade at or before the window's start). */
 export interface TokenStats {
   tokenId: string;
-  /** The last trade's, else the deepest live pool's, else null. */
+  /**
+   * 0.40.0 (the host's): the midpoint of what a buy and a sell of 1% of the pooled sats would pay
+   * now (the engine's `priceOf(listed pools).mid`), null with no pool.
+   */
   price: Price | null;
+  /** What that buy would pay (sats per tokens), null with no pool. */
+  buyPrice: Price | null;
+  /** What that sell would pay, null with no pool. */
+  sellPrice: Price | null;
+  /** The last trade's price, null without one. */
+  lastTradePrice: Price | null;
   change1h: number | null;
   change24h: number | null;
   volume24hSats: bigint;
@@ -606,6 +647,8 @@ export interface TokenPosition extends LpPool {
 /** One pool change on P2's stream (event `change`, D7). */
 export interface PoolChange {
   kind: "deploy" | "swap" | "close" | "rescind";
+  /** The pool's id (0.40.0). */
+  poolId: string;
   /** The new pool output (deploy, swap) or the one gone (close, rescind). */
   outpoint: string;
   /** deploy, swap: the pool's row. */
@@ -629,7 +672,9 @@ export function toTrade(x: unknown): Trade | null {
   if (!r || typeof r !== "object" || typeof r.txid !== "string" || typeof r.lpPubKey !== "string" || (r.side !== "buy" && r.side !== "sell")) return null;
   return {
     txid: r.txid.toLowerCase(),
+    poolId: typeof r.poolId === "string" ? r.poolId.toLowerCase() : "",
     lpPubKey: r.lpPubKey.toLowerCase(),
+    payoutPkh: typeof r.payoutPkh === "string" ? r.payoutPkh.toLowerCase() : "",
     side: r.side,
     amountIn: wireBig(r.amountIn),
     amountOut: wireBig(r.amountOut),
@@ -658,6 +703,9 @@ export function toStats(x: unknown): TokenStats | null {
   return {
     tokenId: r.tokenId,
     price: toPrice(r.price),
+    buyPrice: toPrice(r.buyPrice),
+    sellPrice: toPrice(r.sellPrice),
+    lastTradePrice: toPrice(r.lastTradePrice),
     change1h: intOrNull(r.change1h),
     change24h: intOrNull(r.change24h),
     volume24hSats: wireBig(r.volume24hSats),
@@ -674,28 +722,28 @@ export function toStats(x: unknown): TokenStats | null {
 /** A `change` event's data, or null when it is not one this client knows. */
 export function parseChange(x: unknown): PoolChange | null {
   const r = x as Record<string, unknown> | null;
-  if (!r || typeof r !== "object" || typeof r.outpoint !== "string") return null;
+  if (!r || typeof r !== "object" || typeof r.outpoint !== "string" || typeof r.poolId !== "string") return null;
   if (r.kind !== "deploy" && r.kind !== "swap" && r.kind !== "close" && r.kind !== "rescind") return null;
   const pool = r.pool === undefined ? null : toPoolRow(r.pool);
   const trade = r.trade === undefined ? null : toTrade(r.trade);
-  return { kind: r.kind, outpoint: r.outpoint, ...(pool ? { pool } : {}), ...(trade ? { trade } : {}) };
+  return { kind: r.kind, poolId: r.poolId.toLowerCase(), outpoint: r.outpoint, ...(pool ? { pool } : {}), ...(trade ? { trade } : {}) };
 }
 
-const sameOutpoint = (a: string, b: string) => a.toLowerCase().replace(".", "_") === b.toLowerCase().replace(".", "_");
 
 /**
  * One `change` applied to a held P2 answer (D7) → the new answer, or null when it cannot be applied
- * (the caller reads the route again): `swap` — the row of `trade.lpPubKey` replaced by `pool` (its
- * outpoint moved); `deploy` — `pool` added; `close` / `rescind` — the row at `outpoint` removed.
- * The market and the validators are kept (a change of either comes as a whole `pools` answer).
+ * (the caller reads the route again): 0.40.0, by pool id — `swap` — the row of `poolId` replaced
+ * by `pool` (its outpoint moved); `deploy` — `pool` added; `close` / `rescind` — the row of
+ * `poolId` removed. The market and the validators are kept (a change of either comes as a whole
+ * `pools` answer).
  */
 export function applyPoolChange(held: PoolsAnswer, x: unknown): PoolsAnswer | null {
   const ch = parseChange(x);
   if (!ch) return null;
   switch (ch.kind) {
     case "swap": {
-      if (!ch.pool || !ch.trade) return null;
-      const i = held.pools.findIndex((p) => p.lpPubKey === ch.trade!.lpPubKey);
+      if (!ch.pool) return null;
+      const i = held.pools.findIndex((p) => p.poolId === ch.poolId);
       if (i < 0) return null;
       const pools = held.pools.slice();
       pools[i] = ch.pool;
@@ -706,7 +754,7 @@ export function applyPoolChange(held: PoolsAnswer, x: unknown): PoolsAnswer | nu
       return { ...held, pools: [...held.pools, ch.pool] };
     case "close":
     case "rescind": {
-      const pools = held.pools.filter((p) => !sameOutpoint(p.outpoint, ch.outpoint));
+      const pools = held.pools.filter((p) => p.poolId !== ch.poolId);
       if (pools.length === held.pools.length) return null;
       return { ...held, pools };
     }
@@ -718,9 +766,9 @@ const query = (q: Record<string, string | number | undefined>) => {
   return kv.length ? `?${kv.join("&")}` : "";
 };
 
-/** H1: `GET <base>/trades?from=&to=&limit=&before=&lp=` → the page, newest first. */
-export async function readTrades(base: string, o: { from?: number; to?: number; limit?: number; before?: string; lp?: string } = {}, fetchFn?: FetchFn): Promise<TradesPage> {
-  const a = (await getJson(`${trim(base)}/trades${query({ from: o.from, to: o.to, limit: o.limit, before: o.before, lp: o.lp })}`, fetchFn)) as { trades?: unknown; next?: unknown } | null;
+/** H1: `GET <base>/trades?from=&to=&limit=&before=&pool=` (0.40.0: `pool` one pool's) → the page, newest first. */
+export async function readTrades(base: string, o: { from?: number; to?: number; limit?: number; before?: string; pool?: string } = {}, fetchFn?: FetchFn): Promise<TradesPage> {
+  const a = (await getJson(`${trim(base)}/trades${query({ from: o.from, to: o.to, limit: o.limit, before: o.before, pool: o.pool })}`, fetchFn)) as { trades?: unknown; next?: unknown } | null;
   return {
     trades: (Array.isArray(a?.trades) ? a!.trades : []).map(toTrade).filter((t): t is Trade => t !== null),
     next: typeof a?.next === "string" ? a.next : null,
@@ -736,9 +784,12 @@ export async function readTrade(base: string, txid: string, fetchFn?: FetchFn): 
   return toTrade(await res.json());
 }
 
-/** H2: `GET <base>/candles?tf=&from=&to=` → one candle per non-empty bucket, oldest first. */
-export async function readCandles(base: string, o: { tf: CandleTf; from: number; to: number }, fetchFn?: FetchFn): Promise<Candle[]> {
-  const a = await getJson(`${trim(base)}/candles${query({ tf: o.tf, from: o.from, to: o.to })}`, fetchFn);
+/** The candle series (0.40.0): `fill` the trades' prices (the instance's), `market` the price after each pool event (the host's). */
+export type CandleSeries = "fill" | "market";
+
+/** H2: `GET <base>/candles?tf=&from=&to=&series=` → one candle per non-empty bucket, oldest first. */
+export async function readCandles(base: string, o: { tf: CandleTf; from: number; to: number; series?: CandleSeries }, fetchFn?: FetchFn): Promise<Candle[]> {
+  const a = await getJson(`${trim(base)}/candles${query({ tf: o.tf, from: o.from, to: o.to, series: o.series })}`, fetchFn);
   return (Array.isArray(a) ? a : []).map(toCandle).filter((c): c is Candle => c !== null);
 }
 
@@ -765,20 +816,124 @@ export async function readHolders(base: string, tokenId: string, o: { limit?: nu
   };
 }
 
-/** H5: `GET <swap base>/positions?lp=k1,k2` → every enabled token's rows for the keys, each with its token. */
-export async function readAllPositions(swapBase: string, lpPubKeys: string[], fetchFn?: FetchFn): Promise<TokenPosition[]> {
-  if (lpPubKeys.length === 0) return [];
-  const a = await getJson(`${trim(swapBase)}/positions?lp=${list(lpPubKeys)}`, fetchFn);
+/** H5: `GET <swap base>/positions?pool=id1,id2` (0.40.0) → every enabled token's rows for the pools, each with its token. */
+export async function readAllPositions(swapBase: string, poolIds: string[], fetchFn?: FetchFn): Promise<TokenPosition[]> {
+  if (poolIds.length === 0) return [];
+  const a = await getJson(`${trim(swapBase)}/positions?pool=${list(poolIds)}`, fetchFn);
   return (Array.isArray(a) ? (a as Record<string, unknown>[]) : [])
-    .filter((r) => r && typeof r.tokenId === "string" && typeof r.lpPubKey === "string")
+    .filter((r) => r && typeof r.tokenId === "string" && typeof r.poolId === "string")
+    .map((r) => ({ tokenId: String(r.tokenId), ...lpPoolOf(r, String(r.poolId)) }));
+}
+
+// ---------------------------------------------------------------------------
+// The pool history (0.40.0, agent-env plans/swap-balance-build-2026-11-05.md §0 4)
+// ---------------------------------------------------------------------------
+
+/** A pool as it was listed at a time (H7): its id, output, reserves, keys, rates, the event's time and its swap count. */
+export interface PoolAt extends PoolRow {
+  /** The time of the pool's last event at or before the read's `t`, ms. */
+  at: number;
+}
+
+/** H7: `GET <base>/pools/at?t=<ms>` → every pool listed at `t`. */
+export async function readPoolsAt(base: string, t: number, fetchFn?: FetchFn): Promise<PoolAt[]> {
+  const a = await getJson(`${trim(base)}/pools/at${query({ t })}`, fetchFn);
+  return (Array.isArray(a) ? (a as Record<string, unknown>[]) : []).flatMap((r) => {
+    const row = toPoolRow(r);
+    return row ? [{ ...row, at: int(r.at) }] : [];
+  });
+}
+
+/** One event of a pool's history (H8): a deploy, a swap (with its trade fields), a close or a rescind, at the admitting step's time. */
+export interface PoolEvent {
+  kind: "deploy" | "swap" | "close" | "rescind";
+  txid: string;
+  poolId: string;
+  /** The pool's output after the event (deploy, swap, rescind), `<txid>_<vout>`. */
+  outpoint?: string;
+  bsvReserve?: bigint;
+  tokenReserve?: bigint;
+  lpPubKey: string;
+  liquidityFeeBps: bigint;
+  validationFeeBps: bigint;
+  commissionBps: bigint;
+  validatorIdentityKey: string;
+  at: number;
+  swaps: number;
+  /** A swap's trade. */
+  side?: "buy" | "sell";
+  amountIn?: bigint;
+  amountOut?: bigint;
+  feeLp?: bigint;
+  feeValidator?: bigint;
+  feeCommission?: bigint;
+  commissionPkh?: string;
+  payoutPkh?: string;
+}
+
+/** H8's page: the events oldest first, `next` the cursor to pass as `after` for the page after (null: none left). */
+export interface PoolHistoryPage {
+  events: PoolEvent[];
+  next: string | null;
+}
+
+function toPoolEvent(x: unknown): PoolEvent | null {
+  const r = x as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.txid !== "string" || typeof r.poolId !== "string") return null;
+  if (r.kind !== "deploy" && r.kind !== "swap" && r.kind !== "close" && r.kind !== "rescind") return null;
+  const big = (k: string) => (r[k] === undefined || r[k] === null ? {} : { [k]: wireBig(r[k]) });
+  const text = (k: string) => (typeof r[k] === "string" ? { [k]: String(r[k]).toLowerCase() } : {});
+  return {
+    kind: r.kind,
+    txid: r.txid.toLowerCase(),
+    poolId: r.poolId.toLowerCase(),
+    ...(typeof r.outpoint === "string" ? { outpoint: r.outpoint } : {}),
+    ...big("bsvReserve"),
+    ...big("tokenReserve"),
+    lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey.toLowerCase() : "",
+    liquidityFeeBps: wireBig(r.liquidityFeeBps),
+    validationFeeBps: wireBig(r.validationFeeBps),
+    commissionBps: wireBig(r.commissionBps),
+    validatorIdentityKey: typeof r.validatorIdentityKey === "string" ? r.validatorIdentityKey.toLowerCase() : "",
+    at: int(r.at),
+    swaps: int(r.swaps),
+    ...(r.side === "buy" || r.side === "sell" ? { side: r.side } : {}),
+    ...big("amountIn"),
+    ...big("amountOut"),
+    ...big("feeLp"),
+    ...big("feeValidator"),
+    ...big("feeCommission"),
+    ...text("commissionPkh"),
+    ...text("payoutPkh"),
+  } as PoolEvent;
+}
+
+/** H8: `GET <base>/pools/history?from=&to=&pool=&limit=&after=` → the page, oldest first. */
+export async function readPoolHistory(base: string, o: { from?: number; to?: number; pool?: string; limit?: number; after?: string } = {}, fetchFn?: FetchFn): Promise<PoolHistoryPage> {
+  const a = (await getJson(`${trim(base)}/pools/history${query({ from: o.from, to: o.to, pool: o.pool, limit: o.limit, after: o.after })}`, fetchFn)) as { events?: unknown; next?: unknown } | null;
+  return {
+    events: (Array.isArray(a?.events) ? a!.events : []).map(toPoolEvent).filter((e): e is PoolEvent => e !== null),
+    next: typeof a?.next === "string" ? a.next : null,
+  };
+}
+
+/** One outpoint's spender as the host's H9 answers it: the token whose instance named it. */
+export interface SpendAll {
+  /** `<txid>.<vout>` */
+  outpoint: string;
+  tokenId?: string;
+  spentBy?: string;
+}
+
+/** H9: `GET <swap base>/spends?outpoint=a,b` (the host's: every enabled token's `/spends`, the first naming a spender) → one record per outpoint. */
+export async function readSpendsAll(swapBase: string, outpoints: string[], fetchFn?: FetchFn): Promise<SpendAll[]> {
+  if (outpoints.length === 0) return [];
+  const a = await getJson(`${trim(swapBase)}/spends?outpoint=${list(outpoints)}`, fetchFn);
+  return (Array.isArray(a) ? (a as Record<string, unknown>[]) : [a as Record<string, unknown>])
+    .filter((r) => r && typeof r.outpoint === "string")
     .map((r) => ({
-      tokenId: String(r.tokenId),
-      lpPubKey: String(r.lpPubKey),
-      status: r.status === "live" || r.status === "rescinded" ? r.status : "closed",
-      outpoint: typeof r.outpoint === "string" ? r.outpoint : null,
-      current: isWirePool(r.current) ? toPoolState(r.current) : null,
-      sats: wireBig(r.sats),
-      tokens: wireBig(r.tokens),
-      swaps: Number(r.swaps ?? 0),
+      outpoint: String(r.outpoint),
+      ...(typeof r.tokenId === "string" ? { tokenId: r.tokenId } : {}),
+      ...(typeof r.spentBy === "string" ? { spentBy: r.spentBy.toLowerCase() } : {}),
     }));
 }

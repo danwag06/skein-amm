@@ -15,7 +15,10 @@
  *                   `pool_spent` refusal)
  *   user_rejected   the user declined in the wallet (the wallet's `ERR_PERMISSION_DENIED`, "denied")
  *   no_answer       the relay gave no settled answer yet ("no answer yet"; a timed-out swap record)
- *   refused         the validator, the relay or the host refused it (a refusal other than pool_spent)
+ *   below_minimum   (0.40.0) under a validator's minimum leg (its `below_minimum` refusal; a quote no
+ *                   pool takes for its size)
+ *   refused         the validator, the relay or the host refused it (a refusal other than pool_spent
+ *                   and below_minimum)
  *   network         the request did not get through (fetch threw)
  */
 import { PoolBuildError } from "./pool/index.js";
@@ -23,7 +26,7 @@ import { RelayError } from "./market/relay.js";
 import type { SwapOutcome } from "./market/swapFlow.js";
 
 /** Every kind a `ClientError` names (D13). */
-export const CLIENT_ERROR_KINDS = ["stale_pool", "fee_mismatch", "quote_mismatch", "slippage", "pool_spent", "user_rejected", "no_answer", "refused", "network"] as const;
+export const CLIENT_ERROR_KINDS = ["stale_pool", "fee_mismatch", "quote_mismatch", "slippage", "pool_spent", "user_rejected", "no_answer", "below_minimum", "refused", "network"] as const;
 export type ClientErrorKind = (typeof CLIENT_ERROR_KINDS)[number];
 
 /** An error of a named kind; `message` is the text the pages show. */
@@ -67,7 +70,7 @@ export function kindOfOutcome(o: SwapOutcome): ClientErrorKind | undefined {
     case "accepted":
       return undefined;
     case "refused":
-      return o.reason.startsWith("pool_spent") ? "pool_spent" : "refused";
+      return o.reason.startsWith("pool_spent") ? "pool_spent" : o.reason.startsWith("below_minimum") ? "below_minimum" : "refused";
     case "timeout":
     case "unknown":
       return "no_answer";

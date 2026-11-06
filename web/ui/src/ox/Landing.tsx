@@ -98,7 +98,7 @@ export function Landing({ session, tokens, error }: { session: Session; tokens: 
           </ul>
         )}
       </section>
-      <p className="footnote">Price is the marginal price across a token&apos;s pools: what the next small swap pays.</p>
+      <p className="footnote">Price is the midpoint of what a buy and a sell of 1% of the pooled sats would pay now.</p>
     </>
   );
 }

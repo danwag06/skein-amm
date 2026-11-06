@@ -119,7 +119,6 @@ export const statsAll: AmmClient["statsAll"] = (...a: Parameters<AmmClient["stat
 export const watchTokenPools: AmmClient["watchTokenPools"] = (...a: Parameters<AmmClient["watchTokenPools"]>) => (client.watchTokenPools as (...x: unknown[]) => ReturnType<AmmClient["watchTokenPools"]>)(...a);
 export const quoteSwap: AmmClient["quoteSwap"] = (...a: Parameters<AmmClient["quoteSwap"]>) => (client.quoteSwap as (...x: unknown[]) => ReturnType<AmmClient["quoteSwap"]>)(...a);
 export const executeSwap: AmmClient["executeSwap"] = (...a: Parameters<AmmClient["executeSwap"]>) => (client.executeSwap as (...x: unknown[]) => ReturnType<AmmClient["executeSwap"]>)(...a);
-export const checkSwapAgain: AmmClient["checkSwapAgain"] = (...a: Parameters<AmmClient["checkSwapAgain"]>) => (client.checkSwapAgain as (...x: unknown[]) => ReturnType<AmmClient["checkSwapAgain"]>)(...a);
 export const walletSats: AmmClient["walletSats"] = (...a: Parameters<AmmClient["walletSats"]>) => (client.walletSats as (...x: unknown[]) => ReturnType<AmmClient["walletSats"]>)(...a);
 export const myPositions: AmmClient["myPositions"] = (...a: Parameters<AmmClient["myPositions"]>) => (client.myPositions as (...x: unknown[]) => ReturnType<AmmClient["myPositions"]>)(...a);
 export const validatorTerms: AmmClient["validatorTerms"] = (...a: Parameters<AmmClient["validatorTerms"]>) => (client.validatorTerms as (...x: unknown[]) => ReturnType<AmmClient["validatorTerms"]>)(...a);
@@ -128,6 +127,8 @@ export const closePosition: AmmClient["closePosition"] = (...a: Parameters<AmmCl
 export const rebalancePosition: AmmClient["rebalancePosition"] = (...a: Parameters<AmmClient["rebalancePosition"]>) => (client.rebalancePosition as (...x: unknown[]) => ReturnType<AmmClient["rebalancePosition"]>)(...a);
 export const myTokens: AmmClient["myTokens"] = (...a: Parameters<AmmClient["myTokens"]>) => (client.myTokens as (...x: unknown[]) => ReturnType<AmmClient["myTokens"]>)(...a);
 export const settleSwaps: AmmClient["settleSwaps"] = (...a: Parameters<AmmClient["settleSwaps"]>) => (client.settleSwaps as (...x: unknown[]) => ReturnType<AmmClient["settleSwaps"]>)(...a);
+export const swapBasketSats: AmmClient["swapBasketSats"] = (...a: Parameters<AmmClient["swapBasketSats"]>) => (client.swapBasketSats as (...x: unknown[]) => ReturnType<AmmClient["swapBasketSats"]>)(...a);
+export const moveBackStagedSats: AmmClient["moveBackStagedSats"] = (...a: Parameters<AmmClient["moveBackStagedSats"]>) => (client.moveBackStagedSats as (...x: unknown[]) => ReturnType<AmmClient["moveBackStagedSats"]>)(...a);
 export const moveBackTokens: AmmClient["moveBackTokens"] = (...a: Parameters<AmmClient["moveBackTokens"]>) => (client.moveBackTokens as (...x: unknown[]) => ReturnType<AmmClient["moveBackTokens"]>)(...a);
 export const sendTokens: AmmClient["sendTokens"] = (...a: Parameters<AmmClient["sendTokens"]>) => (client.sendTokens as (...x: unknown[]) => ReturnType<AmmClient["sendTokens"]>)(...a);
 export const registeredTokens: AmmClient["registeredTokens"] = (...a: Parameters<AmmClient["registeredTokens"]>) => (client.registeredTokens as (...x: unknown[]) => ReturnType<AmmClient["registeredTokens"]>)(...a);
@@ -320,6 +321,7 @@ export function useData<T>(load: () => Promise<T>, deps: unknown[], enabled = tr
 
 export const useMyPositions = (enabled: boolean) => useData(myPositions, [], enabled);
 export const useMyTokens = (enabled: boolean) => useData(myTokens, [], enabled);
+export const useSwapBasketSats = (enabled: boolean) => useData(swapBasketSats, [], enabled);
 
 /** A token's validator terms (0.17.0: its own instance's), none while no token is picked. */
 export const useValidatorTerms = (tokenId: TokenId | undefined) =>

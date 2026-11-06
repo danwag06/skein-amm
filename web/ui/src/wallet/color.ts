@@ -25,9 +25,9 @@
  *
  * The exchange's own baskets (not `p color`; the module would refuse them):
  * `amm-pools` (the LP's position rows) and `amm-swap` (the active swap
- * basket: tokens sent out of the module for swap legs and, 0.29.0, each leg's
- * sats, under the exchange's protocol `[2, "amm swap"]`, counterparty self, a
- * fresh keyID per output).
+ * basket: what a swap stages for its legs and their change between legs,
+ * 0.40.0, under the exchange's protocol `[2, "amm swap"]`, counterparty self:
+ * a staged row's keyID random, a change row's derived from what the leg spent).
  */
 import { colorReceiptInstructions, type ColorReceipt } from "@1sat/actions";
 import { ASSETS_SELECTOR, COLOR_KEY_ID, ColorPlan, assetBasket, assetTag, colorProtocolID, type ColorRemittance } from "@bsv/color-permission-module";
@@ -45,19 +45,22 @@ export const SWAP_PROTOCOL: WalletProtocol = [2, "amm swap"];
 /** BRC-100's largest `limit`. */
 export const LIST_LIMIT = 10000;
 
-/** customInstructions of an `amm-swap` output: the asset, the amount and the key that spends it. */
-export function swapInstructions(o: { assetId: string; amount: bigint; protocolID: WalletProtocol; keyID: string; counterparty: string }): string {
-  return JSON.stringify({ assetId: o.assetId, amount: String(o.amount), protocolID: o.protocolID, keyID: o.keyID, counterparty: o.counterparty });
+/**
+ * customInstructions of an `amm-swap` token row: the asset, the amount and the key that spends it;
+ * 0.40.0, a leg's token change also `order` (the order's key input, `<txid>.<vout>`).
+ */
+export function swapInstructions(o: { assetId: string; amount: bigint; protocolID: WalletProtocol; keyID: string; counterparty: string; order?: string }): string {
+  return JSON.stringify({ assetId: o.assetId, amount: String(o.amount), protocolID: o.protocolID, keyID: o.keyID, counterparty: o.counterparty, ...(o.order ? { order: o.order } : {}) });
 }
 
 /**
- * customInstructions of an `amm-swap` SATS output (0.29.0): a swap leg's sats (the miner fee; sats
- * in, also the amount in and the token payout's sat), staged in the swap basket by the same send as
- * the tokens; `sats: true` tells it from a token row; `assetId` (0.29.1) names the token whose swap
- * staged it (Move back sweeps it with that token's rows). The key that spends it, as for a token row.
+ * customInstructions of an `amm-swap` SATS row (0.29.0; 0.40.0, agent-env
+ * plans/swap-balance-build-2026-11-05.md: no token tag — the sats rows are the exchange's, not a
+ * token's): `sats: true` tells it from a token row; the key that spends it; a leg's sats change
+ * also `order` (the order's key input).
  */
-export function swapSatsInstructions(o: { assetId: string; protocolID: WalletProtocol; keyID: string; counterparty: string }): string {
-  return JSON.stringify({ sats: true, assetId: o.assetId, protocolID: o.protocolID, keyID: o.keyID, counterparty: o.counterparty });
+export function swapSatsInstructions(o: { protocolID: WalletProtocol; keyID: string; counterparty: string; order?: string }): string {
+  return JSON.stringify({ sats: true, protocolID: o.protocolID, keyID: o.keyID, counterparty: o.counterparty, ...(o.order ? { order: o.order } : {}) });
 }
 
 /** `p color balance <assetTag>`: the selector of one asset's value balance. */
