@@ -4,6 +4,18 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.42.3 (2026-11-06)
+
+- `enableTokenPaid`'s payment is a PROTECTED noSend (BRC-177): `labels: ["p nosend expiry seconds 600"]`
+  (`ENABLE_PAYMENT_EXPIRY_LABEL`) with `options: {noSend: true, randomizeOutputs: false}`, as `@1sat/actions`'
+  payment to a handle. The wallet prefunds an exact anchor (a funding transaction it broadcasts), stores the payment
+  in its storage with no change and arms a reclaim. 0.42.2's plain noSend lived only in the toolbox's client-side
+  batch: when the exchange sent the payment, the payer's storage had no row, the spent coin stayed spendable and
+  the change outputs were lost (testnet). A wallet that cannot make a protected noSend: its error is surfaced
+  (`ClientError`), no plain noSend is tried. On any refusal, `abortAction` as before (BRC-177: the wallet sends its
+  reclaim).
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.42.3 (the client on the engine 0.42.3).
+
 ## 0.42.2 (2026-11-06)
 
 The paid enable as a BEEF submission (open-exchange 0.15.3; David Case: the payment's BEEF in the `X-BSV-Payment`
