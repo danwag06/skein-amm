@@ -4,6 +4,21 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.42.0 (2026-11-06)
+
+The paid enable and the admin's withdraw, client and Settings only (open-exchange 0.15.0; agent-env
+plans/paid-enable-2026-11-06.md Part 2); the programs are unchanged.
+
+- Client: `setEnablePrice(sats | null)` (the admin's `{fn: "price", args: {sats}}`; null: off),
+  `Defaults.enablePriceSats`, `exchangeWallet()` (`GET <swap>/wallet`: `{sats, outputs, withdrawals}`),
+  `withdrawAll()` (the admin's `withdraw` to a BRC-29 key for self derived from the withdrawal's number:
+  prefix base64 "amm withdraw", suffix base64 sha256 of `<swap identity> <n>`) and `settleWithdrawals()`
+  (each withdrawal the wallet lacks taken in as a wallet payment from `GET <swap>/wallet/tx?n=`, labelled
+  `amm-withdraw`).
+- Settings: "Price to enable a token (sats)" (empty = off), "Exchange wallet: N sats" with Withdraw
+  (disabled at 0 sats); withdrawals taken in on load. The manifest names the action label `amm-withdraw`.
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.42.0 (the client on the engine 0.42.0).
+
 ## 0.41.1 (2026-11-05)
 
 - The validator's `pool_spent` refusal whose newest state is CLOSED (`{closed: true, outpoint,
