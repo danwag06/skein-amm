@@ -25,7 +25,6 @@
 //!   (`historyRead`);
 //! - P7 `/terms`: the validator's terms and the market's, in one (`termsJson`);
 //! - P9 `/tx?id=`: a transaction's BEEF (`imm` when proven);
-//! - P10 `/swaps?id=`: the relay record (main.zig).
 const std = @import("std");
 const w = @import("chain");
 const color = @import("1color");
