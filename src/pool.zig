@@ -350,6 +350,9 @@ pub const Terms = struct {
     lp_fee_bps: i64 = 30,
     validator_fee_bps: i64 = 5,
     commission_bps: i64 = 0,
+    /// The validator's minimum leg (0.40.0, David Case 2026-11-05): the least sats on a leg's sats
+    /// side (the amount in on a buy, the payout on a sell) it signs; 0, none. No contract rule.
+    min_leg_sats: u64 = 0,
 };
 
 /// The affirmation message's tag (its first bytes): a domain separator and the layout's version.

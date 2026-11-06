@@ -1641,13 +1641,14 @@ test "read API (0.34.0): P7 /terms — the validator's terms with its identity a
     const a = arena.allocator();
     const id = unhex(a, vec.identity);
     const pkh: [20]u8 = .{0x55} ** 20;
-    const j = try jsonOf(a, try reads.termsJson(a, .{ .identity = id, .peer_id = PEER_ID_OF_G, .lp_fee_bps = 30, .validator_fee_bps = 5, .commission_bps = 25 }, pkh, 10));
+    const j = try jsonOf(a, try reads.termsJson(a, .{ .identity = id, .peer_id = PEER_ID_OF_G, .lp_fee_bps = 30, .validator_fee_bps = 5, .commission_bps = 25, .min_leg_sats = 10_000 }, pkh, 10));
     const v = j.object.get("validator").?.object;
     try testing.expectEqualStrings(vec.identity, v.get("identity").?.string);
     try testing.expectEqualStrings(PEER_ID_OF_G, v.get("peerId").?.string);
     try testing.expectEqual(@as(i64, 30), v.get("lpFeeBps").?.integer);
     try testing.expectEqual(@as(i64, 5), v.get("validatorFeeBps").?.integer);
     try testing.expectEqual(@as(i64, 25), v.get("commissionBps").?.integer);
+    try testing.expectEqual(@as(i64, 10_000), v.get("minLegSats").?.integer); // 0.40.0
     const m = j.object.get("market").?.object;
     try testing.expectEqualStrings("55" ** 20, m.get("commissionPkh").?.string);
     try testing.expectEqual(@as(i64, 10), m.get("minCommissionBps").?.integer);

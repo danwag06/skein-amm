@@ -321,9 +321,11 @@ pub const ValidatorTerms = struct {
     lp_fee_bps: u64,
     validator_fee_bps: u64,
     commission_bps: u64,
+    /// The validator's minimum leg, sats (0.40.0): 0, none.
+    min_leg_sats: u64 = 0,
 };
 
-/// P7's JSON: `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps} | null, market:
+/// P7's JSON: `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps, minLegSats} | null, market:
 /// {commissionPkh, minCommissionBps}}` — `amm.pool.terms` and `amm.swap.terms` in one, unsigned
 /// (`validator` null: no terms set, a market only; `identity`/`peerId`/`commissionPkh` null when the
 /// signer gives none).
@@ -344,6 +346,8 @@ pub fn termsJson(a: Allocator, v: ?ValidatorTerms, commission_pkh: ?[20]u8, min_
         try jw.write(t.validator_fee_bps);
         try jw.objectField("commissionBps");
         try jw.write(t.commission_bps);
+        try jw.objectField("minLegSats");
+        try jw.write(t.min_leg_sats);
         try jw.endObject();
     } else try jw.write(null);
     try jw.objectField("market");

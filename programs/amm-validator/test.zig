@@ -2018,6 +2018,64 @@ test "terms (0.15.0, David 2026-10-23): a runtime record root sets — root's fn
     try testing.expect(terms.fromRecord(.null) == null);
 }
 
+test "terms (0.40.0): minLegSats — optional, absent or 0 none; the record carries it only when nonzero; a non-integer refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const terms = @import("terms");
+    const base = [_]cbor.Entry{
+        .{ .key = "lpFeeBps", .value = .{ .uint = 30 } },
+        .{ .key = "validatorFeeBps", .value = .{ .uint = 5 } },
+        .{ .key = "commissionBps", .value = .{ .uint = 25 } },
+    };
+    const none = terms.parseArgs(.{ .map = try a.dupe(cbor.Entry, &base) });
+    try testing.expectEqual(@as(u64, 0), none.set.min_leg_sats);
+    try testing.expect((try terms.record(a, none.set)).get("minLegSats") == null);
+    const with = terms.parseArgs(.{ .map = try std.mem.concat(a, cbor.Entry, &.{ &base, &.{.{ .key = "minLegSats", .value = .{ .uint = 10_000 } }} }) });
+    try testing.expectEqual(@as(u64, 10_000), with.set.min_leg_sats);
+    const rec = try terms.record(a, with.set);
+    try testing.expectEqual(@as(u64, 10_000), rec.get("minLegSats").?.uint);
+    try testing.expectEqual(with.set, terms.fromRecord(rec).?);
+    const zero = terms.parseArgs(.{ .map = try std.mem.concat(a, cbor.Entry, &.{ &base, &.{.{ .key = "minLegSats", .value = .{ .uint = 0 } }} }) });
+    try testing.expectEqual(none.set, zero.set);
+    try testing.expect(terms.parseArgs(.{ .map = try std.mem.concat(a, cbor.Entry, &.{ &base, &.{.{ .key = "minLegSats", .value = .{ .text = "10" } }} }) }) == .bad);
+}
+
+test "minimum leg (0.40.0): the validator refuses below_minimum a leg whose sats side is under minLegSats — the amount in on a buy, the payout on a sell; at the minimum it signs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A buy: 20,000 sats in.
+    const f = try Fx.init(a, &.{ "fund", "token_deploy", "pool_deploy" });
+    const req = try request(a, f.raw("swap_bsv_in"), 0);
+    const op: Outpoint = .{ .txid = txidOf(f.raw("pool_deploy")), .vout = 0 };
+    f.cfg.terms.?.min_leg_sats = 20_000;
+    try testing.expect((try f.spend(.swap, req, op)) == .ok);
+    const calls = f.oracle.calls;
+    f.cfg.terms.?.min_leg_sats = 20_001;
+    const r = try f.spend(.swap, req, op);
+    try expectRefused(r, .below_minimum);
+    try testing.expect(std.mem.indexOf(u8, r.refused.detail.?, "20001") != null);
+    try testing.expectEqualStrings("below_minimum", (try messages.replyValue(a, r)).getText("reason").?);
+    try testing.expectEqual(calls, f.oracle.calls);
+
+    // A sell: the payout, the pool's sats out.
+    const g = try Fx.init(a, &.{ "fund", "token_deploy", "pool_deploy", "swap_bsv_in" });
+    const want = g.raw("swap_tokens_in");
+    const sreq = try request(a, want, 0);
+    const sop: Outpoint = .{ .txid = txidOf(g.raw("swap_bsv_in")), .vout = 0 };
+    const payout: u64 = @intCast((try Transaction.parse(a, want)).outputs[1].satoshis);
+    try testing.expect(payout < 50_000); // the amount in (tokens) is not what is measured
+    g.cfg.terms.?.min_leg_sats = payout + 1;
+    try expectRefused(try g.spend(.swap, sreq, sop), .below_minimum);
+    g.cfg.terms.?.min_leg_sats = payout;
+    try g.oracle.record(a, want, 0);
+    const ok = try g.spend(.swap, sreq, sop);
+    try testing.expect(ok == .ok);
+    try testing.expectEqualSlices(u8, want, ok.ok.tx.?);
+}
+
+
 test "no terms (0.15.0): a market only — a swap and an affirm refused not_validating, \"no terms: this skein validates nothing\", before anything is checked or signed" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

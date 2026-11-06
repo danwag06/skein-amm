@@ -38,6 +38,8 @@
 //!      else; for an AddLiquidity, `addLiquidityOutputs`: the continuation
 //!      with the reserves increased by addBsv/addTokens and LpPubKey the
 //!      call's nextLpPubKey, then at most Rúnar's change; reason `bad_outputs`);
+//!      and (0.40.0) the leg's sats side — the amount in on a buy, the payout
+//!      on a sell — is at least the terms' `minLegSats` (reason `below_minimum`);
 //!   7. the preimage the call pushes is the one we compute (BIP-143,
 //!      ALL|FORKID, the pool's scriptCode);
 //!   8. every other input carries a signature, verified when it spends a
@@ -183,6 +185,9 @@ pub const Reason = enum {
     not_validating,
     /// The pool was rescinded (0.13.0): its ValidatorPubKey is cleared; nothing signs for it.
     rescinded,
+    /// The leg's sats side (the amount in on a buy, the payout on a sell) is under this
+    /// validator's minimum leg (0.40.0, the terms' `minLegSats`): detail names the minimum.
+    below_minimum,
 };
 
 /// A pool's state, as the rejection of a stale request carries it.
@@ -502,6 +507,14 @@ pub fn spend(a: std.mem.Allocator, op: Op, req: SpendRequest, cfg: Config, v: Vi
     if (j.inputs.len == 0 or j.inputs[0].index != pi) return refuse(.pool_not_first_token_input, null);
     // The output set is the contract's.
     if (try swapOutputs(a, cur.pool, src.satoshis, call, tx.outputs)) |why| return refuse(.bad_outputs, why);
+    // The minimum leg (0.40.0): the leg's sats side, the amount in on a buy, the payout on a sell.
+    const min_leg = cfg.terms.?.min_leg_sats;
+    if (min_leg > 0) {
+        const sa = swapArgs(call).?; // swapOutputs read them
+        const q = pool.quoteSwap(cur.pool, src.satoshis, sa.amount_in, sa.bsv_in).?;
+        const leg = if (sa.bsv_in) sa.amount_in else q.out;
+        if (leg < min_leg) return refuse(.below_minimum, try std.fmt.allocPrint(a, "the leg's {d} sats are under this validator's minimum leg of {d} sats", .{ leg, min_leg }));
+    }
 
     // 7. The preimage the call carries is this input's.
     const script_code = unlock.poolScriptCode(cur.token.lock) orelse return refuse(.not_a_pool, null);

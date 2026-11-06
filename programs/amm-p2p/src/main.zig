@@ -387,6 +387,7 @@ fn termsRead(a: Allocator, in: Value) !Value {
         .lp_fee_bps = @intCast(tt.lp_fee_bps),
         .validator_fee_bps = @intCast(tt.validator_fee_bps),
         .commission_bps = @intCast(tt.commission_bps),
+        .min_leg_sats = tt.min_leg_sats,
     } else null;
     const com = try commissionKey(a);
     const m = try marketNow(a);
