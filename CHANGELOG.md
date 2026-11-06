@@ -4,6 +4,22 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.40.2 (2026-11-05)
+
+- `maxSources` (required) caps how many pools an order draws on, in place of `allowPartial` (no
+  alias): `@dcasegr/amm-engine`'s `PlanRequest.maxSources` (`plan` splits over at most that many
+  pools; 1 = the best single pool for the whole amount) and `nextLeg({…, maxSources})` (the legs
+  the order may still fill; 1 = the leg takes all that remains). The client's swap request
+  carries it; `executeSwap` starts its budget there and takes one off per FILLED leg, so with 1 the
+  swap is exactly one leg, retried as one leg within the floor. The fee sats staged are for
+  exactly `maxSources` legs (the two-leg leeway is gone). The pages: "Allow partial fill"
+  unchecked sends 1, checked sends 5 (`MAX_SOURCES_PARTIAL`, the page's choice).
+- `nextLeg`'s take-all rule (it could never fire) and `underEveryMinimum` removed.
+- A pool whose newer state a validator returned but whose transaction the host cannot serve yet is
+  set aside until the pools stream shows it there; with no other pool to take the leg, the swap
+  waits for the stream's next answer or the cancel (no timer, no re-read, no re-relay).
+- The Swap quote's sentence: "…, enough for one leg." / "…, enough for up to <N> legs."
+
 ## 0.40.1 (2026-11-05)
 
 A leg fed by rows of unrelated transactions (rows a stopped swap left and a fresh stage) reached
