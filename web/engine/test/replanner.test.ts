@@ -14,6 +14,7 @@ function baseRequest(overrides: Partial<PlanRequest>): PlanRequest {
     amountIn: 100_000n,
     slippage: {},
     fixedCost: noCost,
+    maxSources: 10, // 0.40.2: required; more pools than any test holds
     inventory: [],
     ...overrides,
   };

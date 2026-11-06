@@ -60,7 +60,7 @@ Plans a fresh order against an inventory of pools. Deterministic and pure:
 no clock, no randomness; ties are always broken by outpoint (ascending).
 
 - `maxSources` (0.40.2; replaces `allowPartial`): the most pools the order
-  may draw on, a positive integer; absent, no cap.
+  may draw on, a positive integer the caller always gives.
 - `maxSources: 1` — only pools where the **entire** `amountIn` swaps
   within the slippage bound are eligible; the engine picks the single best
   one (max `amountOut`, tie-break by outpoint). If none qualify, returns an
@@ -99,10 +99,10 @@ no clock, no randomness; ties are always broken by outpoint (ascending).
   plan carries `unfillable: "min"` and `minAmountIn`, the smallest amountIn
   one pool accepts.
 
-### `nextLeg({pools, direction, remaining, fixedCost, minOut, maxSources?})`
+### `nextLeg({pools, direction, remaining, fixedCost, minOut, maxSources})`
 
 One leg at a time: plans `remaining` against at most `maxSources` of
-`pools` (0.40.2: the legs the order may STILL fill; absent, no cap) and
+`pools` (0.40.2: the legs the order may STILL fill, required) and
 returns `{leg, projectedOut}` — the plan's leg with the largest `amountIn`
 (tie: outpoint) and the plan's total out — or `{stop}`: `filled` (nothing
 remains), `no_pool`, `min` (only the minimums leave no leg), `floor` (the
@@ -216,7 +216,7 @@ A few judgment calls the task left open, made explicit here:
 - `src/nextLeg.ts` — `nextLeg()`.
 - `src/price.ts` — `priceOf()`, `PRICE_SHARE_BPS`.
 - `test/balance.test.ts` — the plan-relative bound, minimum leg sizes, `nextLeg`, `priceOf`.
-- `test/sources.test.ts` — `maxSources` in `plan` (1, 2, none) and across `nextLeg`'s fills.
+- `test/sources.test.ts` — `maxSources` in `plan` (1, 2, 5) and across `nextLeg`'s fills.
 - `test/pricing.test.ts` — `computeSwap` checked against an independently transcribed oracle of the Go contract's formula, for a table of cases (typical, zero fees, high fees, tiny amounts with ceil-rounding edge cases, a reject case, asymmetric reserves, heavy price impact, realistic large BSV magnitudes).
 - `test/planner.test.ts` — single pool, split-beats-single, fixed-cost-prevents-split, `maxSources: 1`, slippage exhaustion, liveness filter, `bsvToToken` direction, determinism.
 - `test/replanner.test.ts` — re-pricing after rejection (better and worse new state), partial-fill + cumulative slippage budget, stopping when nothing eligible remains, stopping when fully filled, multi-round chaining.

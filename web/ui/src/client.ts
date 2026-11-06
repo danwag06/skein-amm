@@ -172,7 +172,12 @@ export interface QuoteRequest {
   amountIn: bigint;
   /** Max slippage against the quoted amount out, basis points. */
   maxSlippageBps: number;
-  allowPartial: boolean;
+  /**
+   * 0.40.2: the most pools the order may draw on, filled legs counted — a positive integer the
+   * caller always gives; the fee sats staged are for exactly that many legs. 1: exactly one leg
+   * for the whole amount. Replaces `allowPartial` (`false` was 1).
+   */
+  maxSources: number;
 }
 
 export interface QuoteLeg {
@@ -195,7 +200,7 @@ export interface QuoteLeg {
 export interface QuoteStage {
   /** The swap amount: sats on a buy, token base units on a sell. */
   amount: bigint;
-  /** The sats for the carriers and miner fees of the planned legs and two more legs. */
+  /** The sats for the carriers and miner fees of `maxSources` legs (0.40.2). */
   feeSats: bigint;
 }
 
@@ -1009,8 +1014,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
    * and whose commission meets the market's minimum), each pool with its validator's minimum leg
    * (0.40.0); no request. `meta`: the token's symbol and decimals. 0.40.0: the price and impact from
    * the engine's `priceOf` over the same pools (the buy side for a buy, the sell side for a sell);
-   * each leg's own fees; what Swap will stage (the swap amount exact, the fee sats of the planned
-   * legs and two more) and the per-leg miner fee estimate.
+   * each leg's own fees; what Swap will stage (the swap amount exact, 0.40.2: the fee sats of
+   * `maxSources` legs) and the per-leg miner fee estimate.
    */
   function quoteSwap(req: QuoteRequest, held: PoolsAnswer | null, meta: { sym: string; dec: number }): Quote {
     if (req.amountIn <= 0n) throw new Error("Enter an amount");
@@ -1021,7 +1026,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const buy = req.side === "buy";
     const r = buildPlanRequest(
       req.tokenId,
-      { direction: buy ? "bsvToToken" : "tokenToBsv", amount: formatAmount(req.amountIn, buy ? 0 : dec), slippageBps: String(req.maxSlippageBps), allowPartial: req.allowPartial },
+      { direction: buy ? "bsvToToken" : "tokenToBsv", amount: formatAmount(req.amountIn, buy ? 0 : dec), slippageBps: String(req.maxSlippageBps), maxSources: req.maxSources },
       pools,
       live,
       dec,
@@ -1040,7 +1045,9 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const effective = Number(sats) / (Number(tokens) / 10 ** dec);
     const minerFee = legMinerFeeSats(feeRate);
     const carry = plan.legs.map((l) => legCarrySats(l, buy, minerFee));
-    const feeSats = carry.reduce((a, x) => a + x, 0n) + 2n * carry.reduce((a, x) => (x > a ? x : a), 0n);
+    // 0.40.2: the fee sats for EXACTLY maxSources legs — the planned legs' own, each further leg at the largest of theirs.
+    const more = BigInt(Math.max(0, req.maxSources - carry.length));
+    const feeSats = carry.reduce((a, x) => a + x, 0n) + more * carry.reduce((a, x) => (x > a ? x : a), 0n);
     const q: Quote = {
       request: req,
       legs: used.map((l) => ({
@@ -1075,15 +1082,19 @@ function makeClient(opts: ClientOptions, s: Shared) {
    * §0 7, Builder 2 item 4): ONE swap at a time, legs ONE AT A TIME.
    *
    *   1. The overlay pass (`resolve`); then what `amm-swap` lacks of what the plan needs — the swap
-   *      amount exact, the sats for the carriers and miner fees of the planned legs and two more —
+   *      amount exact, the sats for the carriers and miner fees of `maxSources` legs —
    *      staged by ONE `stage` (`staging`).
    *   2. The loop: cancelled → `cancelled`; `nextLeg` over the pools held now (the token's pools
-   *      stream, any state a refusal returned, minus the excluded outpoints), `minOut` the quote's
-   *      floor less what has filled → its stop ends the swap; the pool's current output read by its
+   *      stream, any state a refusal returned, minus the excluded outpoints and the pools set aside),
+   *      `minOut` the quote's floor less what has filled, `maxSources` (0.40.2) the request's less the
+   *      legs filled → its stop ends the swap, unless a pool is set aside: then the swap waits for the
+   *      stream's next answer (or the cancel) and plans again; the pool's current output read by its
    *      id (`GET /pools/beef?pool=`; moved → its row replaced, planned again); the staged rows that
    *      cover the leg, else `fees`; built, signed, relayed (`relaying`):
    *      - accepted → taken in (ONE internalizeAction) before the next leg;
-   *      - refused `pool_spent` with the pool's state → its row replaced (`repricing`);
+   *      - refused `pool_spent` with the pool's state → its row replaced (`repricing`); a state whose
+   *        transaction this host cannot serve yet (`/pools/beef?pool=` lacks it) → the pool set aside
+   *        until the stream shows it at that outpoint (0.40.2: no re-read, no re-relay meanwhile);
    *      - refused otherwise (`below_minimum` included) → that outpoint excluded;
    *      - no answer → (a) the overlay: a staged input spent → the leg landed (taken in by the
    *        pass), the pool spent by another's swap → continue with the same rows; (b) else the
@@ -1131,14 +1142,40 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const meta = { sym: p.sym, dec: p.dec };
 
     // The pools held now: the stream's answer (from the quote's), rows a refusal or a fresh read replaced, outpoints excluded.
+    // 0.40.2: a pool whose newest state a validator returned but whose transaction this host cannot serve yet is set
+    // aside (`waiting`: pool id → that outpoint) until the stream shows it there; each stream answer wakes a waiting swap.
     let answer = p.answer;
-    const stop = watchTokenPools(tokenId, (a) => (answer = a));
     const replaced = new Map<string, PoolRow>();
+    const fromRefusal = new Set<string>();
+    const waiting = new Map<string, string>();
+    let wake: (() => void) | null = null;
+    const stop = watchTokenPools(tokenId, (a) => {
+      answer = a;
+      for (const [id, at] of waiting) {
+        if (a.pools.find((x) => x.poolId === id)?.outpoint !== at) continue;
+        waiting.delete(id);
+        replaced.delete(id);
+        fromRefusal.delete(id);
+      }
+      wake?.();
+    });
+    /** The next stream answer, or the cancel signal: no timer. */
+    const nextAnswer = () =>
+      new Promise<void>((res) => {
+        const done = () => {
+          wake = null;
+          res();
+        };
+        wake = done;
+        signal?.addEventListener("abort", done, { once: true });
+      });
     const excluded = new Set<string>();
     const poolsNow = (): PoolRow[] =>
       poolsWithMinimums(answer)
         .map((r) => replaced.get(r.poolId) ?? r)
-        .filter((r) => !excluded.has(r.outpoint));
+        .filter((r) => !excluded.has(r.outpoint) && !waiting.has(r.poolId));
+    /** 0.40.2: the legs the order may still fill (the request's maxSources less the legs filled). */
+    let budget = quote.request.maxSources;
 
     const legs: LegResult[] = [];
     let filledIn = 0n;
@@ -1152,6 +1189,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
         if (i < 0) continue;
         const [x] = pending.splice(i, 1);
         order ??= x!.prepared.order;
+        budget -= 1;
         filledIn += x!.leg.amountIn;
         filledOut += x!.leg.amountOut;
         legs.push({ poolOutpoint: outpointText(x!.leg.outpoint), poolId: x!.poolId, amountIn: x!.leg.amountIn, amountOut: x!.leg.amountOut, txid: t.txid });
@@ -1182,8 +1220,13 @@ function makeClient(opts: ClientOptions, s: Shared) {
         const remaining = quote.request.amountIn - filledIn;
         const pools = poolsNow();
         const minOut = quote.minAmountOut > filledOut ? quote.minAmountOut - filledOut : 0n;
-        const next = nextLeg({ pools, direction, remaining, fixedCost: { minerFeeSats: minerFee }, minOut });
+        const next = nextLeg({ pools, direction, remaining, fixedCost: { minerFeeSats: minerFee }, minOut, maxSources: budget });
         if ("stop" in next) {
+          // A pool set aside for the stream: wait for its next answer (or the cancel), then plan again.
+          if (next.stop !== "filled" && waiting.size > 0) {
+            await nextAnswer();
+            continue;
+          }
           why = next.stop;
           break;
         }
@@ -1196,9 +1239,16 @@ function makeClient(opts: ClientOptions, s: Shared) {
           continue;
         }
         if (now.outpoint !== row.outpoint) {
+          // The validator's newer state, which this host cannot serve yet: set aside until the stream shows it.
+          if (fromRefusal.has(row.poolId) && !poolOutputOf(fresh, row.outpoint)) {
+            waiting.set(row.poolId, row.outpoint);
+            continue;
+          }
           replaced.set(row.poolId, { ...row, ...now });
+          fromRefusal.delete(row.poolId);
           continue;
         }
+        fromRefusal.delete(row.poolId); // the host serves the state the refusal returned
         const poolOutput = poolOutputOf(fresh, leg.outpoint);
         const peerId = row.validatorPeerId ?? answer.validators.find((v) => v.identity === row.validatorIdentityKey.toLowerCase())?.peerId;
         if (!poolOutput || !peerId) {
@@ -1241,6 +1291,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
             continue;
           }
           order ??= prepared.order;
+          budget -= 1;
           filledIn += leg.amountIn;
           filledOut += leg.amountOut;
           legs.push({ poolOutpoint: at.leg, poolId: row.poolId, amountIn: leg.amountIn, amountOut: leg.amountOut, txid: outcome.txid });
@@ -1249,6 +1300,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
         if (outcome.status === "refused" && outcome.reason.startsWith("pool_spent") && outcome.pool) {
           progress({ phase: "repricing", ...at, filled: [...legs] });
           replaced.set(row.poolId, { ...row, ...outcome.pool });
+          fromRefusal.add(row.poolId);
         } else {
           excluded.add(row.outpoint);
         }

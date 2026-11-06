@@ -11,10 +11,10 @@ export interface NextLegRequest {
   /** The least total amountOut the remainder must still bring (the floor minus what has filled). */
   minOut: bigint;
   /**
-   * 0.40.2: the number of legs the order may STILL fill (a positive integer; absent: no cap). The
-   * plan of `remaining` uses at most that many pools; 1: the leg takes all of `remaining`.
+   * 0.40.2: the number of legs the order may STILL fill, a positive integer. The plan of
+   * `remaining` uses at most that many pools; 1: the leg takes all of `remaining`.
    */
-  maxSources?: number;
+  maxSources: number;
 }
 
 export type NextLegResult =

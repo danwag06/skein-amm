@@ -16,6 +16,7 @@ function req(overrides: Partial<PlanRequest>): PlanRequest {
     amountIn: 100_000n,
     slippage: {},
     fixedCost: noCost,
+    maxSources: 10, // 0.40.2: required; more pools than any test holds
     inventory: [],
     ...overrides,
   };
@@ -124,7 +125,7 @@ describe("follow-up: the minimums choose the pools", () => {
   });
 
   it("nextLeg inherits it: the leg in C, no min stop", () => {
-    const r = nextLeg({ pools: [A, B, C], direction: "bsvToToken", remaining: 5_000n, fixedCost: noCost, minOut: 0n });
+    const r = nextLeg({ pools: [A, B, C], direction: "bsvToToken", remaining: 5_000n, fixedCost: noCost, minOut: 0n, maxSources: 10 });
     if (!("leg" in r)) throw new Error("expected a leg");
     expect(r.leg.outpoint).toBe("c:0");
     expect(r.leg.amountIn).toBe(5_000n);
@@ -165,7 +166,7 @@ describe("follow-up: the minimums choose the pools", () => {
     expect(p.legs).toHaveLength(0);
     expect(p.unfillable).toBe("min");
     expect(p.minAmountIn).toBe(10_000n);
-    expect(nextLeg({ pools: [A, B], direction: "bsvToToken", remaining: 5_000n, fixedCost: noCost, minOut: 0n })).toEqual({ stop: "min" });
+    expect(nextLeg({ pools: [A, B], direction: "bsvToToken", remaining: 5_000n, fixedCost: noCost, minOut: 0n, maxSources: 10 })).toEqual({ stop: "min" });
   });
 
   it("deterministic over pool order", () => {
@@ -176,7 +177,7 @@ describe("follow-up: the minimums choose the pools", () => {
 });
 
 describe("item 3: nextLeg", () => {
-  const base = { direction: "bsvToToken" as const, fixedCost: noCost, minOut: 0n };
+  const base = { direction: "bsvToToken" as const, fixedCost: noCost, minOut: 0n, maxSources: 10 };
 
   it("filled when nothing remains; no_pool with no pool", () => {
     expect(nextLeg({ ...base, pools: [makePool({ outpoint: "a:0" })], remaining: 0n })).toEqual({ stop: "filled" });

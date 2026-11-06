@@ -369,7 +369,7 @@ describe("exchange.ts, wired", () => {
   it("quoteSwap (D12; 0.40.0): the matching engine's plan over the held pools, no request; a buy pays above the price now, a sell gets below; each leg its pool's id and fees; what Swap stages; no pool: refused", async () => {
     const h = await held();
     const n = inst.requests.length;
-    const buy = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, h, META);
+    const buy = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, h, META);
     expect(buy.legs).toHaveLength(1);
     expect(buy.legs[0]!.poolOutpoint).toMatch(OUTPOINT);
     expect(buy.legs[0]!.amountIn).toBe(20_000n);
@@ -378,16 +378,16 @@ describe("exchange.ts, wired", () => {
     expect(buy.effectivePrice).toBeGreaterThan(buy.marginalPrice);
     expect(buy.legs[0]).toMatchObject({ poolId: PID, fees: { lpBps: 30, validatorBps: 5, commissionBps: 10 } });
     expect(buy.stage.amount).toBe(20_000n);
-    expect(buy.stage.feeSats).toBe(3n * (buy.legMinerFeeSats + 1n));
+    expect(buy.stage.feeSats).toBe(buy.legMinerFeeSats + 1n); // 0.40.2: maxSources 1 — one leg's fee sats, no leeway
     // 0.40.0: the price now is a sell of 1% of the pooled tokens (50,000 here): a larger sell gets below it.
-    const sell = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 100_000n, maxSlippageBps: 100, allowPartial: false }, h, META);
+    const sell = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 100_000n, maxSlippageBps: 100, maxSources: 1 }, h, META);
     expect(sell.effectivePrice).toBeLessThan(sell.marginalPrice);
     expect(inst.requests.length).toBe(n);
-    expect(() => quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, { ...h, pools: [] }, META)).toThrow(/No pool to swap against/);
+    expect(() => quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, { ...h, pools: [] }, META)).toThrow(/No pool to swap against/);
   });
 
   it("executeSwap (0.40.0): needs a wallet; the overlay pass first (ONE /amm/spends over the swap basket's rows; none, no read); a pool gone from its id's read (ONE /pools/beef?pool=) is no pool: stop no_pool", async () => {
-    const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, await held(), META);
+    const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, await held(), META);
     await expect(executeSwap(q)).rejects.toThrow(/Connect a wallet/);
     const sent: CreateActionArgs[] = [];
     const wallet = {
@@ -439,7 +439,7 @@ describe("exchange.ts, wired", () => {
       },
     } as unknown as WalletInterface;
     setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
-    const q = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, allowPartial: false }, await held(), META);
+    const q = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, maxSources: 1 }, await held(), META);
     const r = await executeSwap(q);
     expect(r).toMatchObject({ status: "failed", stop: "fees" });
     expect(sent).toHaveLength(1);
@@ -889,7 +889,7 @@ describe("requests per page (0.34.0)", () => {
     expect(load).toEqual(["GET /amm/tokens", `GET /amm/stats`, `GET /@${TOKEN}/amm/pools`]);
     expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
     const n = inst.requests.length;
-    const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, h ?? parsePools({}), META);
+    const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, h ?? parsePools({}), META);
     expect(since(n)).toEqual([]);
     expect(q.legs).toHaveLength(1);
     // A swap (0.40.0): the overlay pass, then per leg ONE /pools/beef?pool= and its relay /call (test/clientSwap.test.ts).

@@ -57,7 +57,9 @@ The client (each an async function unless noted):
 - swap: `quoteSwap(request, poolsAnswer, {sym, dec})` (sync: the engine's plan over the pools the
   token's pools stream gave, each pool with its validator's `minLegSats`; the quote's price and
   impact from the engine's `priceOf`, each leg's own `fees`, `stage` = what Swap sets aside
-  (`amount`, `feeSats`: the planned legs and two more), `legMinerFeeSats`),
+  (`amount`, `feeSats`: 0.40.2, exactly `maxSources` legs), `legMinerFeeSats`); the request's
+  `maxSources` (required, 0.40.2; replaces `allowPartial`) is the most pools the swap may draw on —
+  1 is exactly one leg; the Open Exchange pages send 1 or 5,
   `executeSwap(quote, {onProgress, signal})` (below), `walletSats`;
 - liquidity: `myPositions`, `validatorTerms`, `deployPosition({tokenId, tokens, sats})`,
   `closePosition({outpoint})`, `rebalancePosition({outpoint, tokens, sats})` (the old pool closed
@@ -108,7 +110,7 @@ const tokenId = "<txid>_0";
 // The token's pools route as an event stream: the pools a swap may use, the market.
 const stop = client.watchTokenPools(tokenId, async (pools) => {
   stop();
-  const quote = client.quoteSwap({ tokenId, side: "buy", amountIn: 50_000n, maxSlippageBps: 50, allowPartial: false }, pools, { sym: "TOK", dec: 0 });
+  const quote = client.quoteSwap({ tokenId, side: "buy", amountIn: 50_000n, maxSlippageBps: 50, maxSources: 1 }, pools, { sym: "TOK", dec: 0 });
   try {
     const cancel = new AbortController();
     const result = await client.executeSwap(quote, { signal: cancel.signal, onProgress: (p) => console.log(p.phase) });
@@ -120,9 +122,12 @@ const stop = client.watchTokenPools(tokenId, async (pools) => {
 });
 ```
 
-`executeSwap` (0.40.0): ONE swap at a time. First the pass over the swap basket, then ONE wallet
+`executeSwap` (0.40.0; 0.40.2: at most `maxSources` legs, the budget down by one per FILLED leg —
+a refused or unanswered leg does not count, the last leg takes all that remains): ONE swap at a time. First the pass over the swap basket, then ONE wallet
 action stages what `amm-swap` lacks of `quote.stage` (sats only: a plain createAction; a sell's
-tokens: the module transfer). Then legs one at a time: the engine's `nextLeg` over the pools held
+tokens: the module transfer). A pool whose newer state a validator returned but which the host
+cannot serve yet is set aside until the pools stream shows it there; with no other pool to take
+the leg, the swap waits for the stream's next answer (or the cancel), no timer (0.40.2). Then legs one at a time: the engine's `nextLeg` over the pools held
 now (`minOut` = the quote's floor less what has filled), the pool's current output by its id
 (`/pools/beef?pool=`), the staged rows that cover the leg (largest first), built, signed, relayed;
 accepted → taken in (payout, own commission, change) before the next leg; refused `pool_spent` →

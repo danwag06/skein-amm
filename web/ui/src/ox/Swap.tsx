@@ -33,6 +33,13 @@ import { routeHref } from "./route";
 
 const DEFAULT_SLIPPAGE_BPS = 50;
 
+/**
+ * The most pools a swap may draw on with "Allow partial fill" checked (0.40.2, David Case: "5 is
+ * fine"): this page's choice, not the client's; unchecked is 1, one leg. The fee sats staged
+ * cover exactly that many legs.
+ */
+export const MAX_SOURCES_PARTIAL = 5;
+
 function impactClass(bps: number): string {
   return bps >= 300 ? "bad" : bps >= 50 ? "warn" : "";
 }
@@ -139,7 +146,7 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
   const { quote, quoteError } = useMemo((): { quote: Quote | null; quoteError: string | null } => {
     if (amountIn === null || amountIn === 0n || pools.data === null) return { quote: null, quoteError: null };
     try {
-      return { quote: quoteSwap({ tokenId: token.tokenId, side, amountIn, maxSlippageBps: slippageBps, allowPartial }, pools.data, { sym: token.sym, dec: token.dec }), quoteError: null };
+      return { quote: quoteSwap({ tokenId: token.tokenId, side, amountIn, maxSlippageBps: slippageBps, maxSources: allowPartial ? MAX_SOURCES_PARTIAL : 1 }, pools.data, { sym: token.sym, dec: token.dec }), quoteError: null };
     } catch (e) {
       return { quote: null, quoteError: e instanceof Error ? e.message : String(e) };
     }
@@ -308,8 +315,8 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
           {quote && (
             <p className="help">
               Swap first sets aside {side === "buy" ? `${fmtSats(quote.stage.amount + quote.stage.feeSats)} sats` : `${fmtAmount(quote.stage.amount, token.dec)} ${token.sym} and ${fmtSats(quote.stage.feeSats)} sats`} in the swap basket
-              {side === "buy" ? ` (${fmtSats(quote.stage.amount)} to swap, ${fmtSats(quote.stage.feeSats)} for fees)` : " (the sats for fees)"}, enough for the
-              planned legs and two more. Miner fee per leg: about {fmtSats(quote.legMinerFeeSats)} sats. What is left goes back to your wallet.
+              {side === "buy" ? ` (${fmtSats(quote.stage.amount)} to swap, ${fmtSats(quote.stage.feeSats)} for fees)` : " (the sats for fees)"}, enough for{" "}
+              {quote.request.maxSources === 1 ? "one leg" : `up to ${quote.request.maxSources} legs`}. Miner fee per leg: about {fmtSats(quote.legMinerFeeSats)} sats. What is left goes back to your wallet.
             </p>
           )}
           {quoteError && <Notice kind="bad">{quoteError}</Notice>}

@@ -30,7 +30,8 @@ export interface SwapForm {
   /** Sats (bsvToToken) or tokens in display units (tokenToBsv). */
   amount: string;
   slippageBps: string;
-  allowPartial: boolean;
+  /** 0.40.2: the most pools the order may draw on, a positive integer the caller gives. */
+  maxSources: number;
 }
 
 export type PlanInput = { ok: true; request: PlanRequest } | { ok: false; error: string };
@@ -93,7 +94,7 @@ export function buildPlanRequest(
       direction: form.direction,
       amountIn,
       slippage: { toleranceBps },
-      allowPartial: form.allowPartial,
+      maxSources: form.maxSources,
       fixedCost,
       inventory: withLastSeen(usable, live),
     },

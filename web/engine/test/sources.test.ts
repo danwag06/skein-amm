@@ -12,11 +12,11 @@ const three = () => [
   makePool({ outpoint: "b:0", bsvReserve: 1_200_000n, tokenReserve: 6_000_000n }),
   makePool({ outpoint: "c:0", bsvReserve: 900_000n, tokenReserve: 4_500_000n }),
 ];
-const req = (o: Partial<PlanRequest>): PlanRequest => ({ tokenId: "t", direction: "bsvToToken", amountIn: 600_000n, slippage: {}, fixedCost: noCost, inventory: three(), ...o });
+const req = (o: Partial<PlanRequest>): PlanRequest => ({ tokenId: "t", direction: "bsvToToken", amountIn: 600_000n, slippage: {}, fixedCost: noCost, maxSources: 5, inventory: three(), ...o });
 
 describe("plan: the cap", () => {
-  it("none: every useful pool (3 here); 2: at most two; 1: the best single pool for the whole amount (allowPartial false's pick)", () => {
-    expect(plan(req({})).legs).toHaveLength(3);
+  it("5: every useful pool (3 here); 2: at most two; 1: the best single pool for the whole amount (allowPartial false's pick)", () => {
+    expect(plan(req({ maxSources: 5 })).legs).toHaveLength(3);
     const two = plan(req({ maxSources: 2 }));
     expect(two.legs).toHaveLength(2);
     expect(two.totalAmountIn).toBe(600_000n);
@@ -24,7 +24,7 @@ describe("plan: the cap", () => {
     const one = plan(req({ maxSources: 1 }));
     expect(one.legs).toEqual([pickBestSingleLeg(three(), "bsvToToken", 600_000n, 0n)]);
     expect(one.legs[0]!.amountIn).toBe(600_000n);
-    expect(plan(req({})).totalAmountOut).toBeGreaterThan(two.totalAmountOut);
+    expect(plan(req({ maxSources: 5 })).totalAmountOut).toBeGreaterThan(two.totalAmountOut);
     expect(two.totalAmountOut).toBeGreaterThan(one.totalAmountOut);
   });
 
@@ -39,23 +39,23 @@ describe("plan: the cap", () => {
 
 describe("nextLeg: maxSources is the legs the order may STILL fill", () => {
   /** Fill legs one at a time, each pool moved by its leg, the budget down by one per fill. */
-  function run(maxSources: number | undefined, amount = 600_000n) {
+  function run(maxSources: number, amount = 600_000n) {
     let pools: PoolState[] = three();
     let remaining = amount;
     let budget = maxSources;
     const legs: Leg[] = [];
     for (let i = 0; i < 10; i++) {
-      const r = nextLeg({ pools, direction: "bsvToToken", remaining, fixedCost: noCost, minOut: 0n, ...(budget !== undefined ? { maxSources: budget } : {}) });
+      const r = nextLeg({ pools, direction: "bsvToToken", remaining, fixedCost: noCost, minOut: 0n, maxSources: budget });
       if ("stop" in r) return { legs, stop: r.stop };
       legs.push(r.leg);
       remaining -= r.leg.amountIn;
       pools = pools.map((p) => (p.outpoint === r.leg.outpoint ? { ...p, outpoint: `${p.outpoint}+`, bsvReserve: r.leg.newBsvReserve, tokenReserve: r.leg.newTokenReserve } : p));
-      if (budget !== undefined) budget -= 1;
+      budget -= 1;
     }
     return { legs, stop: "loop" };
   }
 
-  it("1: one leg taking all; 2: two legs, the second taking all that remains; none: as many as the split gives", () => {
+  it("1: one leg taking all; 2: two legs, the second taking all that remains; 5: as many as the split gives", () => {
     const one = run(1);
     expect(one).toMatchObject({ stop: "filled" });
     expect(one.legs.map((l) => l.amountIn)).toEqual([600_000n]);
@@ -63,7 +63,7 @@ describe("nextLeg: maxSources is the legs the order may STILL fill", () => {
     expect(two.stop).toBe("filled");
     expect(two.legs).toHaveLength(2);
     expect(two.legs[0]!.amountIn + two.legs[1]!.amountIn).toBe(600_000n);
-    const none = run(undefined);
+    const none = run(5);
     expect(none.stop).toBe("filled");
     expect(none.legs.length).toBeGreaterThanOrEqual(3);
   });

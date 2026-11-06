@@ -72,7 +72,7 @@ export function planOrder(
   pools: PoolState[],
   direction: Direction,
   amountIn: bigint,
-  maxSources: number | undefined,
+  maxSources: number,
   fixedCost: FixedCost,
   minAmountOut: bigint,
 ): Leg[] {
@@ -124,7 +124,7 @@ export function plan(request: PlanRequest): Plan {
     meetsSlippageBound: totalAmountOut >= resolvedMinAmountOut,
     filledCompletely: totalAmountIn === request.amountIn,
     direction: request.direction,
-    ...(request.maxSources !== undefined ? { maxSources: request.maxSources } : {}),
+    maxSources: request.maxSources,
     fixedCost: request.fixedCost,
     livenessThreshold: request.livenessThreshold,
     now: request.now,

@@ -54,7 +54,7 @@ export function replan(plan: Plan, results: LegResult[]): Plan {
 
   const base = {
     direction: plan.direction,
-    ...(plan.maxSources !== undefined ? { maxSources: plan.maxSources } : {}),
+    maxSources: plan.maxSources,
     fixedCost: plan.fixedCost,
     livenessThreshold: plan.livenessThreshold,
     now: plan.now,

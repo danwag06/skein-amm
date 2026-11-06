@@ -127,7 +127,7 @@ const poolA: PoolState = {
 const poolB: PoolState = { ...poolA, outpoint: `${"bb".repeat(32)}_0`, bsvReserve: 2_000_000n, tokenReserve: 9_000_000n };
 
 describe("plan display", () => {
-  const form: SwapForm = { direction: "bsvToToken", amount: "400000", slippageBps: "500", allowPartial: true };
+  const form: SwapForm = { direction: "bsvToToken", amount: "400000", slippageBps: "500", maxSources: 5 };
   // poolA and poolB share a validator, live on the token.
   const live = liveFor([poolA.validatorIdentityKey]);
 
@@ -176,7 +176,7 @@ describe("plan display", () => {
 
   it("no partial fills: one pool only; the pool's commission is priced as a fee on amount in", () => {
     const withCommission = { ...poolA, commissionBps: 10n };
-    const req = buildPlanRequest(TOKEN_ID, { ...form, amount: "40000", allowPartial: false }, [withCommission], live, 0);
+    const req = buildPlanRequest(TOKEN_ID, { ...form, amount: "40000", maxSources: 1 }, [withCommission], live, 0);
     if (!req.ok) throw new Error(req.error);
     expect(req.request.fixedCost).toEqual({ minerFeeSats: expect.any(BigInt) });
     const { view } = quote(req.request, live, 0);
@@ -186,7 +186,7 @@ describe("plan display", () => {
     expect(view.commissions).toBe(40n);
     expect(l.amountOut).toBe(computeSwap(withCommission, "bsvToToken", 40_000n)!.amountOut);
     // The same order on the same pool without a commission gets more out.
-    const bare = buildPlanRequest(TOKEN_ID, { ...form, amount: "40000", allowPartial: false }, [poolA], live, 0);
+    const bare = buildPlanRequest(TOKEN_ID, { ...form, amount: "40000", maxSources: 1 }, [poolA], live, 0);
     if (!bare.ok) throw new Error(bare.error);
     expect(quote(bare.request, live, 0).view.totalOut).toBeGreaterThan(view.totalOut);
   });
@@ -745,7 +745,7 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
     });
     expect(calls.some((c) => c.method === "abortAction" || c.method === "internalizeAction" || c.method === "relinquishOutput")).toBe(false);
     // The engine replans against it.
-    const req = buildPlanRequest(TOKEN_ID, { direction: "bsvToToken", amount: "20000", slippageBps: "500", allowPartial: true }, [o.status === "refused" ? o.pool! : stateOf(poolDeploy, v.identity)], liveFor([v.identity]), 0);
+    const req = buildPlanRequest(TOKEN_ID, { direction: "bsvToToken", amount: "20000", slippageBps: "500", maxSources: 5 }, [o.status === "refused" ? o.pool! : stateOf(poolDeploy, v.identity)], liveFor([v.identity]), 0);
     if (!req.ok) throw new Error(req.error);
     expect(quote(req.request, liveFor([v.identity]), 0).plan.legs.map((l) => l.outpoint)).toEqual([wirePool.outpoint]);
   });

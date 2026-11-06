@@ -37,6 +37,8 @@ let covers = true;
 let satsRows = 0;
 /** Called after each relay with the leg's pool outpoint (a test moves the pools here). */
 let afterRelay: ((pool: string) => void) | null = null;
+/** Every pool id `/pools/beef?pool=` was asked for. */
+const beefReads: string[] = [];
 
 const satsRow: SatsInput = { outpoint: `${"77".repeat(32)}.0`, txid: "77".repeat(32), vout: 0, satoshis: 1_000_000, lockingScript: "", protocolID: [2, "amm swap"], keyID: "k", counterparty: "self" };
 
@@ -78,8 +80,9 @@ vi.mock("../src/lib/overlay", async (orig) => {
   const row = (id: string, p: PoolState) => ({ ...p, poolId: id, lpPubKey: "", swaps: 0 });
   return {
     ...real,
-    readPoolsBeef: vi.fn(async (_b: string, ids?: string[]) => ({ pools: (ids ?? []).flatMap((id) => (current.has(id) ? [row(id, current.get(id)!)] : [])), beef: [] })),
-    poolOutputOf: vi.fn(() => ({ beef: [], outputIndex: 0 })),
+    readPoolsBeef: vi.fn(async (_b: string, ids?: string[]) => (beefReads.push(...(ids ?? [])), { pools: (ids ?? []).flatMap((id) => (current.has(id) ? [row(id, current.get(id)!)] : [])), beef: [] })),
+    // 0.40.2: the host serves a pool output only when it lists the pool there.
+    poolOutputOf: vi.fn((pb: { pools: { outpoint: string }[] }, outpoint: string) => (pb.pools.some((x) => x.outpoint === outpoint) ? { beef: [], outputIndex: 0 } : null)),
     readSpendsAll: vi.fn(async (_b: string, ops: string[]) => spentRead(ops)),
   };
 });
@@ -102,7 +105,7 @@ const held = (withB = false) => ({
 const af = { fetch: async () => new Response("{}", { status: 404 }) };
 // No EventSource in this suite: the client's pools stream is ONE plain GET (answered 404 here: the quote's answer is held).
 const client = (feeRateSatsPerKb?: number) => createClient({ origin: `${ORIGIN}/amm`, ...(feeRateSatsPerKb !== undefined ? { feeRateSatsPerKb } : {}), wallet: {} as never, signedFor: () => af as never, identityKey: SKEIN, fetch: async () => new Response("{}", { status: 404 }) });
-const buy = (c: ReturnType<typeof client>, amountIn = 20_000n, withB = false) => c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn, maxSlippageBps: 100, allowPartial: true }, held(withB), { sym: "TST", dec: 0 });
+const buy = (c: ReturnType<typeof client>, amountIn = 20_000n, withB = false) => c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn, maxSlippageBps: 100, maxSources: 5 }, held(withB), { sym: "TST", dec: 0 });
 const accepted = (txid = "ee".repeat(32)): SwapOutcome => ({ status: "accepted", id: "r", txid, completed: { txid, internalized: true, errors: [] } });
 
 beforeEach(() => {
@@ -123,16 +126,17 @@ beforeEach(() => {
   covers = true;
   satsRows = 0;
   afterRelay = null;
+  beefReads.length = 0;
 });
 
 describe("the quote (0.40.0)", () => {
-  it("what Swap stages: the swap amount exact and the fee sats for the planned legs and two more; the per-leg miner fee estimate; each leg its own pool's fees; price and impact from priceOf", () => {
+  it("what Swap stages: the swap amount exact and the fee sats for maxSources legs; the per-leg miner fee estimate; each leg its own pool's fees; price and impact from priceOf", () => {
     const c = client(250);
     const q = buy(c);
     expect(q.stage.amount).toBe(20_000n);
     expect(q.legMinerFeeSats).toBe(BigInt(Math.ceil(13 * 250)));
-    // One planned leg (a buy: one carrier, the token payout) + two more.
-    expect(q.stage.feeSats).toBe(3n * (q.legMinerFeeSats + 1n));
+    // 0.40.2: exactly maxSources (5) legs' fee sats (a buy: one carrier each, the token payout).
+    expect(q.stage.feeSats).toBe(5n * (q.legMinerFeeSats + 1n));
     expect(q.legs[0]).toMatchObject({ poolId: ID_A, fees: { lpBps: 30, validatorBps: 5, commissionBps: 10 } });
     expect(q.marginalPrice).toBeGreaterThan(0);
     expect(q.effectivePrice).toBeGreaterThan(q.marginalPrice);
@@ -141,8 +145,8 @@ describe("the quote (0.40.0)", () => {
   it("a validator's minimum leg: a pool under it plans no leg; an order no pool takes is refused below_minimum, naming the smallest amount", () => {
     const c = client();
     const h = { ...held(), validators: [{ identity: SKEIN, peerId: PEER, minLegSats: 50_000n }] };
-    expect(() => c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: true }, h, { sym: "TST", dec: 0 })).toThrow(expect.objectContaining({ kind: "below_minimum", message: expect.stringMatching(/^No pool here takes a swap this small: at least \d+ sats\.$/) }));
-    expect(c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 60_000n, maxSlippageBps: 100, allowPartial: true }, h, { sym: "TST", dec: 0 }).legs).toHaveLength(1);
+    expect(() => c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 5 }, h, { sym: "TST", dec: 0 })).toThrow(expect.objectContaining({ kind: "below_minimum", message: expect.stringMatching(/^No pool here takes a swap this small: at least \d+ sats\.$/) }));
+    expect(c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 60_000n, maxSlippageBps: 100, maxSources: 5 }, h, { sym: "TST", dec: 0 }).legs).toHaveLength(1);
   });
 });
 
@@ -177,7 +181,7 @@ describe("executeSwap (0.40.0): one swap at a time, legs one at a time", () => {
     expect(staged).toEqual([]);
     haveSats = 0;
     haveTokens = 10_000n;
-    q = c.quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, allowPartial: true }, held(), { sym: "TST", dec: 0 });
+    q = c.quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, maxSources: 5 }, held(), { sym: "TST", dec: 0 });
     outcomes.push(accepted());
     await c.executeSwap(q);
     expect(staged).toEqual([{ sats: Number(q.stage.feeSats), tokens: { tokenId: TOKEN, amount: 40_000n } }]);
@@ -285,5 +289,151 @@ describe("executeSwap (0.40.0): one swap at a time, legs one at a time", () => {
     await expect(c.executeSwap(q)).rejects.toThrow(/one at a time/);
     await one;
     expect(computeSwap(pool(A0, 1_000_000n, 5_000_000n), "bsvToToken", 20_000n)!.amountOut).toBe(q.amountOut);
+  });
+});
+
+const C0 = `${"c3".repeat(32)}_0`;
+const ID_C = `${"c3".repeat(32)}c3_0`.slice(0, 64) + "_0";
+/** The held answer with pools A, B and C. */
+const held3 = () => ({
+  ...held(true),
+  pools: [...held(true).pools, { ...pool(C0, 1_000_000n, 5_000_000n), poolId: ID_C, lpPubKey: "", swaps: 0, validatorPeerId: PEER }],
+});
+const cap = (c: ReturnType<typeof client>, amountIn: bigint, maxSources: number, h: ReturnType<typeof held3> | ReturnType<typeof held> = held(true)) =>
+  c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn, maxSlippageBps: 100, maxSources }, h, { sym: "TST", dec: 0 });
+
+describe("0.40.2: maxSources — the legs an order may fill", () => {
+  it("the quote: the fee sats staged are for EXACTLY maxSources legs — 1: one pool, one leg's; 2: two planned, two legs'; 5: two planned and three more", () => {
+    const c = client();
+    const one = cap(c, 400_000n, 1);
+    expect(one.legs).toHaveLength(1);
+    expect(one.stage.feeSats).toBe(one.legMinerFeeSats + 1n);
+    const two = cap(c, 400_000n, 2);
+    expect(two.legs).toHaveLength(2);
+    expect(two.stage.feeSats).toBe(2n * (two.legMinerFeeSats + 1n));
+    const five = cap(c, 400_000n, 5);
+    expect(five.legs).toHaveLength(2);
+    expect(five.stage.feeSats).toBe(5n * (five.legMinerFeeSats + 1n));
+  });
+
+  it("maxSources 1: exactly one leg for the whole amount — a refusal (pool_spent repriced, or any other) re-plans ONE leg for the whole amount, never part", async () => {
+    const c = client();
+    const q = cap(c, 400_000n, 1);
+    const newer = pool(A1, 1_000_200n, 4_999_000n);
+    outcomes.push({ status: "refused", id: "r1", reason: "below_minimum" }, accepted());
+    const r = await c.executeSwap(q);
+    expect(r).toMatchObject({ status: "filled", legs: [{ amountIn: 400_000n }] });
+    expect(prepared.map((p) => [p.amountIn, p.last])).toEqual([
+      [400_000n, true],
+      [400_000n, true],
+    ]);
+    expect(new Set(relayed.map((x) => x.pool)).size).toBe(2); // the refused pool excluded, the other takes it all
+    prepared.length = 0;
+    current.set(ID_A, newer);
+    outcomes.push({ status: "refused", id: "r2", reason: "pool_spent", pool: newer }, accepted());
+    const q2 = c.quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, held(), { sym: "TST", dec: 0 });
+    current.set(ID_A, pool(A0, 1_000_000n, 5_000_000n));
+    afterRelay = () => current.set(ID_A, newer);
+    const r2 = await c.executeSwap(q2);
+    expect(r2).toMatchObject({ status: "filled", legs: [{ amountIn: 20_000n }] });
+    expect(prepared.map((p) => p.amountIn)).toEqual([20_000n, 20_000n]);
+  });
+
+  it("maxSources 2: the budget goes down only by FILLED legs — two filled legs and done; a refused leg does not count; the second single leg under the floor → stop floor, the rows returned", async () => {
+    const c = client();
+    const q = cap(c, 600_000n, 2, held3());
+    outcomes.push({ status: "refused", id: "r1", reason: "below_minimum" }, accepted("a1".repeat(32)), accepted("a2".repeat(32)));
+    const r = await c.executeSwap(q);
+    expect(r.status).toBe("filled");
+    expect(r.legs).toHaveLength(2);
+    expect(prepared.at(-1)!.last).toBe(true);
+    expect(r.legs[0]!.amountIn + r.legs[1]!.amountIn).toBe(600_000n);
+    // After the first fill the other pools pay far less: the one leg left cannot meet the floor.
+    prepared.length = 0;
+    satsRows = 1;
+    afterRelay = () => {
+      for (const id of [ID_A, ID_B]) current.set(id, pool(current.get(id)!.outpoint.replace(/^c/, "e"), 3_000_000n, 1_000_000n));
+    };
+    outcomes.push(accepted("b1".repeat(32)));
+    const q2 = cap(c, 400_000n, 2);
+    const r2 = await c.executeSwap(q2);
+    expect(r2).toMatchObject({ status: "partial", stop: "floor", returned: { txid: "9b".repeat(32) } });
+    expect(r2.legs).toHaveLength(1);
+    expect(movedBack).toEqual([TOKEN]);
+  });
+});
+
+describe("0.40.2: a pool the host cannot serve yet waits for the stream", () => {
+  /** A browser EventSource the test fires. */
+  class FakeES {
+    static last: FakeES | null = null;
+    fns = new Map<string, (e: { data?: unknown }) => void>();
+    onerror: ((e: unknown) => void) | null = null;
+    onopen: ((e: unknown) => void) | null = null;
+    constructor() {
+      FakeES.last = this;
+    }
+    addEventListener(t: string, fn: (e: { data?: unknown }) => void) {
+      this.fns.set(t, fn);
+    }
+    close() {}
+    fire(answer: unknown) {
+      this.fns.get("pools")!({ data: JSON.stringify(answer, (_k, x) => (typeof x === "bigint" ? Number(x) : x)) });
+    }
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
+  it("a refusal carrying a state the host lacks: no further read or relay until a stream answer shows the pool there; then the leg goes", async () => {
+    vi.stubGlobal("EventSource", FakeES);
+    try {
+      const c = client();
+      const q = buy(c); // one pool, A
+      const newer = pool(A1, 1_000_200n, 4_999_000n);
+      outcomes.push({ status: "refused", id: "r1", reason: "pool_spent", pool: newer }, accepted());
+      const run = c.executeSwap(q);
+      for (let i = 0; i < 20; i++) await tick();
+      // Relayed once; read once for the leg, once for the newer state (which the host lacks); then nothing.
+      expect(relayed).toHaveLength(1);
+      expect(beefReads).toEqual([ID_A, ID_A]);
+      for (let i = 0; i < 10; i++) await tick();
+      expect(relayed).toHaveLength(1);
+      expect(beefReads).toHaveLength(2);
+      // The host catches up and the stream shows A at the newer outpoint: the leg goes.
+      current.set(ID_A, newer);
+      FakeES.last!.fire({ ...held(), pools: [{ ...newer, poolId: ID_A, lpPubKey: "", swaps: 1, validatorPeerId: PEER }] });
+      const r = await run;
+      expect(r.status).toBe("filled");
+      expect(relayed.map((x) => x.pool)).toEqual([A0, A1]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("with another usable pool, the leg goes there at once; cancelled while waiting: it stops", async () => {
+    vi.stubGlobal("EventSource", FakeES);
+    try {
+      const c = client();
+      const q = buy(c, 20_000n, true);
+      const first = q.legs[0]!.poolOutpoint.replace(".", "_");
+      const id = first === A0 ? ID_A : ID_B;
+      const newer = pool(A1, 1_000_200n, 4_999_000n);
+      outcomes.push({ status: "refused", id: "r1", reason: "pool_spent", pool: newer }, accepted());
+      const r = await c.executeSwap(q);
+      expect(r.status).toBe("filled");
+      expect(relayed).toHaveLength(2);
+      expect(relayed[1]!.pool).not.toBe(first);
+      expect(beefReads.filter((x) => x === id)).toHaveLength(1); // its newer state prices it below the other pool: the leg went there, no read of it again
+      // One pool, its newer state not served, and a cancel while waiting.
+      relayed.length = 0;
+      const ctl = new AbortController();
+      outcomes.push({ status: "refused", id: "r2", reason: "pool_spent", pool: newer });
+      const run = c.executeSwap(buy(c), { signal: ctl.signal });
+      for (let i = 0; i < 20; i++) await tick();
+      expect(relayed).toHaveLength(1);
+      ctl.abort();
+      expect(await run).toMatchObject({ stop: "cancelled" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
