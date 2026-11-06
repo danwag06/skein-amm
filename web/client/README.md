@@ -44,24 +44,33 @@ The client (each an async function unless noted):
   whole answer, then each `change` — `swap`, `deploy`, `close`, `rescind` — applied to it, one it
   cannot apply read again once; sync, returns the unsubscribe; 0.39.0: no host-wide stream),
   `claimStatus`, `isRoot`, `claimExchange`, `discoveryBase` (sync), `onDataChange` (sync);
-- history (0.39.0, plain GETs): `trades(tokenId, {from?, to?, limit?, before?, lp?})` →
-  `{trades, next}`, `trade(tokenId, txid)` → a `Trade` or null, `candles(tokenId, {tf, from, to})`,
-  `stats(tokenId)`, `statsAll({ids?})`, `holders(tokenId, {limit?, skip?})` → `{count, rows}`,
-  `positionsAll(lpKeys)` (every enabled token's positions); amounts bigints, prices `{sats,
-  tokens}` pairs of bigints (base units both);
+- history (plain GETs; 0.40.0: by pool id, `poolId` = the pool's deploy outpoint `<txid>_<vout>`):
+  `trades(tokenId, {from?, to?, limit?, before?, pool?})` → `{trades, next}` (each row its
+  `poolId` and `payoutPkh`), `trade(tokenId, txid)` → a `Trade` or null, `candles(tokenId, {tf,
+  from, to, series?})` (`series` `fill`, the default, or `market`), `stats(tokenId)` /
+  `statsAll({ids?})` (`price` = the midpoint of what a buy and a sell of 1% of the pooled sats
+  would pay now, `buyPrice`, `sellPrice`, `lastTradePrice`), `holders(tokenId, {limit?, skip?})` →
+  `{count, rows}`, `positionsAll(poolIds)`, `poolsAt(tokenId, t)` (every pool listed at `t`),
+  `poolHistory(tokenId, {from?, to?, pool?, limit?, after?})` → `{events, next}` (oldest first;
+  forward paging: `next` as `after`), `spendsAll(outpoints)` (the host's `/amm/spends`); amounts
+  bigints, prices `{sats, tokens}` pairs of bigints (base units both);
 - swap: `quoteSwap(request, poolsAnswer, {sym, dec})` (sync: the engine's plan over the pools the
-  token's pools stream gave), `executeSwap(quote, {onProgress})`, `checkSwapAgain(leg)`,
-  `walletSats`;
+  token's pools stream gave, each pool with its validator's `minLegSats`; the quote's price and
+  impact from the engine's `priceOf`, each leg's own `fees`, `stage` = what Swap sets aside
+  (`amount`, `feeSats`: the planned legs and two more), `legMinerFeeSats`),
+  `executeSwap(quote, {onProgress, signal})` (below), `walletSats`;
 - liquidity: `myPositions`, `validatorTerms`, `deployPosition({tokenId, tokens, sats})`,
   `closePosition({outpoint})`, `rebalancePosition({outpoint, tokens, sats})` (the old pool closed
   and a new one deployed in ONE wallet createAction);
-- your tokens: `myTokens`, `settleSwaps` (the silent pass over staged swap legs: the txids taken
-  in), `moveBackTokens(tokenId)` (what it did: txid, amount, BEEF, submit), `sendTokens`;
+- your tokens: `myTokens`, `settleSwaps` (the pass over the swap basket: a staged token output the
+  basket lacks filed from its action's description; then every row's spender, this wallet's legs
+  taken in: the txids), `swapBasketSats`, `moveBackTokens(tokenId)` (every row of the token and
+  every sats row: txid, amount, BEEF, submit), `moveBackStagedSats` (the sats alone), `sendTokens`;
 - settings (root): `deployBeef`, `enableToken`, `tokensToEnable`, `disableToken`, `defaults`,
   `setDefaultTerms`, `clearDefaultTerms`, `setDefaultMarket`, `clearDefaultMarket`, `tokenTerms`,
-  `setTokenTerms`, `discoveryState`, `setDiscovery`.
+  `setTokenTerms` (0.40.0: the terms `{lpBps, validatorBps, commissionBps, minLegSats?}`), `discoveryState`, `setDiscovery`.
 
-Pure helpers beside it: `hostedFrom`, `applyPoolChange`, `parseChange`, `poolViews`, `poolFees`, `withLeg`, `hasTerms`,
+Pure helpers beside it: `hostedFrom`, `applyPoolChange` (by `poolId`), `parseChange`, `poolViews`, `poolFees`, `poolsWithMinimums`, `pairPrice`, `legCarrySats`, `hasTerms`,
 `enableCandidates`, `topicOf`, `lookupOf`, `ammLookupOf`, `walletDeployBeef`, `exchangeBase`,
 `tokenBase`; the types (`Quote`, `SwapResult`, `LegResult`, `Position`, `WalletToken`, …).
 
@@ -69,15 +78,19 @@ Pure helpers beside it: `hostedFrom`, `applyPoolChange`, `parseChange`, `poolVie
 
 An error of one of `CLIENT_ERROR_KINDS` is a `ClientError` with `kind` and the message the pages
 show: `stale_pool`, `fee_mismatch`, `quote_mismatch`, `slippage`, `pool_spent`, `user_rejected`,
-`no_answer`, `refused`, `network`. A swap leg that did not fill carries its `kind` beside its
-`error` text. `errorKind(e)` classifies any error; other errors stay plain `Error`s.
+`no_answer`, `below_minimum` (0.40.0: under a validator's minimum leg; a quote no pool takes),
+`refused`, `network`. `errorKind(e)` classifies any error; other errors stay plain `Error`s.
 
 ## The shared names
 
 What two sites must use to file identical wallet rows: `POOLS_BASKET` (`amm-pools`, the LP's
 position rows), `SWAP_BASKET` (`amm-swap`, what swap legs spend), `SWAP_PROTOCOL` (`[2, "amm
-swap"]`), `SWAP_KEY_PREFIX` + `swapKeyID` (the staged rows' keyIDs), `swapInstructions` /
-`swapSatsInstructions` (their customInstructions), `LP_KEY_PROTOCOL` (BRC-29) + `LP_KEY_MARK` +
+swap"]`), `SWAP_KEY_PREFIX` + `newSwapKeyID` (a staged row's random keyID), `changeKeyID` (a leg's
+change row: `amm-swap-<txid>.<vout>:change` of its first input of that kind), `SWAP_STAGE_LABEL`
+(`amm-swap-stage`) + `SWAP_KEY_MARK` + `swapKeyDescription` / `swapKeyIdOfDescription` (a staged
+token output's description naming its key), `legDerivation` (an order's payout, own commission and
+last-leg change keys), `swapInstructions` / `swapSatsInstructions` (their customInstructions, a
+change row's with `order`), `LP_KEY_PROTOCOL` (BRC-29) + `LP_KEY_MARK` +
 `lpKeyDescription` / `lpKeyIdOfDescription` (the deploy's pool output description naming the LP
 keyID), `POOL_TAG` / `POOL_OP` / `isPoolRow` / `poolCustomInstructions` (an `amm-pools` row),
 `POOL_DEPLOY_LABEL` (`amm-pool-deploy`), `SWAP_TTL_MS` (15 s), `transferPlanLabels` (the `p color
@@ -97,14 +110,29 @@ const stop = client.watchTokenPools(tokenId, async (pools) => {
   stop();
   const quote = client.quoteSwap({ tokenId, side: "buy", amountIn: 50_000n, maxSlippageBps: 50, allowPartial: false }, pools, { sym: "TOK", dec: 0 });
   try {
-    const result = await client.executeSwap(quote, { onProgress: (p) => console.log(p.phase) });
-    console.log(result.status, result.legs);
+    const cancel = new AbortController();
+    const result = await client.executeSwap(quote, { signal: cancel.signal, onProgress: (p) => console.log(p.phase) });
+    console.log(result.status, result.stop, result.legs, result.returned);
   } catch (e) {
-    if (e instanceof ClientError && e.kind === "pool_spent") console.log("quote again");
+    if (e instanceof ClientError) console.log(e.kind, e.message);
     else throw e;
   }
 });
 ```
+
+`executeSwap` (0.40.0): ONE swap at a time. First the pass over the swap basket, then ONE wallet
+action stages what `amm-swap` lacks of `quote.stage` (sats only: a plain createAction; a sell's
+tokens: the module transfer). Then legs one at a time: the engine's `nextLeg` over the pools held
+now (`minOut` = the quote's floor less what has filled), the pool's current output by its id
+(`/pools/beef?pool=`), the staged rows that cover the leg (largest first), built, signed, relayed;
+accepted → taken in (payout, own commission, change) before the next leg; refused `pool_spent` →
+the pool's row replaced; refused otherwise → that pool output excluded; no answer → the overlay
+(a staged input spent: the leg landed), else sent once more, else raced on another pool. It stops
+`filled | cancelled | floor | min | no_pool | fees`. Filled: the last leg's change went to the
+wallet. Stopped early with rows left: `moveBack` runs itself (`result.returned`). Progress phases:
+`staging`, `relaying` / `repricing` (the leg's pool, amounts and the legs filled so far),
+`returning`, `done` / `failed`. The result: `{status, stop, legs: [{poolOutpoint, poolId,
+amountIn, amountOut, txid}], totalIn, totalOut, unfilled, returned?}`.
 
 ## Build
 

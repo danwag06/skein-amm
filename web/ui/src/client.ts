@@ -15,22 +15,22 @@
  *   (`hostedTokens`): each token's price, liquidity (TVL) and pool count; no host-wide stream.
  * - **History** (0.39.0, D1–D6): `trades`, `trade`, `candles`, `stats`, `statsAll`, `holders`,
  *   `positionsAll` — plain GETs of the history routes (H1–H6, src/lib/overlay.ts).
- * - **Swap** (D11–D16): the token's pools route `GET /@<token>/amm/pools` held as an event stream
- *   (`watchTokenPools`; 0.39.0, D7: the whole answer once, then one `change` per pool change,
- *   applied to the held answer): the pools whose validator is beating and whose commission meets the
- *   market's minimum (the host's filter), the market's commission key hash; a quote is the
- *   matching engine's plan over that list (no request); a swap reads ONE `GET
- *   /@<token>/amm/pools/beef?lp=` for its legs (freshness, the pools' BEEF), then each leg's relay
- *   request (`amm.swap.submit`, held by the host until the relay rests; 15 s expiry); a lost answer
- *   is "no answer yet" with "Check again" (`GET /@<token>/amm/swaps?id=`, once).
- * - **Liquidity** (D9, D23): the wallet's pool rows and deploy history, then ONE `GET
- *   /@<token>/amm/positions?lp=` per token; a deploy the history has but the basket lacks is
- *   filed then; Close and Rebalance read their pool's BEEF by LP key (`/pools/beef?lp=`); the
- *   deploy's terms `GET /@<token>/amm/terms`.
+ * - **Swap** (D11–D16; 0.40.0): the token's pools route `GET /@<token>/amm/pools` held as an event
+ *   stream (`watchTokenPools`: the whole answer once, then one `change` per pool change, by pool
+ *   id): the pools whose validator is beating and whose commission meets the market's minimum (the
+ *   host's filter), each validator's minimum leg, the market's commission key hash; a quote is the
+ *   matching engine's plan over that list (no request); a swap (`executeSwap`) stages what the
+ *   swap basket lacks by ONE wallet action, then per leg ONE `GET /@<token>/amm/pools/beef?pool=`
+ *   and the leg's relay request (`amm.swap.submit`, held by the host until the relay rests; 15 s
+ *   expiry); no answer → the host's `GET /amm/spends`, once more, a race.
+ * - **Liquidity** (D9, D23; 0.40.0: by pool id): the wallet's pool rows and deploy history, then
+ *   ONE `GET /@<token>/amm/positions?pool=` per token; a deploy the history has but the basket
+ *   lacks is filed then; Close and Rebalance read their pool's BEEF by its id (`/pools/beef?pool=`);
+ *   the deploy's terms `GET /@<token>/amm/terms`.
  * - **Your tokens** (D17, D18, D19, D24): the wallet's module and the swap basket; the token list
- *   once and ONE discovery `GET /@discovery/1color/tokens?ids=` for held tokens the list lacks; a
- *   silent pass over the swap basket's staged legs (src/wallet/swapPayouts.ts); Move back submits
- *   at the host root.
+ *   once and ONE discovery `GET /@discovery/1color/tokens?ids=` for held tokens the list lacks; the
+ *   pass over the swap basket (0.40.0: ONE `GET /amm/spends` over every row,
+ *   src/wallet/swapPayouts.ts); Move back submits at the host root.
  * - **Settings** (D20, D21): the claim card (`claimStatus`: swap's identity, the recipient of
  *   root's messages), the token list once, discovery's list and ONE `?ids=` read; Enable's deploy
  *   BEEF from the wallet's basket else `GET /@discovery/1color/<token>/deploy`.

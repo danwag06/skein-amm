@@ -4,6 +4,41 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.40.0 (2026-11-05)
+
+Token change, the pool id, the pool history, one price, the validator's minimum, and the swap with
+no balance (agent-env plans/swap-balance-build-2026-11-05.md; David Case, 2026-11-05 night). Pools
+of the old script are not carried: close them on 0.39.0's pages first.
+
+- Contract: `Swap(…, commissionPkh, tokenChangePkh, tokenChange)` — one more 1-sat token output of
+  `tokenChange` to `tokenChangePkh` after the commission when nonzero, then Rúnar's sats change.
+  Validator, relay and call layout follow; `go run ./gen/vectors` (a `swap_token_change` vector).
+- Terms: `minLegSats` (absent or 0: none); the validator refuses a leg whose sats side is under it
+  (`below_minimum`); `/terms` carries it.
+- The pool lookup: `poolId` (the deploy outpoint, copied along its swaps), `swaps`; the history
+  (deploy, swap, close, rescind at the admitting step's time) and the closes in time order;
+  `{tokenId, poolIds}` replaces `{lpPubKeys}`; `/pools/beef`, `/positions`, `/trades` take
+  `?pool=` (no `?lp=`); `/pools/at?t=`, `/pools/history`; trade rows carry `poolId`, `payoutPkh`;
+  `/stats` answers `lastTradePrice`. On skein-sdk 0.13.0 (`floor`, `Map.range`), skein-overlay
+  0.20.3, skein-1color 0.15.2.
+- `@dcasegr/amm-engine` 0.40.0: the slippage bound from the plan's own total; `minLegSats` in the
+  planner (`unfillable: "min"`); `nextLeg`; `priceOf` (`PRICE_SHARE_BPS` 100).
+- `@dcasegr/amm-client` 0.40.0 and the pages: the reads by pool id and the new readers (`poolsAt`,
+  `poolHistory`, `candles` `series`, `spendsAll`, the stats prices); `applyPoolChange` by `poolId`.
+  The swap: ONE wallet action stages what `amm-swap` lacks (the swap amount exact, the fee sats for
+  the planned legs and two more; sats only a plain createAction; tokens the module transfer, the
+  token key's id in its output description, labelled `amm-swap-stage`); legs ONE AT A TIME over
+  `nextLeg`, each spending sats rows and token rows largest first, its token and sats change kept
+  in `amm-swap` (`amm-swap-<first input>:change`, with the order), the last leg's change to the
+  wallet; one payout derivation per order, the token receipt for self; a refused leg re-routed; no
+  answer → the overlay, once more, a race; the leftovers moved back by itself when it stops early
+  (`filled | cancelled | floor | min | no_pool | fees`). The overlay pass over every `amm-swap`
+  row on load, before a swap and after a refused leg. The quote's price and impact from
+  `priceOf`; the Swap page shows what it stages, the miner fee per leg, the legs as they fill,
+  Cancel, and why it stopped; the landing's price is the stats' `price`; Your tokens shows the
+  swap basket's sats once; Settings' terms gain "Minimum leg (sats)". "Check again" and 0.31.1's
+  single repriced retry are gone (the loop does both).
+
 ## 0.39.0 (2026-11-05)
 
 The pages and the client on open-exchange 0.13.0's reads (agent-env plans/history-api-2026-11-05.md D7):

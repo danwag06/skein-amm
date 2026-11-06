@@ -1,5 +1,16 @@
 # @amm-poc/market-ui
 
+**skein-amm 0.40.0: the swap with no balance** (agent-env plans/swap-balance-build-2026-11-05.md;
+CHANGELOG 0.40.0). Swap stages what the swap basket lacks by ONE wallet action
+(`src/market/activeSwap.ts` `stage`), then runs legs one at a time (`src/client.ts` `executeSwap`:
+the engine's `nextLeg`, the pool's current output by its id, the change kept in `amm-swap` between
+legs and the last leg's to the wallet, `src/market/swapAction.ts`), and moves the leftovers back
+itself when it stops early. The overlay pass (`src/wallet/swapPayouts.ts` `resolveFromOverlay`)
+takes in a leg a lost page left. Every read by LP key is by pool id (`?pool=`). New page texts:
+the quote's "Swap first sets aside …" line, the running swap's legs and Cancel, the stop reasons
+(`src/ox/Swap.tsx` `stopText`), the per-leg fee line, the landing's footnote, Your tokens' "<N> sats
+in the swap basket" line with its Move back, Settings' "Minimum leg (sats)".
+
 **skein-amm 0.38.0: the client as packages** (agent-env plans/history-api-2026-11-05.md D8–D14;
 "The packages" below). `src/` minus the pages (`src/ox/`, `App.tsx`, `main.tsx`,
 `src/data/exchange.ts`, `components/`, `wallet/AppWalletProvider.tsx`, fonts, styles) is the
