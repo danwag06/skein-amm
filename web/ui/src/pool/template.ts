@@ -162,6 +162,13 @@ export interface SwapParams extends CallCommon {
    * only when the commission (ceil(amountIn·CommissionBps/10000)) is nonzero.
    */
   commissionPkh: string;
+  /**
+   * 0.40.0: the taker's token change (Swap's `tokenChange`, ≥ 0): one more 1Color output of this
+   * many tokens to `tokenChangePkh` (1 sat) after the commission, only when nonzero. Default 0.
+   */
+  tokenChange?: bigint;
+  /** Hash160 (hex) of the token change's key (Swap's `tokenChangePkh`): always pushed. Default 20 zero bytes. */
+  tokenChangePkh?: string;
   /** What the caller priced the leg against; any mismatch is refused (see PoolBuildError). */
   expect?: SwapExpectation;
 }
@@ -265,6 +272,7 @@ const fromHex = (h: string) => Utils.toArray(h, "hex") as number[];
 const scriptHex = (s: string | LockingScript) => (typeof s === "string" ? s.toLowerCase() : s.toHex());
 
 const p2pkhHex = (pkh: string) => `76a914${pkh}88ac`;
+const ZERO_PKH = "00".repeat(20);
 const pkhOf = (pubKeyHex: string) => toHex(Hash.hash160(fromHex(pubKeyHex)) as number[]);
 
 function tokenPrefixHex(assetId: string, amount: bigint): string {
@@ -458,14 +466,14 @@ export class PoolTemplate {
   /**
    * Swap (method 0). Outputs: 0 pool, 1 the taker's payout, then the LP fee,
    * the validator fee and the commission (each only when nonzero, each in
-   * the input asset), then change. Token payouts and token fees are 1-sat
+   * the input asset), then (0.40.0) the token change when nonzero, then change. Token payouts and token fees are 1-sat
    * 1Color outputs; BSV ones are P2PKH. The validator's slot is left empty.
    */
   static async swap(p: SwapParams): Promise<PoolCall> {
     const plan = PoolTemplate.planSwap(p);
-    // Tokens in: the token inputs must carry exactly amountIn (no token change
-    // output exists). BSV in: no token of this asset may be spent (it would burn).
-    checkTokenInputs(p.inputs, plan.pool.args.assetId, p.bsvIn ? 0n : p.amountIn);
+    // Tokens in: the token inputs must carry exactly amountIn plus the token change (0.40.0). BSV
+    // in: no token of this asset may be spent beyond the token change (it would burn).
+    checkTokenInputs(p.inputs, plan.pool.args.assetId, (p.bsvIn ? 0n : p.amountIn) + (p.tokenChange ?? 0n));
     const call = await buildCall({
       common: p,
       pool: plan.pool,
@@ -482,7 +490,8 @@ export class PoolTemplate {
 
   /**
    * The Swap call without its funding: the outputs the contract requires (in
-   * order: pool, payout, LP fee, validator fee, commission; no change) and
+   * order: pool, payout, LP fee, validator fee, commission, 0.40.0 the token change; no sats
+   * change) and
    * the method arguments, with the validator's slot empty. For a builder that
    * does not pick the funding itself (a BRC-100 wallet's `createAction` picks
    * inputs and change): hand these outputs over, then fill input 0 with
@@ -512,6 +521,10 @@ export class PoolTemplate {
 
     if (!isHex(p.commissionPkh, 20)) throw new PoolBuildError("invalid", "commissionPkh must be 20 bytes of hex");
     if (!isHex(p.userPkh, 20)) throw new PoolBuildError("invalid", "userPkh must be 20 bytes of hex");
+    const tokenChange = p.tokenChange ?? 0n;
+    const tokenChangePkh = p.tokenChangePkh ?? ZERO_PKH;
+    if (tokenChange < 0n) throw new PoolBuildError("invalid", "tokenChange must be ≥ 0");
+    if (!isHex(tokenChangePkh, 20)) throw new PoolBuildError("invalid", "tokenChangePkh must be 20 bytes of hex");
 
     // Pool.runar.go Swap, line for line.
     const amountIn = p.amountIn;
@@ -563,13 +576,14 @@ export class PoolTemplate {
     if (lpFee > 0n) outputs.push(payout(lpFee, lpPkh, p.bsvIn));
     if (validatorFee > 0n) outputs.push(payout(validatorFee, validatorPkh, p.bsvIn));
     if (commission > 0n) outputs.push(payout(commission, p.commissionPkh, p.bsvIn));
+    if (tokenChange > 0n) outputs.push({ satoshis: 1n, script: tokenP2pkhHex(args.assetId, tokenChange, tokenChangePkh) });
 
     return {
       pool,
       poolUtxo: p.pool,
       method: "swap",
       outputs,
-      args: [EMPTY_SIG, nextValidatorPubKey, amountIn, p.bsvIn, p.userPkh, p.commissionPkh],
+      args: [EMPTY_SIG, nextValidatorPubKey, amountIn, p.bsvIn, p.userPkh, p.commissionPkh, tokenChangePkh, tokenChange],
       sigSlots: { validator: 0 },
       next: { pool: { ...pool, state: nextState, contractScript: pool.code + "6a" + stateHex(pool.version, nextState) }, satoshis: Number(newBsv), script: continuation },
       swap: { amountOut: out, lpFee, validatorFee, commission },

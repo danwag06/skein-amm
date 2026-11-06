@@ -154,6 +154,7 @@ describe("rebuilding the fixtures", () => {
       bsvIn: true,
       userPkh: pkh(taker),
       commissionPkh: v.commissionPkh,
+      tokenChangePkh: pkh(taker), // 0.40.0: gen/vectors pushes the taker's key hash with no token change
       changePkh: pkh(taker),
       fee: { sats: 499 }, // gen/main.go: change = funding - amountIn - 500, but the 1-sat token payout also comes out of the funding
     });
@@ -182,12 +183,37 @@ describe("rebuilding the fixtures", () => {
       bsvIn: false,
       userPkh: pkh(taker),
       commissionPkh: v.commissionPkh,
+      tokenChangePkh: pkh(taker), // 0.40.0: gen/vectors pushes the taker's key hash with no token change
       changePkh: pkh(taker),
       fee: { sats: 500 },
     });
     expect(call.next!.pool.state.validatorPubKey).toBe(v.pool2.validator);
     await PoolTemplate.signPoolInput(call, "validator", validatorKey(poolDeploy.id("hex"), 0));
     expect(call.tx.toHex()).toBe(v.swap_tokens_in);
+  });
+
+  it("0.40.0 swap_token_change: byte for byte — 50,000 tokens in, 40,000 the amount in, 10,000 back to the taker as output 5 (1 sat) before the sats change", async () => {
+    const call = await PoolTemplate.swap({
+      pool: poolUtxo(swap1),
+      inputs: [input(poolDeploy, 1, taker), input(fund, 2, taker)],
+      amountIn: BigInt(v.swapTokenChangeAmountIn),
+      bsvIn: false,
+      userPkh: pkh(taker),
+      commissionPkh: v.commissionPkh,
+      tokenChange: BigInt(v.swapTokenChangeTokens),
+      tokenChangePkh: pkh(taker),
+      changePkh: pkh(taker),
+      fee: { sats: 500 },
+    });
+    expect(call.tx.outputs).toHaveLength(7);
+    expect(call.tx.outputs[5]!.satoshis).toBe(1);
+    await PoolTemplate.signPoolInput(call, "validator", validatorKey(poolDeploy.id("hex"), 0));
+    expect(call.tx.toHex()).toBe(v.swap_token_change);
+    expect(verifyInput(call.tx, 0)).toBe(true);
+    // The token inputs must carry exactly the amount in plus the token change.
+    await expect(
+      PoolTemplate.swap({ pool: poolUtxo(swap1), inputs: [input(poolDeploy, 1, taker), input(fund, 2, taker)], amountIn: BigInt(v.swapTokenChangeAmountIn), bsvIn: false, userPkh: pkh(taker), commissionPkh: v.commissionPkh, tokenChange: 1n, tokenChangePkh: pkh(taker), changePkh: pkh(taker), fee: { sats: 500 } }),
+    ).rejects.toThrow(/token_mismatch/);
   });
 
   it("close (0.13.0): byte for byte, LP-signed, the outputs the LP's (the sats less the fee to one key, the tokens to another), no other input, no change parameters", async () => {
@@ -221,6 +247,7 @@ describe("rebuilding the fixtures", () => {
       bsvIn: true,
       userPkh: pkh(taker),
       commissionPkh: v.commissionPkh,
+      tokenChangePkh: pkh(taker), // 0.40.0: gen/vectors pushes the taker's key hash with no token change
       changePkh: pkh(taker),
       fee: { satsPerKb: 100 },
     });
@@ -242,6 +269,7 @@ describe("rebuilding the fixtures", () => {
       bsvIn: true,
       userPkh: pkh(taker),
       commissionPkh: v.commissionPkh,
+      tokenChangePkh: pkh(taker), // 0.40.0: gen/vectors pushes the taker's key hash with no token change
       changePkh: pkh(taker),
       fee: { sats: 499 },
     });
@@ -257,6 +285,7 @@ describe("rebuilding the fixtures", () => {
       bsvIn: true,
       userPkh: pkh(taker),
       commissionPkh: v.commissionPkh,
+      tokenChangePkh: pkh(taker), // 0.40.0: gen/vectors pushes the taker's key hash with no token change
       changePkh: pkh(taker),
       fee: { sats: 500 },
     });
@@ -318,7 +347,8 @@ describe("PoolTemplate.planSwap: the commission output", () => {
     expect(plan.outputs[4]).toEqual({ satoshis: 20n, script: `76a914${relay}88ac` });
     expect(plan.outputs.map((o) => [o.satoshis, o.script])).toEqual(swap1.outputs.slice(0, 5).map((o) => [BigInt(o.satoshis!), o.lockingScript.toHex()]));
     expect(plan.args[5]).toBe(relay);
-    expect(plan.args).toHaveLength(6);
+    expect(plan.args).toHaveLength(8); // 0.40.0: + tokenChangePkh, tokenChange
+    expect(plan.args.slice(6)).toEqual(["00".repeat(20), 0n]);
     expect(plan.next.pool.args.commissionBps).toBe(10n);
   });
 
