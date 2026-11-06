@@ -2006,8 +2006,9 @@ test "relay (0.40.1): a swap spending outputs of two unrelated transactions, bot
     const pd_raw = unhex(a, vec.pool_deploy);
     const blk = try twoLeafBump(a, w.beef.txidOf(fund_raw), w.beef.txidOf(pd_raw));
     const bumps = try a.dupe(w.merkle.MerklePath, &.{blk.path});
-    // What the page sends (0.40.1): ONE V2 BEEF of every staged input's source and its ancestry, the funding last.
-    const fbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = bumps, .entries = try a.dupe(w.beef.Entry, &.{
+    // What the page sends (0.40.1, web/ui swapAction.ts `fundingBeef`): ONE BEEF of every staged input's
+    // source and its ancestry, in an Atomic envelope whose subject is the funding transaction.
+    const fbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .atomic = w.beef.txidOf(p.funding), .bumps = bumps, .entries = try a.dupe(w.beef.Entry, &.{
         .{ .txid = w.beef.txidOf(fund_raw), .format = .raw_with_bump, .bump = 0, .raw = fund_raw },
         .{ .txid = w.beef.txidOf(p.other), .format = .raw, .raw = p.other },
         .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },

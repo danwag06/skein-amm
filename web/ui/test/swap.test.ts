@@ -368,6 +368,13 @@ async function tokensIn(w = fakeWallet({ fundingVout: 2 }), commissionPkh: strin
   return { ...w, ...r, pool, leg, vkey: validatorKey(poolDeploy.id("hex"), 0) };
 }
 
+/** The swap basket's BEEF the leg was built from: its inputs' source transactions. */
+async function swapHoldingBeefOf(p: PreparedSwap): Promise<Beef> {
+  const b = new Beef();
+  for (const inp of p.swap.inputs.slice(1)) b.mergeTransaction(inp.sourceTransaction!);
+  return b;
+}
+
 /** What the validator does: fills its slot (over the raw swap it received). */
 async function validatorSigns(p: PreparedSwap, raw: number[], vkey: PrivateKey): Promise<Transaction> {
   const tx = Transaction.fromBinary(raw);
@@ -465,6 +472,23 @@ describe("the leg's sats (0.40.0: the staged rows that cover it, largest first; 
     // The order's key input and the change key: the first sats input (the largest).
     expect(prepared.order).toBe(big.outpoint);
     expect((prepared.satsChange as { customInstructions: string }).customInstructions).toContain(`amm-swap-${big.outpoint}:change`);
+  });
+
+  it("0.40.1: a leg with a sats row and a token row from different transactions sends ONE funding BEEF holding both sources — an Atomic envelope whose subject is the sats row's transaction around a V2 BEEF of them all", async () => {
+    const { prepared, satsInput } = await tokensIn();
+    const f = prepared.funding.atomicBeef;
+    const tokenTx = poolDeploy.id("hex"); // the token row is pool_deploy:1
+    expect(satsInput.txid).not.toBe(tokenTx);
+    expect(f.slice(0, 4)).toEqual([1, 1, 1, 1]);
+    expect(Utils.toHex(f.slice(4, 36).reverse())).toBe(satsInput.txid);
+    const body = Beef.fromBinary(f.slice(36));
+    expect(body.findTxid(satsInput.txid)).toBeTruthy();
+    expect(body.findTxid(tokenTx)).toBeTruthy();
+    expect(Beef.fromBinary(f).atomicTxid).toBe(satsInput.txid);
+    expect(prepared.funding.txid).toBe(satsInput.txid);
+    // The sdk's own Atomic writer would have dropped the token row's source.
+    const wallet = await swapHoldingBeefOf(prepared);
+    expect(Beef.fromBinary(wallet.toBinaryAtomic(satsInput.txid)).findTxid(tokenTx)).toBeUndefined();
   });
 
   it("a pool that moved since the plan is refused before the wallet is asked", async () => {

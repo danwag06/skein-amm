@@ -21,7 +21,8 @@
  *      all that remains) → the WALLET: sats to a BRC-29 key of the user's, tokens to a module
  *      receiving key for self, both `legDerivation(order, "change")`.
  *   4. The relay (src/market/relay.ts) carries it to the validator with the first sats input's
- *      transaction as the swap's funding transaction (its AtomicBEEF, from the wallet).
+ *      transaction as the swap's funding transaction: ONE BEEF of every staged input's source,
+ *      its subject that transaction (0.40.1, `fundingBeef`).
  *   5. Accepted: `completeSwap` takes in, in ONE `internalizeAction`, the payout, the commission
  *      when it is the taker's own, and the change. No relinquishOutput: taking the swap in marks the
  *      `amm-swap` rows it spends spent.
@@ -460,7 +461,7 @@ export interface PreparedSwap {
   /** Whether this leg's change went to the wallet. */
   last: boolean;
   funding: {
-    /** The first sats input's transaction as the wallet's AtomicBEEF: the swap's funding transaction, what the relay is sent. */
+    /** What the relay is sent as `funding` (0.40.1, `fundingBeef`): every staged input's source with its ancestry, the subject the first sats input's transaction. */
     atomicBeef: number[];
     txid: string;
     fee: number;
@@ -497,6 +498,24 @@ export function keyInputOf(inputs: Pick<LegInputs, "sats" | "tokens">, bsvIn: bo
   const k = bsvIn ? inputs.sats[0] : inputs.tokens[0];
   if (!k) throw new LegShapeError("the leg has no staged input to key its payout by");
   return k.outpoint;
+}
+
+/** BRC-95's Atomic BEEF prefix (the sdk's `ATOMIC_BEEF`), little-endian. */
+const ATOMIC_BEEF_PREFIX = [0x01, 0x01, 0x01, 0x01];
+
+/**
+ * The relay's `funding` (0.40.1): ONE BEEF holding the source transaction of every staged input
+ * the leg spends (sats and token rows alike, each with its ancestry as the wallet gives it), its
+ * subject the funding transaction (the first sats input's). The form: an Atomic BEEF envelope
+ * (the prefix and the subject's txid, as the sdk writes one) around the sdk's V2 BEEF of them all
+ * — the relay's `given()` reads the envelope's subject and keeps every transaction in it; the
+ * sdk's own `toBinaryAtomic` would drop the sources the subject does not descend from. The
+ * relay's request BEEF to the validator is its own V2 (relay.zig `requestBeef`).
+ */
+export function fundingBeef(beef: Beef, fundingTxid: string, sources: string[]): number[] {
+  const all = new Beef();
+  for (const txid of new Set([fundingTxid, ...sources])) all.mergeBeef(beef.toBinaryAtomic(txid));
+  return [...ATOMIC_BEEF_PREFIX, ...Utils.toArray(fundingTxid, "hex").reverse(), ...all.toBinary()];
 }
 
 /** Builds and signs the leg (see the module comment). Throws `PoolBuildError` / `LegShapeError`; the wallet is left as it was. */
@@ -616,7 +635,7 @@ export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
     plan,
     order,
     last: i.last,
-    funding: { atomicBeef: beef.toBinaryAtomic(funding.txid), txid: funding.txid, fee: satsChange ? need.feeWithChange : need.fee, need: need.need },
+    funding: { atomicBeef: fundingBeef(beef, funding.txid, [...inputs.sats, ...inputs.tokens].map((r) => r.txid)), txid: funding.txid, fee: satsChange ? need.feeWithChange : need.fee, need: need.need },
     swap,
     satsInputs: inputs.sats,
     tokenInputs: inputs.tokens,
