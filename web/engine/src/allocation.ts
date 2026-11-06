@@ -21,7 +21,7 @@
  * for BSV (<= ~2.1e15 sats) and realistic token amounts fit in a double's
  * 53-bit mantissa with no meaningful loss for this purpose.
  */
-import { acceptedSwap } from "./pricing.js";
+import { acceptedSwap, computeSwap } from "./pricing.js";
 import type { Direction, FixedCost, Leg, PoolState } from "./types.js";
 
 interface PoolMath {
@@ -161,8 +161,10 @@ function roundAllocation(pms: PoolMath[], floatShares: number[], target: bigint)
  * integer, contract-valid legs.
  *
  * No returned leg's sats side is under its pool's `minLegSats`: such a share
- * is folded into the largest other leg, and a leg still under it after the
- * folding is dropped.
+ * is folded into the largest other leg; when a chosen pool's share is still
+ * under its minimum after the folding, every such pool of that round is set
+ * aside and the split is planned again over the remaining pools, until every
+ * leg meets its pool's minimum or no pool is left.
  *
  * Returns legs sorted by outpoint for a deterministic, stable plan shape.
  */
@@ -172,7 +174,27 @@ export function planSplit(
   amountIn: bigint,
   fixedCost: FixedCost,
 ): Leg[] {
-  if (pools.length === 0 || amountIn <= 0n) return [];
+  let candidates = pools;
+  for (;;) {
+    const { legs, underMin } = splitOnce(candidates, direction, amountIn, fixedCost);
+    if (underMin.size === 0) return legs;
+    candidates = candidates.filter((p) => !underMin.has(p.outpoint));
+  }
+}
+
+/**
+ * One round of planSplit over `pools`: the legs, and the outpoints of the
+ * chosen pools left without a leg by their minimum (a share still under it
+ * after the folding, contract-valid without it), which planSplit sets aside.
+ */
+function splitOnce(
+  pools: PoolState[],
+  direction: Direction,
+  amountIn: bigint,
+  fixedCost: FixedCost,
+): { legs: Leg[]; underMin: Set<string> } {
+  const underMin = new Set<string>();
+  if (pools.length === 0 || amountIn <= 0n) return { legs: [], underMin };
 
   const sorted = pools
     .map((p) => toPoolMath(p, direction))
@@ -238,7 +260,12 @@ export function planSplit(
     if (amt <= 0n) continue;
     const pm = active[i]!;
     const result = acceptedSwap(pm.pool, direction, amt);
-    if (result === null) continue; // still refused even after folding; drop it
+    if (result === null) {
+      // still refused even after folding: drop it; set its pool aside when
+      // only its minimum refuses it
+      if (computeSwap(pm.pool, direction, amt) !== null) underMin.add(pm.pool.outpoint);
+      continue;
+    }
     legs.push({
       outpoint: pm.pool.outpoint,
       amountIn: amt,
@@ -252,7 +279,7 @@ export function planSplit(
   }
 
   legs.sort((a, b) => (a.outpoint < b.outpoint ? -1 : a.outpoint > b.outpoint ? 1 : 0));
-  return legs;
+  return { legs, underMin };
 }
 
 /**

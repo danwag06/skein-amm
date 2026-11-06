@@ -101,6 +101,81 @@ describe("item 2: minimum leg size", () => {
   });
 });
 
+describe("follow-up: the minimums choose the pools", () => {
+  // A and B: best price (lowest fees), minimum 10,000 sats; C: slightly worse, no minimum.
+  const A = makePool({ outpoint: "a:0", liquidityFeeBps: 10n, validationFeeBps: 0n, minLegSats: 10_000n });
+  const B = makePool({ outpoint: "b:0", liquidityFeeBps: 10n, validationFeeBps: 0n, minLegSats: 10_000n });
+  const C = makePool({ outpoint: "c:0", liquidityFeeBps: 30n, validationFeeBps: 5n });
+
+  it("a buy of 5,000 sats under A's and B's minimum: one leg in C", () => {
+    const p = plan(req({ direction: "bsvToToken", amountIn: 5_000n, inventory: [A, B, C] }));
+    expect(p.legs).toHaveLength(1);
+    expect(p.legs[0]!.outpoint).toBe("c:0");
+    expect(p.legs[0]!.amountIn).toBe(5_000n);
+    expect(p.unfillable).toBeUndefined();
+    expect(p.filledCompletely).toBe(true);
+  });
+
+  it("the mirror sell: a payout under A's and B's minimum goes to C", () => {
+    const p = plan(req({ direction: "tokenToBsv", amountIn: 5_000n, inventory: [A, B, C] }));
+    expect(p.legs).toHaveLength(1);
+    expect(p.legs[0]!.outpoint).toBe("c:0");
+    expect(p.legs[0]!.amountOut).toBeLessThan(10_000n);
+    expect(p.unfillable).toBeUndefined();
+  });
+
+  it("nextLeg inherits it: the leg in C, no min stop", () => {
+    const r = nextLeg({ pools: [A, B, C], direction: "bsvToToken", remaining: 5_000n, fixedCost: noCost, minOut: 0n });
+    if (!("leg" in r)) throw new Error("expected a leg");
+    expect(r.leg.outpoint).toBe("c:0");
+    expect(r.leg.amountIn).toBe(5_000n);
+  });
+
+  it("a split spanning A and C with A's share under its minimum: all to C", () => {
+    const a = makePool({ outpoint: "a:0", liquidityFeeBps: 10n, validationFeeBps: 0n, minLegSats: 600_000n });
+    const c = makePool({ outpoint: "c:0", liquidityFeeBps: 30n, validationFeeBps: 5n });
+    const free = planSplit([{ ...a, minLegSats: undefined }, c], "bsvToToken", 1_000_000n, noCost);
+    expect(free.map((l) => l.outpoint)).toEqual(["a:0", "c:0"]);
+    expect(free.find((l) => l.outpoint === "a:0")!.amountIn).toBeLessThan(600_000n);
+    const legs = planSplit([a, c], "bsvToToken", 1_000_000n, noCost);
+    expect(legs.map((l) => l.outpoint)).toEqual(["c:0"]);
+    expect(legs[0]!.amountIn).toBe(1_000_000n);
+  });
+
+  it("a split spanning A, C, D with A's share under its minimum: split among the rest", () => {
+    const a = makePool({ outpoint: "a:0", liquidityFeeBps: 10n, validationFeeBps: 0n, minLegSats: 600_000n });
+    const c = makePool({ outpoint: "c:0", liquidityFeeBps: 30n, validationFeeBps: 5n });
+    const d = makePool({ outpoint: "d:0", liquidityFeeBps: 30n, validationFeeBps: 5n });
+    const legs = planSplit([a, c, d], "bsvToToken", 1_000_000n, noCost);
+    expect(legs.map((l) => l.outpoint)).toEqual(["c:0", "d:0"]);
+    expect(legs.reduce((s, l) => s + l.amountIn, 0n)).toBe(1_000_000n);
+  });
+
+  it("two pools with minimums, each over the order alone, one pool alone could take it: legs come back", () => {
+    // Folding a's share into b and back cannot place it under either minimum on a split,
+    // but b alone (minimum 4,000) takes the 5,000 order.
+    const a = makePool({ outpoint: "a:0", liquidityFeeBps: 10n, validationFeeBps: 0n, minLegSats: 10_000n });
+    const b = makePool({ outpoint: "b:0", minLegSats: 4_000n });
+    const p = plan(req({ direction: "bsvToToken", amountIn: 5_000n, inventory: [a, b] }));
+    expect(p.legs.map((l) => l.outpoint)).toEqual(["b:0"]);
+    expect(p.unfillable).toBeUndefined();
+  });
+
+  it("unfillable min only when every pool is set aside", () => {
+    const p = plan(req({ direction: "bsvToToken", amountIn: 5_000n, inventory: [A, B] }));
+    expect(p.legs).toHaveLength(0);
+    expect(p.unfillable).toBe("min");
+    expect(p.minAmountIn).toBe(10_000n);
+    expect(nextLeg({ pools: [A, B], direction: "bsvToToken", remaining: 5_000n, fixedCost: noCost, minOut: 0n })).toEqual({ stop: "min" });
+  });
+
+  it("deterministic over pool order", () => {
+    const r1 = planSplit([A, B, C], "tokenToBsv", 5_000n, noCost);
+    const r2 = planSplit([C, B, A], "tokenToBsv", 5_000n, noCost);
+    expect(r1).toEqual(r2);
+  });
+});
+
 describe("item 3: nextLeg", () => {
   const base = { direction: "bsvToToken" as const, fixedCost: noCost, minOut: 0n };
 

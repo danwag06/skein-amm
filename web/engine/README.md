@@ -89,9 +89,13 @@ no clock, no randomness; ties are always broken by outpoint (ascending).
 - Minimum leg size: a pool's `minLegSats` (the validator's, on the leg's
   sats side: `amountIn` for `bsvToToken`, `amountOut` for `tokenToBsv`).
   No leg is under its pool's minimum; such a share folds into the largest
-  other leg (the folding rule above). When the minimums leave no leg (the
-  same order without them has one), the plan carries `unfillable: "min"`
-  and `minAmountIn`, the smallest amountIn one pool accepts.
+  other leg (the folding rule above). The minimums choose the pools: when a
+  chosen pool's share is still under its minimum after the folding, every
+  such pool of that round is set aside and the split is planned again over
+  the rest, until every leg meets its pool's minimum or no pool is left.
+  Only then, with no leg (the same order without minimums has one), the
+  plan carries `unfillable: "min"` and `minAmountIn`, the smallest amountIn
+  one pool accepts.
 
 ### `nextLeg({pools, direction, remaining, fixedCost, minOut})`
 
