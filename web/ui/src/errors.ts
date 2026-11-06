@@ -14,7 +14,8 @@
  *   pool_spent      the pool was spent since the quote (the quote's freshness read; the validator's
  *                   `pool_spent` refusal)
  *   user_rejected   the user declined in the wallet (the wallet's `ERR_PERMISSION_DENIED`, "denied")
- *   no_answer       the relay gave no settled answer yet ("no answer yet"; a timed-out swap record)
+ *   no_answer       no answer to a leg yet ("no answer yet": the host could not reach the validator,
+ *                   the request failed, or the page's patience ran out)
  *   below_minimum   (0.40.0) under a validator's minimum leg (its `below_minimum` refusal; a quote no
  *                   pool takes for its size)
  *   refused         the validator, the relay or the host refused it (a refusal other than pool_spent
@@ -71,7 +72,6 @@ export function kindOfOutcome(o: SwapOutcome): ClientErrorKind | undefined {
       return undefined;
     case "refused":
       return o.reason.startsWith("pool_spent") ? "pool_spent" : o.reason.startsWith("below_minimum") ? "below_minimum" : "refused";
-    case "timeout":
     case "unknown":
       return "no_answer";
     case "failed":

@@ -20,9 +20,10 @@
  *   market's minimum (the host's filter), each validator's minimum leg, the market's commission key
  *   hash; a quote is the matching engine's plan over that list (no request); a swap (`executeSwap`)
  *   stages what the swap basket lacks by ONE wallet action, then per leg the pools route read fresh,
- *   ONE `GET /@<token>/amm/pools/beef?pool=` and the leg's relay request (`amm.swap.submit`, held by
- *   the host until the relay rests; 15 s expiry); no answer → the host's `GET /amm/spends`, once
- *   more, a race. The pool events (`watchPoolEvents`, 0.41.0: the host's feeds) are signals for
+ *   ONE `GET /@<token>/amm/pools/beef?pool=` and the leg's ONE plain `POST /@<token>/amm/swap`
+ *   (0.44.0: the host is the relay, answering the validator's reply; the page's patience,
+ *   `LEG_PATIENCE_MS`, is the only timer); no answer → the host's `GET /amm/spends`, once more, a
+ *   race. The pool events (`watchPoolEvents`, 0.41.0: the host's feeds) are signals for
  *   display: a page reads the route again on one.
  * - **Liquidity** (D9, D23; 0.40.0: by pool id): the wallet's pool rows and deploy history, then
  *   ONE `GET /@<token>/amm/positions?pool=` per token; a deploy the history has but the basket
@@ -96,7 +97,7 @@ import { authFetchPerInstance, instanceBase, readDefaults, readDiscovery, readTo
 import { depthOf } from "./market/prices.js";
 import { buildPlanRequest, legMinerFeeSats, quote as planQuote } from "./market/plan.js";
 import { validatorStatus } from "./market/view.js";
-import type { AuthFetchLike } from "./market/relay.js";
+import type { AuthFetchLike, FetchLike as RelayFetch } from "./market/relay.js";
 import { prepareSwap, selectLegInputs, type PlanLegInput, type PreparedSwap } from "./market/swapAction.js";
 import { fileStagedToken, moveBack, moveBackSats, stage, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapSatsTotal, swapTotals, unfiledStagedTokens, type MovedBack } from "./market/activeSwap.js";
 import { relaySwap, swapIdOf, type SwapOutcome } from "./market/swapFlow.js";
@@ -1139,12 +1140,11 @@ function makeClient(opts: ClientOptions, s: Shared) {
   }
 
   async function runSwap(quote: Quote, progress: (x: SwapProgress) => void, signal?: AbortSignal): Promise<SwapResult> {
-    const { wallet, signedFor } = needWallet();
+    const { wallet } = needWallet();
     const p = planned.get(quote);
     if (!p) throw new Error("Quote again: this quote was not planned here");
     const tokenId = quote.request.tokenId;
     const base = tokenBase(tokenId, swapBase);
-    const af = signedFor(base);
     const buy = quote.request.side === "buy";
     const direction = buy ? "bsvToToken" : "tokenToBsv";
     const minerFee = legMinerFeeSats(feeRate);
@@ -1234,8 +1234,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
       const prepared = await prepareSwap({ ...common, inputs, ...(order ? { order } : {}), last: leg.amountIn === remaining, holdingBeef: await swapHoldingBeef(wallet) });
       const at = { leg: outpointText(leg.outpoint), amountIn: leg.amountIn, amountOut: leg.amountOut };
       progress({ phase: "relaying", ...at, filled: [...legs] });
-      let outcome = await relayLeg(wallet, af, base, prepared, peerId);
-      if (outcome.status === "unknown" || outcome.status === "timeout") {
+      let outcome = await relayLeg(wallet, base, prepared, peerId);
+      if (outcome.status === "unknown") {
         // (a) The overlay: what the leg spends.
         const spent = await readSpendsAll(swapBase, [outpointText(leg.outpoint), ...inputs.sats.map((r) => r.outpoint), ...inputs.tokens.map((r) => r.outpoint)], freshFetch).catch(() => [] as SpendAll[]);
         const ours = spent.find((x) => x.spentBy && x.outpoint !== outpointText(leg.outpoint));
@@ -1246,8 +1246,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
         }
         if (spent.some((x) => x.spentBy && x.outpoint === outpointText(leg.outpoint))) continue;
         // (b) Once more to the same validator.
-        outcome = await relayLeg(wallet, af, base, prepared, peerId);
-        if (outcome.status === "unknown" || outcome.status === "timeout") {
+        outcome = await relayLeg(wallet, base, prepared, peerId);
+        if (outcome.status === "unknown") {
           // (c) Race: the next leg to another pool with the same rows.
           pending.push({ prepared, leg, poolId: row.poolId });
           excluded.add(row.outpoint);
@@ -1294,9 +1294,9 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return out;
   }
 
-  /** One relay of a prepared leg (0.34.0: no browser note); a thrown error is no answer. */
-  function relayLeg(wallet: WalletInterface, af: Signed, base: string, prepared: PreparedSwap, peerId: string): Promise<SwapOutcome> {
-    return relaySwap({ wallet, authFetch: af, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", id: swapIdOf(prepared), reason: errText(e) }));
+  /** One leg to the host's swap route (0.44.0: a plain POST, the page's patience its only timer); a thrown error is no answer. */
+  function relayLeg(wallet: WalletInterface, base: string, prepared: PreparedSwap, peerId: string): Promise<SwapOutcome> {
+    return relaySwap({ wallet, fetch: f as unknown as RelayFetch, base }, prepared, peerId).catch((e): SwapOutcome => ({ status: "unknown", id: swapIdOf(prepared), reason: errText(e) }));
   }
 
   /** A plain GET past the browser's short cache (`state` class: max-age 5): what a swap is about to spend must be read now. */

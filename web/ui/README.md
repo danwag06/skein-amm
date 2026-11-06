@@ -1,5 +1,15 @@
 # @amm-poc/market-ui
 
+**skein-amm 0.44.0: the host is the relay** (David Case 2026-11-06, "the instance logs facts,
+never attempts"; agent-env plans/host-relay-build-2026-11-06.md). A leg is ONE plain
+`POST <origin>/@<tokenId>/amm/swap` (`src/market/relay.ts` `postSwap`, `src/market/swapFlow.ts`
+`relaySwap`): body `{funding, swap, pool, validator, peerId}`, answer the validator's reply as it
+is (`{ok: true, tx, txid}` → accepted; `{ok: false, reason, pool?}` → refused) or the host's
+`{ok: false, reason: "unreachable", detail}` (→ no answer). Nothing is recorded anywhere: no swap
+record, no status read, no expiry. The page's patience `LEG_PATIENCE_MS` (15 s, an
+AbortController on the plain fetch) is the only timer: it closes the request, and the host stops
+with it. The no-answer path is as before (the overlay, one re-ask, the race).
+
 **skein-amm 0.40.0: the swap with no balance** (agent-env plans/swap-balance-build-2026-11-05.md;
 CHANGELOG 0.40.0). Swap stages what the swap basket lacks by ONE wallet action
 (`src/market/activeSwap.ts` `stage`), then runs legs one at a time (`src/client.ts` `executeSwap`:
@@ -26,8 +36,8 @@ vendored (`src/vendor/runar`, "runar-sdk, vendored"). The pages' behaviour is un
 docs/AMM.md "The public read API"; `src/lib/overlay.ts` carries the route table). Every read is a
 plain GET; the pages send `/lookup` nowhere and read no `.live/` beats (`test/overlay.test.ts`
 checks the sources). Swap holds the token's pools route as an event stream (quotes from it, no
-request; the fee line the pool's own; a swap = ONE `/pools/beef?lp=` + each leg's relay `/call`,
-15 s expiry, "Check again" = ONE `/swaps?id=`); the landing prices hold the host-wide pools route;
+request; the fee line the pool's own; a swap = ONE `/pools/beef?lp=` + each leg's relay request
+(0.44.0: the host's `POST /swap`); the landing prices hold the host-wide pools route;
 the token list is read once per page load; Positions = ONE `/positions?lp=` per token (a deploy
 in the history but not in `amm-pools` filed then), Close's pool BEEF by its LP key; Your tokens'
 metadata for tokens off the list = ONE discovery `?ids=`; Move back and every page submit go to
@@ -327,10 +337,6 @@ section, `validate` or `config.amm.ammP2p`, read this.
 Each is shown in the UI where it applies, with its reason. Details in the
 pages' sections below.
 
-- **Swap: run against a live relay.** The page codes against
-  `amm.swap.submit` / `amm.swap.status` on the AMM app's `/call` route
-  (programs/amm-p2p, being built on branch `relay`); tested against a fake
-  relay and a fake wallet only.
 - **Swap: token change ("not built: token split").** A token → sats leg
   needs token outputs adding up exactly to the amount; splitting first is
   not built.
@@ -701,9 +707,6 @@ basket in the UI any more.
 
 ### Not built, and why
 
-- **A live relay.** `amm.swap.submit` / `amm.swap.status` are being built
-  in programs/amm-p2p (branch `relay`); the page is coded against its
-  record (relay.zig `Record.answer`) and tested against a fake.
 - **Token change.** A token → sats leg needs token outputs adding up exactly
   to its amount. Splitting a token output first is a separate wallet action
   whose result must be admitted to the token's topic before a validator
@@ -722,7 +725,7 @@ public/
 src/
   lib/
     config.ts          appBaseOf / exchangeBase / tokenBase / the default fee rate (pure; 0.38.0)
-    overlay.ts         the public read API's client (0.34.0): pools routes and their stream, /pools/beef, /positions, /terms, /spends, /tx, /swaps, discovery's /tokens and /<token>/deploy; topic names
+    overlay.ts         the public read API's client (0.34.0): pools routes and their stream, /pools/beef, /positions, /terms, /spends, /tx, discovery's /tokens and /<token>/deploy; topic names
     keys.ts             validator signing-key derivation (BRC-43, "amm pool", anyone counterparty)
   pool/
     pool.artifact.json  Pool contract artifact, dumped from pool/dump_test.go (see below)
@@ -760,7 +763,7 @@ src/
     plan.ts             form -> PlanRequest, Plan -> display (LP / validator fees, commission, price, slippage), races
     swapAction.ts       one leg through the wallet: exact funding (nosend), the swap built and signed, Spend checks,
                         internalize + relinquish on acceptance, abortAction on refusal
-    relay.ts            amm.swap.terms / amm.swap.submit / amm.swap.status over the app's /call route (AuthFetch), the record
+    relay.ts            the host's swap route (0.44.0: POST /@<tokenId>/amm/swap, plain fetch, the validator's reply) and amm.swap.terms over the app's /call route (AuthFetch)
     swapFlow.ts         submit → poll → accepted / refused / timeout / no answer
   pages/
     Tokens.tsx           Tokens page: inventory table, deploy form, ordinals picker

@@ -17,7 +17,7 @@
  * | P7 | `GET /@<token>/amm/terms` | `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps, minLegSats} | null, market: {commissionPkh, minCommissionBps}}` |
  * | P8 | `GET /@<token>/amm/spends?outpoint=a,b` | `[{outpoint, spentBy?, current?, hops, closed}]` (one outpoint: the object) |
  * | P9 | `GET /@<token>/amm/tx?id=<txid>` | the transaction's BEEF (bytes) |
- * | P10 | `GET /@<token>/amm/swaps?id=<id>` | the relay record, as `amm.swap.status` answers it |
+ * | (P10) | gone in 0.44.0: the host relays a leg (`POST /@<token>/amm/swap`, src/market/relay.ts), nothing is recorded |
  * | P11 | `GET /@<token>/amm/token` | the token's record |
  * | P12 | `GET <origin>/amm/tokens` | the exchange's token list (src/lib/skein.ts `readTokens`) |
  * | P13 | `GET /@discovery/1color/tokens?ids=a,b` (or paged `?limit=&skip=`) | `[{tokenId, topic, sym, dec, iconUrl?, txid, vout}]`; an id not on discovery `{tokenId, listed: false}` |
@@ -435,14 +435,6 @@ export async function readSpends(base: string, outpoints: string[], fetchFn?: Fe
 /** P9: `GET <base>/tx?id=<txid>`: the transaction's BEEF (every input's source with it); null when the instance does not hold it. */
 export async function readTx(base: string, txid: string, fetchFn?: FetchFn): Promise<number[] | null> {
   return getBytes(`${trim(base)}/tx?id=${encodeURIComponent(txid)}`, fetchFn);
-}
-
-/** P10: `GET <base>/swaps?id=<id>`: the relay record (dag-json, as `amm.swap.status` answers it); null when unknown. */
-export async function readSwap(base: string, id: string, fetchFn?: FetchFn): Promise<unknown | null> {
-  const res = await (fetchFn ?? plain)(`${trim(base)}/swaps?id=${encodeURIComponent(id)}`, { headers: { accept: "application/json" } });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`GET ${trim(base)}/swaps: ${res.status} ${(await res.text()).slice(0, 200)}`);
-  return res.json();
 }
 
 /** A token on discovery (P13, P14): its metadata; `iconUrl` absolute (P13 gives it relative to the list). */

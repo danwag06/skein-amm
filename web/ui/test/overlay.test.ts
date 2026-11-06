@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { Beef, Transaction, Utils } from "@bsv/sdk";
 import * as overlay from "../src/lib/overlay";
-import { liveOfPools, parseAllPools, parsePools, poolOutputOf, readPoolsBeef, readSwap, readTerms, readTx, toPoolRow } from "../src/lib/overlay";
+import { liveOfPools, parseAllPools, parsePools, poolOutputOf, readPoolsBeef, readTerms, readTx, toPoolRow } from "../src/lib/overlay";
+import * as overlayMod from "../src/lib/overlay";
 import v from "./fixtures/amm-topic-vectors.json";
 
 const K = "03142715675faf8da1ecc4d51e0b9e539fa0d52fdd96ed60dbe99adb15d6b05ad9";
@@ -43,7 +44,7 @@ describe("the pools routes (P1, P2)", () => {
   });
 });
 
-describe("P3 /pools/beef, P7 /terms, P9 /tx, P10 /swaps", () => {
+describe("P3 /pools/beef, P7 /terms, P9 /tx (0.44.0: no P10 /swaps)", () => {
   const fund = Transaction.fromHex(v.fund);
   const tokenDeploy = Transaction.fromHex(v.token_deploy);
   const poolDeploy = Transaction.fromHex(v.pool_deploy);
@@ -73,16 +74,14 @@ describe("P3 /pools/beef, P7 /terms, P9 /tx, P10 /swaps", () => {
     expect(none.validator).toBeNull();
   });
 
-  it("P9: the bytes; 404 none. P10: the record; 404 none", async () => {
+  it("P9: the bytes; 404 none. No swap record read (0.44.0: nothing is recorded)", async () => {
     const f = (async (url: string) => {
       if (url.includes("/tx?id=aa")) return new Response(new Uint8Array([1, 2, 3]));
-      if (url.includes("/swaps?id=bb")) return json({ id: "bb", status: "pending" });
       return json({ error: "not found" }, 404);
     }) as never;
     expect(await readTx("http://x/@t/amm", "aa", f)).toEqual([1, 2, 3]);
     expect(await readTx("http://x/@t/amm", "cc", f)).toBeNull();
-    expect(await readSwap("http://x/@t/amm", "bb", f)).toEqual({ id: "bb", status: "pending" });
-    expect(await readSwap("http://x/@t/amm", "cc", f)).toBeNull();
+    expect("readSwap" in overlayMod).toBe(false);
   });
 });
 

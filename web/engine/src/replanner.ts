@@ -11,7 +11,7 @@ import type { Leg, LegResult, Plan, PoolState } from "./types.js";
  *    cumulative fill and its pool is gone (spent).
  *  - rejected with newPoolState: the pool is still available, re-priced
  *    from the validator's returned state, and stays a candidate.
- *  - rejected with no newPoolState, or timeout, or a leg with no matching
+ *  - rejected with no newPoolState, or unknown (no answer), or a leg with no matching
  *    result at all: the pool's true state is unknown (it may have raced
  *    with another swap), so it is conservatively dropped from the
  *    candidate set rather than retried against stale reserves.
@@ -39,7 +39,7 @@ export function replan(plan: Plan, results: LegResult[]): Plan {
     } else if (result.status === "rejected" && result.newPoolState) {
       repriced.push(result.newPoolState);
     }
-    // rejected without newPoolState, or timeout: pool dropped (unknown state)
+    // rejected without newPoolState, or unknown: pool dropped (unknown state)
   }
 
   const nextInventory = [...plan.remainingInventory, ...repriced];

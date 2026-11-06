@@ -2,7 +2,7 @@
  * src/data/exchange.ts, wired (skein-amm 0.34.0: the public read API; agent-env
  * plans/exchange-api-2026-11-04.md D1–D25): each function against a fake exchange (one route table:
  * the swap instance's /tokens, /defaults, /discovery, /admin and card, the host's pools routes, a
- * token instance's /pools/beef, /positions, /terms, /spends, /tx, /swaps, /call, discovery's
+ * token instance's /pools/beef, /positions, /terms, /spends, /tx, /call, discovery's
  * /tokens and /<token>/deploy, /sendMessage) and a fake wallet, over the Go fixtures
  * (src/fixtures/vectors.zig's copy). Every request is recorded: the pages send `/lookup` nowhere,
  * and the request counts per page are measured here ("requests per page").
@@ -999,7 +999,7 @@ describe("requests per page (0.34.0)", () => {
   /** A connected wallet holding the token (on the exchange) and nothing staged. */
   const heldWallet = () => connect({ held: [{ outpoint: `${DEPLOY}.0`, satoshis: 1, spendable: true, lockingScript: tokenDeploy.outputs[0]!.lockingScript.toHex() }] });
 
-  it("Swap: load = the token list + ONE host-wide stats read + ONE plain pools read (0.41.0) and the token's pool event feed; a quote = 0; a swap = per leg the pools read, ONE /pools/beef + the relay's /call; after the swap = 0 (a pool event makes the page read the pools again)", async () => {
+  it("Swap: load = the token list + ONE host-wide stats read + ONE plain pools read (0.41.0) and the token's pool event feed; a quote = 0; a swap = per leg the pools read, ONE /pools/beef + the host's POST /swap (0.44.0); after the swap = 0 (a pool event makes the page read the pools again)", async () => {
     heldWallet();
     const offs: (() => void)[] = [];
     let h: PoolsAnswer | null = null;
@@ -1018,7 +1018,7 @@ describe("requests per page (0.34.0)", () => {
     const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, h ?? parsePools({}), META);
     expect(since(n)).toEqual([]);
     expect(q.legs).toHaveLength(1);
-    // A swap (0.40.0): the overlay pass, then per leg ONE /pools/beef?pool= and its relay /call (test/clientSwap.test.ts).
+    // A swap (0.40.0): the overlay pass, then per leg ONE /pools/beef?pool= and its POST /swap to the host (0.44.0; test/clientSwap.test.ts).
     // After it: the pages' data reloads (onDataChange) read the wallet and the cached list; a pool event makes the page read the pools.
     await myTokens();
     await walletSats();

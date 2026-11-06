@@ -268,7 +268,7 @@ describe("executeSwap (0.40.0): one swap at a time, legs one at a time", () => {
     expect(b.legs.map((l) => l.txid)).toEqual(["f2".repeat(32)]);
     // (c)
     relayed.length = 0;
-    outcomes.push({ status: "unknown", id: "u", reason: "no answer yet" }, { status: "timeout", id: "u" }, accepted("f3".repeat(32)));
+    outcomes.push({ status: "unknown", id: "u", reason: "no answer yet" }, { status: "unknown", id: "u", reason: "no answer yet: the host could not reach the validator" }, accepted("f3".repeat(32)));
     const r = await c.executeSwap(q);
     expect(relayed).toHaveLength(3);
     expect(relayed[2]!.pool).not.toBe(relayed[0]!.pool);

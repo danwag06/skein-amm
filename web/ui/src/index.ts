@@ -56,8 +56,8 @@ export { isPoolRow } from "./lp/poolDeploy.js";
 export { poolCustomInstructions } from "./lp/poolDeploy.js";
 /** The label of a pool deploy's action (`amm-pool-deploy`): the positions reader's history. */
 export { POOL_DEPLOY_LABEL } from "./lp/positions.js";
-/** How long the relay may take a swap leg (the swap's `expires`), ms. */
-export { SWAP_TTL_MS } from "./market/swapAction.js";
+/** How long the page waits for one swap leg's answer before it closes the request (0.44.0: the host's relay stops with it), ms. */
+export { LEG_PATIENCE_MS } from "./market/swapFlow.js";
 /** The `p color plan` labels of a transfer of one asset (BRC-207 plan version 1): every token action's. */
 export { transferPlanLabels } from "./wallet/color.js";
 /** A module receiving key for one output of an asset from a sender: its receipt, key and hash160. */

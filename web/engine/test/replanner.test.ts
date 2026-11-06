@@ -86,18 +86,18 @@ describe("replan after a rejection", () => {
     const [legA, legB] = initial.legs;
     const results: LegResult[] = [
       { outpoint: legA!.outpoint, status: "filled" },
-      { outpoint: legB!.outpoint, status: "timeout" },
+      { outpoint: legB!.outpoint, status: "unknown" },
     ];
     const next = replan(initial, results);
 
     expect(next.cumulativeFilledAmountIn).toBe(legA!.amountIn);
     expect(next.cumulativeFilledAmountOut).toBe(legA!.amountOut);
-    // timeout: pool state unknown, dropped -> nothing left to plan against.
+    // no answer: pool state unknown, dropped -> nothing left to plan against.
     expect(next.legs).toHaveLength(0);
     expect(next.filledCompletely).toBe(false);
   });
 
-  it("stops once nothing eligible remains (timeout with no other pools)", () => {
+  it("stops once nothing eligible remains (no answer, no other pools)", () => {
     const poolA = makePool({ outpoint: "a:0", bsvReserve: 1_000_000n, tokenReserve: 1_000_000n });
     const request = baseRequest({
       amountIn: 100_000n,
@@ -107,7 +107,7 @@ describe("replan after a rejection", () => {
     });
     const initial = plan(request);
 
-    const results: LegResult[] = [{ outpoint: "a:0", status: "timeout" }];
+    const results: LegResult[] = [{ outpoint: "a:0", status: "unknown" }];
     const next = replan(initial, results);
 
     expect(next.legs).toHaveLength(0);

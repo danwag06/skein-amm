@@ -142,4 +142,5 @@ export interface Plan {
 export type LegResult =
   | { outpoint: string; status: "filled" }
   | { outpoint: string; status: "rejected"; newPoolState?: PoolState }
-  | { outpoint: string; status: "timeout" };
+  /** No answer to the leg (0.44.0, renamed): the pool's state is not known. */
+  | { outpoint: string; status: "unknown" };

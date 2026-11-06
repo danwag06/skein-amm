@@ -40,8 +40,8 @@ import {
   type SatsInput,
   type TokenInput,
 } from "../src/market/swapAction";
-import { dagBytes, parseSwapTerms, readBytes, swapTerms, toPoolState, type AuthFetchLike } from "../src/market/relay";
-import { relaySwap, swapIdOf } from "../src/market/swapFlow";
+import { dagBytes, parseSwapReply, parseSwapTerms, readBytes, swapTerms, toPoolState, type AuthFetchLike, type FetchLike } from "../src/market/relay";
+import { LEG_PATIENCE_MS, relaySwap, swapIdOf } from "../src/market/swapFlow";
 import topics from "./fixtures/instance-v2/listTopicManagers.json";
 import lookupAll from "./fixtures/instance-v2/lookup-all.json";
 import beefAnswer from "./fixtures/instance-v2/lookup-outpoint-beef.json";
@@ -404,7 +404,7 @@ describe("the leg's sats (0.40.0: the staged rows that cover it, largest first; 
     expect(prepared.satsInputs).toEqual([satsInput]);
     expect(prepared.funding.txid).toBe(satsInput.txid);
     expect(Beef.fromBinary(prepared.funding.atomicBeef).atomicTxid).toBe(satsInput.txid);
-    expect(prepared.expires).toBe(1_000 + 15_000); // 0.34.0 (D15): SWAP_TTL_MS 15 s
+    expect("expires" in prepared).toBe(false); // 0.44.0: no expiry — the page's patience is the only timer
     expect(calls[3]!.args).toMatchObject({ protocolID: [2, "amm swap"], keyID: satsInput.keyID, counterparty: "self" });
     // The order's key input: the first leg's own first sats input.
     expect(prepared.order).toBe(satsInput.outpoint);
@@ -649,30 +649,43 @@ function fakeRelay(answer: (fn: string, args: Record<string, unknown>, n: number
 }
 const ok = (fn: string, result: unknown) => ({ status: 200, body: { fn, result } });
 
-describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until the relay rests)", () => {
-  it("submits {funding (the first sats row's transaction), swap, pool, validator, expires} as DAG-JSON bytes; the held answer is the settled record (0.34.0, D15: no poll); accepts: internalize (basket insertion); no relinquishOutput", async () => {
+/** 0.44.0: a fake plain fetch over the host's swap route (`POST <base>/swap`): answers the body, records every request (with its signal). */
+function fakeHost(answer: (body: Record<string, unknown>, n: number, signal?: AbortSignal) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown }) {
+  const calls: { url: string; method: string; headers: Record<string, string>; body: Record<string, unknown>; signal?: AbortSignal }[] = [];
+  const fetch: FetchLike = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url, method: init.method, headers: init.headers, body, ...(init.signal ? { signal: init.signal } : {}) });
+    const a = await answer(body, calls.length, init.signal);
+    return { status: a.status, text: async () => JSON.stringify(a.body) };
+  };
+  return { fetch, calls };
+}
+const reply = (body: unknown) => ({ status: 200, body });
+
+describe("relay (0.44.0): one plain POST to the host's swap route — the validator's reply as it is; no record, no expiry; the page's patience the only timer", () => {
+  it("posts {funding (the first sats row's transaction), swap, pool, validator, peerId} as DAG-JSON bytes to <base>/swap, a plain fetch with the page's signal; the validator's reply {ok: true, tx, txid}: internalize (basket insertion); no relinquishOutput", async () => {
     const { wallet, calls, prepared, vkey } = await satsIn();
     let final: Transaction | undefined;
-    const { af, calls: http } = fakeRelay(async (fn, args) => {
+    const { fetch, calls: http } = fakeHost(async (args) => {
       final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
-      return ok(fn, { id: ID, status: "accepted", tx: dagBytes(final.toBinary()), txid: final.id("hex") });
+      return reply({ ok: true, tx: dagBytes(final.toBinary()), txid: final.id("hex") });
     });
     const before = calls.length;
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://amm2.localhost:8300/amm" }, prepared, PEER);
+    const o = await relaySwap({ wallet, fetch, base: "http://amm2.localhost:8300/@t/amm" }, prepared, PEER);
 
-    expect(http.map((c) => [c.url, c.method, c.headers, c.body.fn])).toEqual([["http://amm2.localhost:8300/amm/call", "POST", { "content-type": "application/json" }, "amm.swap.submit"]]);
-    expect(http[0]!.body.args).toEqual({
+    expect(http.map((c) => [c.url, c.method, c.headers])).toEqual([["http://amm2.localhost:8300/@t/amm/swap", "POST", { "content-type": "application/json", accept: "application/json" }]]);
+    expect(http[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(http[0]!.body).toEqual({
       funding: dagBytes(prepared.funding.atomicBeef),
       swap: dagBytes(prepared.swap.toBinary()),
       pool: `${poolDeploy.id("hex")}_0`,
       validator: dagBytes(Utils.toArray(v.identity, "hex")),
       peerId: PEER,
-      expires: 16_000, // 0.34.0 (D15): 15 s after the leg was prepared
     });
-    expect((http[0]!.body.args.funding as { "/": { bytes: string } })["/"].bytes).not.toMatch(/=/);
-    expect(Beef.fromBinary(readBytes(http[0]!.body.args.funding)!).atomicTxid).toBe(prepared.funding.txid);
+    expect((http[0]!.body.funding as { "/": { bytes: string } })["/"].bytes).not.toMatch(/=/);
+    expect(Beef.fromBinary(readBytes(http[0]!.body.funding)!).atomicTxid).toBe(prepared.funding.txid);
 
-    expect(o).toMatchObject({ status: "accepted", id: ID, txid: final!.id("hex"), completed: { internalized: true, errors: [] } });
+    expect(o).toMatchObject({ status: "accepted", id: swapIdOf(prepared), txid: final!.id("hex"), completed: { internalized: true, errors: [] } });
     const after = calls.slice(before);
     expect(after.map((c) => c.method)).toEqual(["internalizeAction"]);
     const ia = after[0]!.args as { tx: number[]; outputs: unknown[]; labels: string[]; description: string };
@@ -695,11 +708,11 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
 
   it("0.40.0: accepted, ONE internalizeAction — the payout, and the change kept in amm-swap (basket insertion with its customInstructions)", async () => {
     const { wallet, calls, prepared, vkey } = await tokensIn(fakeWallet({ fundingVout: 2 }), v.commissionPkh, { amountIn: 40_000n, extra: 3_000 });
-    const { af } = fakeRelay(async (fn, args) => {
+    const { fetch } = fakeHost(async (args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
-      return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
+      return reply({ ok: true, tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
+    const o = await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted" || prepared.payout.kind !== "brc29" || prepared.tokenChange?.kind !== "basket" || prepared.satsChange?.kind !== "basket") throw new Error("expected acceptance with both changes");
     const ia = calls.filter((c) => c.method === "internalizeAction");
     expect(ia).toHaveLength(1);
@@ -712,11 +725,11 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
 
   it("tokens in, accepted: the payout as a wallet payment; nothing relinquished (0.29.0)", async () => {
     const { wallet, calls, prepared, vkey } = await tokensIn();
-    const { af } = fakeRelay(async (fn, args) => {
+    const { fetch } = fakeHost(async (args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
-      return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
+      return reply({ ok: true, tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
+    const o = await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted" || prepared.payout.kind !== "brc29") throw new Error(`expected acceptance, got ${o.status}`);
     expect(o.completed).toEqual({ txid: o.txid, internalized: true, errors: [] });
     const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
@@ -728,18 +741,18 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
     const { wallet, calls, prepared } = await satsIn();
     const other = Transaction.fromBinary(prepared.swap.toBinary());
     other.outputs[1]!.satoshis = 2;
-    const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "accepted", tx: other.toHex(), txid: other.id("hex") }));
-    await expect(relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).rejects.toThrow(/not the swap we built/);
+    const { fetch } = fakeHost(() => reply({ ok: true, tx: other.toHex(), txid: other.id("hex") }));
+    await expect(relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER)).rejects.toThrow(/not the swap we built/);
     expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 
   it("refused: nothing to undo (0.29.0: the leg's outputs stay in amm-swap), and the refusal's pool for the replan", async () => {
     const { wallet, calls, prepared } = await satsIn();
-    const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "refused", reason: "pool_spent", pool: `${poolDeploy.id("hex")}_0`, poolState: wirePool }));
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
+    const { fetch } = fakeHost(() => reply({ ok: false, reason: "pool_spent", pool: wirePool, beef: "00" }));
+    const o = await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER);
     expect(o).toEqual({
       status: "refused",
-      id: ID,
+      id: swapIdOf(prepared),
       reason: "pool_spent",
       pool: { outpoint: wirePool.outpoint, bsvReserve: 1039860n, tokenReserve: 4808341n, liquidityFeeBps: 30n, validationFeeBps: 5n, commissionBps: 10n, validatorIdentityKey: v.identity },
     });
@@ -750,42 +763,47 @@ describe("relay: amm.swap.submit over the app's /call route (0.34.0: held until 
     expect(quote(req.request, liveFor([v.identity]), 0).plan.legs.map((l) => l.outpoint)).toEqual([wirePool.outpoint]);
   });
 
-  it("timeout: nothing to undo; a pending record (the host let go before the relay rested): no answer yet, its id kept", async () => {
+  it("the host's commission rule refuses: refused, nothing to undo (nothing was relayed)", async () => {
     const { wallet, calls, prepared } = await satsIn();
-    const pending = fakeRelay((fn) => ok(fn, { id: ID, status: "pending" }));
-    expect(await relaySwap({ wallet, authFetch: pending.af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "no answer yet" });
-    expect(pending.calls).toHaveLength(1);
-    const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "timeout" }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "timeout", id: ID });
+    const { fetch } = fakeHost(() => reply({ ok: false, reason: "commission_missing", detail: "the commission pays 22…, not 55…" }));
+    expect(await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "refused", id: swapIdOf(prepared), reason: "commission_missing: the commission pays 22…, not 55…" });
+    expect(calls.some((c) => c.method === "abortAction" || c.method === "internalizeAction")).toBe(false);
+  });
+
+  it("an answer that is not 200 (a bad request, an unknown token): failed — the host relayed nothing", async () => {
+    const { wallet, calls, prepared } = await satsIn();
+    const { fetch } = fakeHost(() => ({ status: 400, body: { status: "error", code: "ERR_BAD_REQUEST", description: "funding: want bytes" } }));
+    expect(await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "failed", reason: "swap: ERR_BAD_REQUEST: funding: want bytes" });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
-  it("an error answer to submit (the instance does not serve the function): nothing recorded, nothing to undo", async () => {
-    const { wallet, calls, prepared } = await satsIn();
-    const { af } = fakeRelay((fn) => ({ status: 404, body: { fn, error: { code: "unknown-fn", message: "amm.swap.submit is not provided" } } }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "failed", reason: "amm.swap.submit: unknown-fn: amm.swap.submit is not provided" });
-    expect(calls.some((c) => c.method === "abortAction")).toBe(false);
-  });
-
-  it("no answer (a network failure, the host's 503 past its bound): nothing is aborted, the swap's id (sha256 of the swap) kept", async () => {
+  it("no answer — the host could not reach the validator, a network failure: unknown, nothing aborted, the swap's id (sha256 of the swap) kept", async () => {
     const { wallet, calls, prepared } = await satsIn();
     const id = swapIdOf(prepared);
     expect(id).toBe(Utils.toHex(Hash.sha256(prepared.swap.toBinary()) as number[]));
-    const lost: AuthFetchLike = { fetch: async () => { throw new Error("network down"); } };
-    expect(await relaySwap({ wallet, authFetch: lost, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id, reason: "no answer yet: amm.swap.submit: network down" });
-    const bound = fakeRelay(() => ({ status: 503, body: "the request is still waiting" }));
-    expect(await relaySwap({ wallet, authFetch: bound.af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id, reason: "no answer yet" });
+    const broke = fakeHost(() => reply({ ok: false, reason: "unreachable", detail: "the dial was refused: no route" }));
+    expect(await relaySwap({ wallet, fetch: broke.fetch, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id, reason: "no answer yet: the host could not reach the validator (unreachable: the dial was refused: no route)" });
+    const lost: FetchLike = async () => { throw new Error("network down"); };
+    expect(await relaySwap({ wallet, fetch: lost, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id, reason: "no answer yet: network down" });
     expect(calls.some((c) => c.method === "abortAction")).toBe(false);
   });
 
-  it("the relay's transport failure is no answer: nothing aborted", async () => {
-    const { wallet, calls, prepared } = await satsIn();
-    const { af } = fakeRelay((fn) => ok(fn, { id: ID, status: "failed", reason: "dial", detail: "no route" }));
-    expect(await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER)).toEqual({ status: "unknown", id: ID, reason: "the relay could not reach the validator (dial: no route)" });
-    expect(calls.some((c) => c.method === "abortAction")).toBe(false);
+  it("the page's patience (LEG_PATIENCE_MS, 15 s): past it the request is closed — its signal aborted, so the host stops — and the leg is no answer yet", async () => {
+    expect(LEG_PATIENCE_MS).toBe(15_000);
+    const { wallet, prepared } = await satsIn();
+    let seen: AbortSignal | undefined;
+    const { fetch } = fakeHost((_b, _n, signal) => new Promise((_res, rej) => {
+      seen = signal;
+      signal!.addEventListener("abort", () => rej(new DOMException("The operation was aborted.", "AbortError")));
+    }));
+    const o = await relaySwap({ wallet, fetch, base: "http://x/amm", patienceMs: 20 }, prepared, PEER);
+    expect(seen?.aborted).toBe(true);
+    expect(o).toEqual({ status: "unknown", id: swapIdOf(prepared), reason: "no answer yet: no answer within 20 ms" });
   });
 
-  it("records: unknown status and missing fields are refused; pools in either naming; a closed pool is none", () => {
+  it("replies: a reply that is not one is refused; pools in either naming; a closed pool is none", () => {
+    expect(() => parseSwapReply({ id: "x", status: "accepted" })).toThrow(/not a swap reply/);
+    expect(() => parseSwapReply({ ok: true })).toThrow(/without tx/);
     expect(toPoolState({ ...wirePool, closed: true })).toBeUndefined();
     expect(toPoolState({ outpoint: "x_0" })).toBeUndefined();
     expect(toPoolState({ ...wirePool, validatorIdentity: dagBytes(Utils.toArray(v.identity, "hex")) })?.validatorIdentityKey).toBe(v.identity);
@@ -929,11 +947,11 @@ describe("the commission", () => {
     // The overlay pass recognizes both as this wallet's (keys re-derived from the order).
     expect((await legTakeInOf(wallet, prepared.swap, TOKEN_ID, prepared.order))?.map((x) => x.outputIndex)).toEqual([1, 4]);
 
-    const { af } = fakeRelay(async (fn, args) => {
+    const { fetch } = fakeHost(async (args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
-      return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
+      return reply({ ok: true, tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
+    const o = await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted") throw new Error(`expected acceptance, got ${o.status}`);
     expect(o.completed.internalized).toBe(true);
     const ia = calls.find((x) => x.method === "internalizeAction")!.args as { outputs: unknown[] };
@@ -960,12 +978,12 @@ describe("the commission", () => {
     // The overlay pass recognizes both: the sats payout (BRC-29), the token commission (its receipt).
     expect((await legTakeInOf(wallet, prepared.swap, TOKEN_ID, prepared.order))?.map((x) => x.outputIndex)).toEqual([1, 4]);
 
-    const { af } = fakeRelay(async (fn, args) => {
+    const { fetch } = fakeHost(async (args) => {
       const final = await validatorSigns(prepared, readBytes(args.swap)!, vkey);
       for (const i of [0, 1, 2]) expect(spendValid(final, i)).toBe(true);
-      return ok(fn, { id: ID, status: "accepted", tx: final.toHex(), txid: final.id("hex") });
+      return reply({ ok: true, tx: final.toHex(), txid: final.id("hex") });
     });
-    const o = await relaySwap({ wallet, authFetch: af, base: "http://x/amm" }, prepared, PEER);
+    const o = await relaySwap({ wallet, fetch, base: "http://x/amm" }, prepared, PEER);
     if (o.status !== "accepted" || prepared.payout.kind !== "brc29") throw new Error(`expected acceptance, got ${o.status}`);
     const ia = calls.find((x) => x.method === "internalizeAction")!.args as { outputs: unknown[] };
     expect(ia.outputs).toEqual([
