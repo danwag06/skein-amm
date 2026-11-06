@@ -222,9 +222,12 @@ describe("executeSwap (0.40.0): one swap at a time, legs one at a time", () => {
     current.set(ID_A, newer);
     outcomes.push({ status: "refused", id: "r1", reason: "pool_spent", pool: newer }, accepted());
     const seen: string[] = [];
+    // 0.43.0: the refusal moved the pool on the server (A2): the next read lists it there.
+    const A2 = `${"d2".repeat(32)}_0`;
+    afterRelay = () => current.set(ID_A, pool(A2, 1_000_300n, 4_998_000n));
     // The quote was on A0; A's current output is A1: the read replaces the row before any relay.
     const r = await c.executeSwap(q, { onProgress: (p) => seen.push(p.phase) });
-    expect(relayed.map((x) => x.pool)).toEqual([A1, A1]);
+    expect(relayed.map((x) => x.pool)).toEqual([A1, A2]);
     expect(seen).toEqual(["staging", "relaying", "repricing", "relaying", "done"]);
     expect(r.status).toBe("filled");
     expect(resolveCalls).toBe(2);
@@ -420,5 +423,40 @@ describe("0.41.0: the server's pool list, read fresh before each leg; no list of
     expect(relayed).toHaveLength(2);
     expect(relayed[1]!.pool).not.toBe(first);
     expect(relayed.map((x) => x.pool)).not.toContain(A1);
+  });
+});
+
+describe("0.43.0 (D4): a pool_spent refusal the server's list does not reflect", () => {
+  it("the fresh list still shows the pool at the outpoint the leg spent: that pool excluded for the rest of the swap — the next pool takes the leg; none left: stop no_pool, the rows moved back; no timer, no retry count", async () => {
+    const c = client();
+    const q = buy(c, 20_000n, true);
+    const first = q.legs[0]!.poolOutpoint.replace(".", "_");
+    // Refused pool_spent, and the server still lists the pool where it was (nothing moved).
+    outcomes.push({ status: "refused", id: "r1", reason: "pool_spent", pool: pool(A1, 9n, 9n) }, accepted());
+    const r = await c.executeSwap(q);
+    expect(r.status).toBe("filled");
+    expect(relayed).toHaveLength(2);
+    expect(relayed[0]!.pool).toBe(first);
+    expect(relayed[1]!.pool).not.toBe(first);
+    // One pool only: refused pool_spent, unchanged → excluded, nothing left → no_pool, moved back.
+    relayed.length = 0;
+    satsRows = 1;
+    const q1 = buy(c, 20_000n);
+    outcomes.push({ status: "refused", id: "r2", reason: "pool_spent", pool: pool(A1, 9n, 9n) });
+    const r1 = await c.executeSwap(q1);
+    expect(relayed.map((x) => x.pool)).toEqual([A0]);
+    expect(r1).toMatchObject({ status: "failed", stop: "no_pool", legs: [] });
+    expect(movedBack).toEqual([TOKEN]);
+  });
+
+  it("the list changed (the pool at a new outpoint): repriced and asked again, as before", async () => {
+    const c = client();
+    const q = buy(c);
+    const newer = pool(A1, 1_000_200n, 4_999_000n);
+    afterRelay = () => current.set(ID_A, newer);
+    outcomes.push({ status: "refused", id: "r1", reason: "pool_spent", pool: newer }, accepted());
+    const r = await c.executeSwap(q);
+    expect(r.status).toBe("filled");
+    expect(relayed.map((x) => x.pool)).toEqual([A0, A1]);
   });
 });

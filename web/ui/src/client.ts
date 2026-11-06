@@ -1102,7 +1102,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
    *      (`relaying`):
    *      - accepted → taken in (ONE internalizeAction) before the next leg;
    *      - refused `pool_spent` (`repricing`) → the list read again: the relaying host took the
-   *        validator's state in before it answered (0.41.0);
+   *        validator's state in before it answered (0.41.0); the list still showing the pool at the
+   *        outpoint the leg spent → that pool excluded for the rest of this swap (0.43.0);
    *      - refused otherwise (`below_minimum` included) → that outpoint excluded;
    *      - no answer → (a) the overlay: a staged input spent → the leg landed (taken in by the
    *        pass), the pool spent by another's swap → continue with the same rows; (b) else the
@@ -1151,6 +1152,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
 
     // 0.41.0: the server's list, read fresh before each leg; the outpoints excluded (a pool that refused other than pool_spent, or did not answer).
     const excluded = new Set<string>();
+    /** 0.43.0 (D4): the outpoint a leg was just refused `pool_spent` on: still listed there at the next read → excluded. */
+    let spentAt: string | undefined;
     /** 0.40.2: the legs the order may still fill (the request's maxSources less the legs filled). */
     let budget = quote.request.maxSources;
 
@@ -1195,6 +1198,10 @@ function makeClient(opts: ClientOptions, s: Shared) {
       }
       const remaining = quote.request.amountIn - filledIn;
       const answer = await tokenPools(tokenId);
+      // 0.43.0 (D4): refused pool_spent, yet the server's fresh list still shows the pool at the outpoint the leg spent:
+      // the pool is not asked again in this swap.
+      if (spentAt !== undefined && answer.pools.some((r) => r.outpoint === spentAt)) excluded.add(spentAt);
+      spentAt = undefined;
       const pools = poolsWithMinimums(answer).filter((r) => !excluded.has(r.outpoint));
       const minOut = quote.minAmountOut > filledOut ? quote.minAmountOut - filledOut : 0n;
       const next = nextLeg({ pools, direction, remaining, fixedCost: { minerFeeSats: minerFee }, minOut, maxSources: budget });
@@ -1263,6 +1270,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
       if (outcome.status === "refused" && outcome.reason.startsWith("pool_spent")) {
         // The relaying host took the validator's state in before it answered: the next read lists it.
         progress({ phase: "repricing", ...at, filled: [...legs] });
+        spentAt = row.outpoint;
       } else {
         excluded.add(row.outpoint);
       }
