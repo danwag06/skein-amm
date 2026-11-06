@@ -149,7 +149,7 @@ describe("staging (0.40.0): ONE wallet action — sats only a plain createAction
     expect(calls.some((c) => c.method === "internalizeAction" || c.method === "signAction")).toBe(false);
     // The legs find it.
     const tx = Transaction.fromAtomicBEEF(s.tx);
-    expect(await swapSatsHoldings(fakeWallet([{ tx, row: { outpoint: s.sats.outpoint, satoshis: 20_123, spendable: true, lockingScript: o.lockingScript, customInstructions: o.customInstructions! } }]).wallet)).toEqual([s.sats]);
+    expect(await swapSatsHoldings(fakeWallet([{ tx, row: { outpoint: s.sats!.outpoint, satoshis: 20_123, spendable: true, lockingScript: o.lockingScript, customInstructions: o.customInstructions! } }]).wallet)).toEqual([s.sats]);
   });
 
   it("with tokens: the plan a transfer out; output 0 the token output to a fresh key, its description naming the key (… · amm-swap <hex>), output 1 the sats output filed by the action; labelled amm-swap-stage; the page's submit; the token output filed by basket insertion", async () => {
@@ -220,6 +220,12 @@ describe("staging (0.40.0): ONE wallet action — sats only a plain createAction
     const { wallet, calls } = fakeWallet();
     await expect(stage(wallet, { sats: 0 })).rejects.toThrow(/nothing to stage/);
     await expect(stage(wallet, { sats: 5, tokens: { tokenId: TOKEN, amount: 0n } })).rejects.toThrow(/nothing to stage/);
+    // Tokens lacking and no sats lacking: the token output alone.
+    const t = fakeWallet();
+    const only = await stage(t.wallet, { sats: 0, tokens: { tokenId: TOKEN, amount: 7n } }, { submit: async () => ({}) });
+    expect((t.calls.find((c) => c.method === "createAction")!.args as CreateActionArgs).outputs!.map((o) => o.satoshis)).toEqual([1]);
+    expect(only.sats).toBeUndefined();
+    expect(only.tokens?.amount).toBe(7n);
     (wallet as unknown as { createAction: () => Promise<never> }).createAction = async () => {
       throw new Error("BRC-207: the user declined the color_send request");
     };

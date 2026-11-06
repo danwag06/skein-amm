@@ -109,7 +109,8 @@ export interface Staged {
   txid: string;
   /** The action as the wallet's AtomicBEEF. */
   tx: number[];
-  sats: SatsInput;
+  /** The sats row (absent: tokens staged with no sats lacking). */
+  sats?: SatsInput;
   tokens?: TokenInput;
   /** The token row filed in `amm-swap` (with tokens). */
   filed: boolean;
@@ -132,7 +133,8 @@ export async function stage(
   req: StageRequest,
   o: { sym?: string; submit?: (topic: string, beef: number[]) => Promise<{ steak?: Steak }> } = {},
 ): Promise<Staged> {
-  if (!Number.isSafeInteger(req.sats) || req.sats <= 0) throw new Error("nothing to stage in the swap basket");
+  // The sats output: what the basket lacks of the fee sats (with tokens it may lack none).
+  if (!Number.isSafeInteger(req.sats) || req.sats < 0 || (req.sats === 0 && !req.tokens)) throw new Error("nothing to stage in the swap basket");
   const sym = o.sym ?? "token";
   const satsKeyID = newSwapKeyID();
   const satsPub = (await wallet.getPublicKey({ protocolID: SWAP_PROTOCOL, keyID: satsKeyID, counterparty: "self", forSelf: true })).publicKey;
@@ -165,15 +167,15 @@ export async function stage(
   const { txid, tx } = await runTokenAction(wallet, {
     description: describe(`AMM swap: ${sym} into the swap basket`),
     labels: [...transferPlanLabels(assetId), "amm-swap", SWAP_STAGE_LABEL],
-    outputs: [{ lockingScript: tokenScript, satoshis: 1, outputDescription: swapKeyDescription(`${sym} for a swap`, keyID) }, satsOutput],
+    outputs: [{ lockingScript: tokenScript, satoshis: 1, outputDescription: swapKeyDescription(`${sym} for a swap`, keyID) }, ...(req.sats > 0 ? [satsOutput] : [])],
     options: { randomizeOutputs: false, acceptDelayedBroadcast: false },
   });
   const final = Transaction.fromAtomicBEEF(tx);
-  if (final.outputs[0]?.lockingScript.toHex() !== tokenScript || final.outputs[1]?.lockingScript.toHex() !== satsScript) throw new Error("the wallet's action does not have the staged outputs at 0 and 1");
+  if (final.outputs[0]?.lockingScript.toHex() !== tokenScript || (req.sats > 0 && final.outputs[1]?.lockingScript.toHex() !== satsScript)) throw new Error("the wallet's action does not have the staged outputs at 0 and 1");
   const out: Staged = {
     txid,
     tx,
-    sats: satsRow(txid, 1),
+    ...(req.sats > 0 ? { sats: satsRow(txid, 1) } : {}),
     tokens: { outpoint: `${txid}.0`, txid, vout: 0, satoshis: 1, lockingScript: tokenScript, amount, protocolID: SWAP_PROTOCOL, keyID, counterparty: "self" },
     filed: false,
     submitted: "not submitted",
