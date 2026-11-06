@@ -72,18 +72,19 @@ export function planOrder(
   pools: PoolState[],
   direction: Direction,
   amountIn: bigint,
-  allowPartial: boolean,
+  maxSources: number | undefined,
   fixedCost: FixedCost,
   minAmountOut: bigint,
 ): Leg[] {
   if (amountIn <= 0n || pools.length === 0) return [];
 
-  if (!allowPartial) {
+  // 0.40.2: one source — the best single pool for the whole amount.
+  if (maxSources === 1) {
     const best = pickBestSingleLeg(pools, direction, amountIn, minAmountOut);
     return best ? [best] : [];
   }
 
-  return planSplit(pools, direction, amountIn, fixedCost);
+  return planSplit(pools, direction, amountIn, fixedCost, maxSources);
 }
 
 /** The smallest amountIn one of `pools` accepts (contract-valid and at its minimum), or undefined. */
@@ -105,7 +106,7 @@ export function plan(request: PlanRequest): Plan {
     eligible,
     request.direction,
     request.amountIn,
-    request.allowPartial,
+    request.maxSources,
     request.fixedCost,
     explicitMin,
   );
@@ -123,7 +124,7 @@ export function plan(request: PlanRequest): Plan {
     meetsSlippageBound: totalAmountOut >= resolvedMinAmountOut,
     filledCompletely: totalAmountIn === request.amountIn,
     direction: request.direction,
-    allowPartial: request.allowPartial,
+    ...(request.maxSources !== undefined ? { maxSources: request.maxSources } : {}),
     fixedCost: request.fixedCost,
     livenessThreshold: request.livenessThreshold,
     now: request.now,
@@ -141,7 +142,7 @@ export function plan(request: PlanRequest): Plan {
       withoutMinimums(eligible),
       request.direction,
       request.amountIn,
-      request.allowPartial,
+      request.maxSources,
       request.fixedCost,
       explicitMin,
     ).length > 0

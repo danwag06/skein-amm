@@ -11,7 +11,6 @@ function baseRequest(overrides: Partial<PlanRequest>): PlanRequest {
     direction: "tokenToBsv",
     amountIn: 100_000n,
     slippage: {},
-    allowPartial: true,
     fixedCost: noCost,
     inventory: [],
     ...overrides,
@@ -93,7 +92,7 @@ describe("fixed per-leg cost", () => {
   });
 });
 
-describe("allowPartial = false", () => {
+describe("maxSources = 1 (0.40.2; was allowPartial = false)", () => {
   it("only considers pools that can fill the whole order within slippage, and picks the best", () => {
     // Small pool: swapping the whole order here has heavy price impact -> fails the bound.
     const smallPool = makePool({ outpoint: "small:0", bsvReserve: 200_000n, tokenReserve: 200_000n });
@@ -110,7 +109,7 @@ describe("allowPartial = false", () => {
     const amountIn = 100_000n;
     const request = baseRequest({
       amountIn,
-      allowPartial: false,
+      maxSources: 1,
       inventory: [smallPool, okPool, betterPool],
       slippage: { minAmountOut: 90_000n },
     });
@@ -126,7 +125,7 @@ describe("allowPartial = false", () => {
     const smallPool = makePool({ outpoint: "small:0", bsvReserve: 150_000n, tokenReserve: 150_000n });
     const request = baseRequest({
       amountIn: 100_000n,
-      allowPartial: false,
+      maxSources: 1,
       inventory: [smallPool],
       slippage: { minAmountOut: 99_000n }, // impossible: heavy price impact on this small a pool
     });
@@ -226,10 +225,10 @@ describe("determinism", () => {
     expect(r1.legs).toEqual(r3.legs);
   });
 
-  it("breaks single-leg ties (allowPartial = false) by outpoint", () => {
+  it("breaks single-leg ties (maxSources = 1) by outpoint", () => {
     const poolA = makePool({ outpoint: "z:0", bsvReserve: 9_000_000n, tokenReserve: 9_000_000n });
     const poolB = makePool({ outpoint: "a:0", bsvReserve: 9_000_000n, tokenReserve: 9_000_000n });
-    const request = baseRequest({ amountIn: 10_000n, allowPartial: false, inventory: [poolA, poolB] });
+    const request = baseRequest({ amountIn: 10_000n, maxSources: 1, inventory: [poolA, poolB] });
     const result = plan(request);
     expect(result.legs[0]!.outpoint).toBe("a:0");
   });

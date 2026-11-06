@@ -13,7 +13,6 @@ function baseRequest(overrides: Partial<PlanRequest>): PlanRequest {
     direction: "tokenToBsv",
     amountIn: 100_000n,
     slippage: {},
-    allowPartial: true,
     fixedCost: noCost,
     inventory: [],
     ...overrides,
@@ -23,7 +22,7 @@ function baseRequest(overrides: Partial<PlanRequest>): PlanRequest {
 describe("replan after a rejection", () => {
   it("re-prices the rejected pool from its returned state and retries the remainder", () => {
     const poolA = makePool({ outpoint: "a:0", bsvReserve: 5_000_000n, tokenReserve: 5_000_000n });
-    const request = baseRequest({ amountIn: 100_000n, allowPartial: false, inventory: [poolA] });
+    const request = baseRequest({ amountIn: 100_000n, maxSources: 1, inventory: [poolA] });
     const initial = plan(request);
     expect(initial.legs).toHaveLength(1);
     expect(initial.legs[0]!.outpoint).toBe("a:0");
@@ -52,7 +51,7 @@ describe("replan after a rejection", () => {
 
   it("handles a new state that is worse for the taker (still fills, lower output)", () => {
     const poolA = makePool({ outpoint: "a:0", bsvReserve: 5_000_000n, tokenReserve: 5_000_000n });
-    const request = baseRequest({ amountIn: 100_000n, allowPartial: false, inventory: [poolA] });
+    const request = baseRequest({ amountIn: 100_000n, maxSources: 1, inventory: [poolA] });
     const initial = plan(request);
     const originalQuote = initial.legs[0]!.amountOut;
 
@@ -101,7 +100,7 @@ describe("replan after a rejection", () => {
     const poolA = makePool({ outpoint: "a:0", bsvReserve: 1_000_000n, tokenReserve: 1_000_000n });
     const request = baseRequest({
       amountIn: 100_000n,
-      allowPartial: false,
+      maxSources: 1,
       inventory: [poolA],
       slippage: { minAmountOut: 90_000n }, // a real bound, so an unfilled order fails it
     });
@@ -118,7 +117,7 @@ describe("replan after a rejection", () => {
 
   it("stops once the order is fully filled", () => {
     const poolA = makePool({ outpoint: "a:0", bsvReserve: 1_000_000n, tokenReserve: 1_000_000n });
-    const request = baseRequest({ amountIn: 100_000n, allowPartial: false, inventory: [poolA] });
+    const request = baseRequest({ amountIn: 100_000n, maxSources: 1, inventory: [poolA] });
     const initial = plan(request);
 
     const results: LegResult[] = [{ outpoint: "a:0", status: "filled" }];
@@ -132,7 +131,7 @@ describe("replan after a rejection", () => {
 
   it("is chainable across multiple replan rounds", () => {
     const poolA = makePool({ outpoint: "a:0", bsvReserve: 1_000_000n, tokenReserve: 1_000_000n });
-    const request = baseRequest({ amountIn: 100_000n, allowPartial: false, inventory: [poolA] });
+    const request = baseRequest({ amountIn: 100_000n, maxSources: 1, inventory: [poolA] });
     const round1 = plan(request);
 
     const repriced1 = makePool({ outpoint: "a:1", bsvReserve: 1_010_000n, tokenReserve: 990_000n });

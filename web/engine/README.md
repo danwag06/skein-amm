@@ -59,12 +59,14 @@ valid swap.
 Plans a fresh order against an inventory of pools. Deterministic and pure:
 no clock, no randomness; ties are always broken by outpoint (ascending).
 
-- `allowPartial: false` — only pools where the **entire** `amountIn` swaps
+- `maxSources` (0.40.2; replaces `allowPartial`): the most pools the order
+  may draw on, a positive integer; absent, no cap.
+- `maxSources: 1` — only pools where the **entire** `amountIn` swaps
   within the slippage bound are eligible; the engine picks the single best
   one (max `amountOut`, tie-break by outpoint). If none qualify, returns an
   empty plan with `meetsSlippageBound: false`.
-- `allowPartial: true` (default expectation) — splits the order across
-  pools by water-filling: pools are added in descending (fee-adjusted)
+- otherwise — splits the order across at most `maxSources` pools by
+  water-filling: pools are added in descending (fee-adjusted)
   spot-price order while the next pool's marginal improvement in total
   `amountOut` exceeds its fixed per-leg cost (`fixedCost.minerFeeSats`,
   converted into the output asset's units — see
@@ -97,15 +99,15 @@ no clock, no randomness; ties are always broken by outpoint (ascending).
   plan carries `unfillable: "min"` and `minAmountIn`, the smallest amountIn
   one pool accepts.
 
-### `nextLeg({pools, direction, remaining, fixedCost, minOut})`
+### `nextLeg({pools, direction, remaining, fixedCost, minOut, maxSources?})`
 
-One leg at a time: plans `remaining` against `pools` and returns
-`{leg, projectedOut}` — the plan's leg with the largest `amountIn` (tie:
-outpoint) and the plan's total out — or `{stop}`: `filled` (nothing
+One leg at a time: plans `remaining` against at most `maxSources` of
+`pools` (0.40.2: the legs the order may STILL fill; absent, no cap) and
+returns `{leg, projectedOut}` — the plan's leg with the largest `amountIn`
+(tie: outpoint) and the plan's total out — or `{stop}`: `filled` (nothing
 remains), `no_pool`, `min` (only the minimums leave no leg), `floor` (the
-plan's total out < `minOut`). When what would remain after the leg is
-nonzero and under every pool's minimum, the leg takes all of `remaining`
-(the best single pool that accepts it) when one pool can.
+plan's total out < `minOut`). With `maxSources: 1` the leg takes ALL of
+`remaining` in the best single pool that meets `minOut` and its minimum.
 
 ### `priceOf(pools, shareBps = PRICE_SHARE_BPS): {buy, sell, mid} | null`
 
@@ -193,7 +195,7 @@ A few judgment calls the task left open, made explicit here:
 6. **Liveness filter excludes pools with no `lastSeen`** whenever
    `livenessThreshold`/`now` are supplied, on the conservative assumption
    that "never seen" is at least as stale as "seen too long ago."
-7. **`allowPartial: false` picks the best single pool** among those that
+7. **`maxSources: 1` picks the best single pool** among those that
    can fill the *entire* `amountIn` within the slippage bound in one leg
    (max `amountOut`, ties broken by outpoint), per the task's spec. It
    does not attempt any splitting.
@@ -214,6 +216,7 @@ A few judgment calls the task left open, made explicit here:
 - `src/nextLeg.ts` — `nextLeg()`.
 - `src/price.ts` — `priceOf()`, `PRICE_SHARE_BPS`.
 - `test/balance.test.ts` — the plan-relative bound, minimum leg sizes, `nextLeg`, `priceOf`.
+- `test/sources.test.ts` — `maxSources` in `plan` (1, 2, none) and across `nextLeg`'s fills.
 - `test/pricing.test.ts` — `computeSwap` checked against an independently transcribed oracle of the Go contract's formula, for a table of cases (typical, zero fees, high fees, tiny amounts with ceil-rounding edge cases, a reject case, asymmetric reserves, heavy price impact, realistic large BSV magnitudes).
-- `test/planner.test.ts` — single pool, split-beats-single, fixed-cost-prevents-split, `allowPartial: false`, slippage exhaustion, liveness filter, `bsvToToken` direction, determinism.
+- `test/planner.test.ts` — single pool, split-beats-single, fixed-cost-prevents-split, `maxSources: 1`, slippage exhaustion, liveness filter, `bsvToToken` direction, determinism.
 - `test/replanner.test.ts` — re-pricing after rejection (better and worse new state), partial-fill + cumulative slippage budget, stopping when nothing eligible remains, stopping when fully filled, multi-round chaining.

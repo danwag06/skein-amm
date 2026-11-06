@@ -173,10 +173,12 @@ export function planSplit(
   direction: Direction,
   amountIn: bigint,
   fixedCost: FixedCost,
+  /** 0.40.2: the most pools the split may use (absent: no cap). */
+  maxSources?: number,
 ): Leg[] {
   let candidates = pools;
   for (;;) {
-    const { legs, underMin } = splitOnce(candidates, direction, amountIn, fixedCost);
+    const { legs, underMin } = splitOnce(candidates, direction, amountIn, fixedCost, maxSources);
     if (underMin.size === 0) return legs;
     candidates = candidates.filter((p) => !underMin.has(p.outpoint));
   }
@@ -192,6 +194,7 @@ function splitOnce(
   direction: Direction,
   amountIn: bigint,
   fixedCost: FixedCost,
+  maxSources?: number,
 ): { legs: Leg[]; underMin: Set<string> } {
   const underMin = new Set<string>();
   if (pools.length === 0 || amountIn <= 0n) return { legs: [], underMin };
@@ -204,7 +207,8 @@ function splitOnce(
 
   let bestN = 1;
   let prevOut = totalOutputForTarget(sorted.slice(0, 1), targetNum);
-  for (let n = 2; n <= sorted.length; n++) {
+  const cap = maxSources === undefined ? sorted.length : Math.min(sorted.length, maxSources);
+  for (let n = 2; n <= cap; n++) {
     const out = totalOutputForTarget(sorted.slice(0, n), targetNum);
     const gain = out - prevOut;
     const justAdded = sorted[n - 1]!;

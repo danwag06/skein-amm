@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { plan, resolveMinAmountOut } from "../src/planner.js";
 import { planSplit, quoteMid } from "../src/allocation.js";
 import { computeSwap } from "../src/pricing.js";
-import { nextLeg, underEveryMinimum } from "../src/nextLeg.js";
+import { nextLeg } from "../src/nextLeg.js";
 import { priceOf, PRICE_SHARE_BPS } from "../src/price.js";
 import type { FixedCost, PlanRequest } from "../src/types.js";
 import { makePool } from "./helpers.js";
@@ -15,7 +15,6 @@ function req(overrides: Partial<PlanRequest>): PlanRequest {
     direction: "bsvToToken",
     amountIn: 100_000n,
     slippage: {},
-    allowPartial: true,
     fixedCost: noCost,
     inventory: [],
     ...overrides,
@@ -93,10 +92,10 @@ describe("item 2: minimum leg size", () => {
     expect(p.unfillable).toBeUndefined();
   });
 
-  it("allowPartial false skips a pool whose minimum the order is under", () => {
+  it("maxSources 1 skips a pool whose minimum the order is under", () => {
     const a = makePool({ outpoint: "a:0", liquidityFeeBps: 1n, minLegSats: 1_000_000n });
     const b = makePool({ outpoint: "b:0" });
-    const p = plan(req({ amountIn: 100_000n, allowPartial: false, inventory: [a, b] }));
+    const p = plan(req({ amountIn: 100_000n, maxSources: 1, inventory: [a, b] }));
     expect(p.legs.map((l) => l.outpoint)).toEqual(["b:0"]);
   });
 });
@@ -215,19 +214,6 @@ describe("item 3: nextLeg", () => {
     if (!("leg" in r)) throw new Error("expected a leg");
     expect(r.leg.amountIn).toBe(1_000_000n);
     expect(r.leg.outpoint).toBe("a:0");
-  });
-
-  it("underEveryMinimum: the take-all test on what would remain", () => {
-    const a = makePool({ outpoint: "a:0", minLegSats: 300_000n });
-    const b = makePool({ outpoint: "b:0", minLegSats: 200_000n });
-    expect(underEveryMinimum([a, b], "bsvToToken", 199_999n)).toBe(true);
-    expect(underEveryMinimum([a, b], "bsvToToken", 200_000n)).toBe(false);
-    // a pool with no minimum takes any remainder
-    expect(underEveryMinimum([a, makePool({ outpoint: "c:0" })], "bsvToToken", 1n)).toBe(false);
-    // tokenToBsv: measured on the payout each pool would give
-    const out = computeSwap(a, "tokenToBsv", 250_000n)!.amountOut;
-    expect(underEveryMinimum([{ ...a, minLegSats: out + 1n }], "tokenToBsv", 250_000n)).toBe(true);
-    expect(underEveryMinimum([{ ...a, minLegSats: out }], "tokenToBsv", 250_000n)).toBe(false);
   });
 
   it("with minimums met by every planned leg, the largest leg stands (the rest is not under every minimum)", () => {

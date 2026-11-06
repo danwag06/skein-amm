@@ -54,7 +54,7 @@ export function replan(plan: Plan, results: LegResult[]): Plan {
 
   const base = {
     direction: plan.direction,
-    allowPartial: plan.allowPartial,
+    ...(plan.maxSources !== undefined ? { maxSources: plan.maxSources } : {}),
     fixedCost: plan.fixedCost,
     livenessThreshold: plan.livenessThreshold,
     now: plan.now,
@@ -80,7 +80,7 @@ export function replan(plan: Plan, results: LegResult[]): Plan {
     nextInventory,
     plan.direction,
     remainder,
-    plan.allowPartial,
+    plan.maxSources,
     plan.fixedCost,
     remainingMinAmountOut,
   );

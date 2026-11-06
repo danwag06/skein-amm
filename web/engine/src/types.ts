@@ -76,7 +76,11 @@ export interface PlanRequest {
   direction: Direction;
   amountIn: bigint;
   slippage: SlippageBound;
-  allowPartial: boolean;
+  /**
+   * 0.40.2: the most pools the order may draw on (a positive integer; absent: no cap). 1: the best
+   * single pool for the whole amount. Replaces `allowPartial` (`false` was 1).
+   */
+  maxSources?: number;
   fixedCost: FixedCost;
   /** Pools available for this token. Assumed already scoped to tokenId. */
   inventory: PoolState[];
@@ -115,7 +119,7 @@ export interface Plan {
 
   // --- bookkeeping carried across replan() rounds ---
   direction: Direction;
-  allowPartial: boolean;
+  maxSources?: number;
   fixedCost: FixedCost;
   livenessThreshold?: number;
   now?: number;
