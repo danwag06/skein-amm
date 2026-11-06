@@ -1,6 +1,6 @@
 {
   "name": "@dcasegr/amm-engine",
-  "version": "0.40.0",
+  "version": "0.40.1",
   "type": "module",
   "description": "Pure TypeScript order-matching / planning library for the AMM (skein-amm): plans swaps over an inventory of pools the caller supplies. No UI framework, no network.",
   "repository": {

@@ -4,6 +4,18 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.40.1 (2026-11-05)
+
+A leg fed by rows of unrelated transactions (rows a stopped swap left and a fresh stage) reached
+the validator's door without some inputs' sources (`MissingInput`). Fixed:
+
+- The relay (amm-p2p `requestBeef`): the request BEEF keeps the ancestry of every swap input whose
+  source the given funding BEEF holds, not only the funding transaction's. `checkPair` unchanged.
+- The pages / `@dcasegr/amm-client` (`fundingBeef`): `funding` is ONE BEEF of every staged input's
+  source (with its ancestry), in an Atomic envelope whose subject is the first sats input's
+  transaction; the sdk's own Atomic writer would drop the sources the subject does not descend from.
+- `@dcasegr/amm-engine` 0.40.1: no change.
+
 ## 0.40.0 (2026-11-05)
 
 Token change, the pool id, the pool history, one price, the validator's minimum, and the swap with
