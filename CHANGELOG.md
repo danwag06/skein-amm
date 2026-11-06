@@ -4,6 +4,20 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.42.1 (2026-11-06)
+
+The admin's withdraw is a standard BRC-29 payment (open-exchange 0.15.2; David Case: "The host should not
+broadcast anything… That is how payments work"); client and Settings only, the programs unchanged.
+
+- `withdrawAll()` sends `{fn: "withdraw"}` (no arguments: swap pays the message's sender), waits for
+  `GET <swap>/wallet` to list the withdrawal, and takes it in: `internalizeAction` with its output as a
+  `wallet payment` (`derivationPrefix`, `derivationSuffix`, `senderIdentityKey` from the read; the BEEF from
+  `GET <swap>/wallet/tx?n=`). The take-in is what sends it; nothing waits for a block.
+- `settleWithdrawals()` (Settings load) takes the latest withdrawal in again, for a page lost in between.
+- Gone: the self-derived key ("amm withdraw" + n) and the action label `amm-withdraw` (client and the pages'
+  manifest). Settings after a withdraw: "Withdrawn: N sats are in your wallet."
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.42.1 (the client on the engine 0.42.1).
+
 ## 0.42.0 (2026-11-06)
 
 The paid enable and the admin's withdraw, client and Settings only (open-exchange 0.15.0; agent-env
