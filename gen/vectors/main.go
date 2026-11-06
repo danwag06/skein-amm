@@ -500,6 +500,14 @@ func main() {
 	})
 	g.unlockPool(closeTx, methodClose, [][]byte{nil}, []*ec.PrivateKey{p2.lp}, []int{0}, lpKey, 0)
 
+	// The LP's Close of the pool as swap_token_change left it (0.41.0): a lineage holding both a
+	// swap with token change and a close; built as `close`.
+	closeAfterTokenChange := build([]in{{swap3, 0, nil}}, []out{
+		{p3.bsv - closeFee, p2pkhScript(lpNext)},
+		{1, g.tokenP2pkh(p3.tokens, lpTokens)},
+	})
+	g.unlockPool(closeAfterTokenChange, methodClose, [][]byte{nil}, []*ec.PrivateKey{p3.lp}, []int{0}, lpKey, 0)
+
 	// The validator's Rescind (0.13.0) of the same pool (a competing spend): output 0 the pool
 	// written back with ValidatorPubKey cleared, signed by the pool's current validator key
 	// (p2.validator), the miner fee from the validator wallet's fund:6, its change Rúnar's change
@@ -526,6 +534,7 @@ func main() {
 		{"fund", fund}, {"token_deploy", deploy}, {"pool_deploy", poolDeploy},
 		{"pool_deploy_unaffirmed", unaffirmed}, {"pool_deploy_forged", forged}, {"pool_deploy_own_key", ownKey},
 		{"swap_bsv_in", swap1}, {"swap_bad_next", swapBadNext}, {"swap_tokens_in", swap2}, {"swap_token_change", swap3}, {"close", closeTx},
+		{"close_after_token_change", closeAfterTokenChange},
 		{"rescind", rescind}, {"close_rescinded", closeRescinded},
 	}
 	var b strings.Builder
@@ -535,7 +544,8 @@ func main() {
 	b.WriteString("//! another key signed it; own_key: the LP's own key signed and is the ValidatorPubKey);\n")
 	b.WriteString("//! a sats-in swap, the same swap naming a wrong next key (swap_bad_next), a tokens-in swap,\n")
 	b.WriteString("//! the tokens-in swap's competitor with 10,000 tokens of token change (swap_token_change, 0.40.0);\n")
-	b.WriteString("//! the LP's Close (outputs of its choosing); the validator's Rescind (its own funding) and\n")
+	b.WriteString("//! the LP's Close (outputs of its choosing), and of swap_token_change's pool (close_after_token_change,\n")
+	b.WriteString("//! 0.41.0); the validator's Rescind (its own funding) and\n")
 	b.WriteString("//! the LP's Close of the rescinded pool. Each pool spend checked by the go-sdk interpreter.\n")
 	b.WriteString("//! Then legacy BRC-161 token transactions (`legacy_*`, gen/main.go's legacyVectors).\n\n")
 	for _, t := range append(named, legacyVectors()...) {
