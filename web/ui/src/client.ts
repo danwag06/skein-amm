@@ -41,8 +41,8 @@
  * an outpoint is `<txid>.<vout>`. Amounts are bigints in base units; prices
  * are numbers: sats per whole token.
  */
-import { Beef, Transaction, type WalletInterface } from "@bsv/sdk";
-import { WALLET_PAYMENT } from "./wallet/brc29.js";
+import { Beef, Transaction, createNonce, type WalletInterface } from "@bsv/sdk";
+import { BRC29_PROTOCOL, WALLET_PAYMENT, p2pkhHexOf } from "./wallet/brc29.js";
 import { send1Color, type Send1ColorResult } from "@1sat/actions";
 import { nextLeg, priceOf, type Leg, type PoolState, type Plan, type PricePair } from "@dcasegr/amm-engine";
 import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } from "./lib/tokenId.js";
@@ -1779,6 +1779,68 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return readWallet(swapBase, ff);
   }
 
+  /**
+   * Enables a token for the exchange's fee (0.42.2, open-exchange 0.15.3: a BEEF submission; anyone signed, not the
+   * admin): the price from `GET <swap>/defaults` (`enablePriceSats`; none → refused, "paid enable is off"); the
+   * exchange's identity from `GET <swap's origin>/.well-known/skein`; the deploy's BEEF given, else discovery's
+   * (`GET <origin>/@discovery/1color/<token>/deploy`). The payment, ts-stack's standard (sdk BasicBRC29): a prefix and
+   * a suffix from `createNonce`, the payee key `getPublicKey({protocolID: [2, "3241645161d8"], keyID: "<prefix>
+   * <suffix>", counterparty: <the exchange>})`, ONE P2PKH output of exactly the price, `createAction` with
+   * `{randomizeOutputs: false, noSend: true}` — built and signed, NOT sent: the exchange's take-in sends it. Then ONE
+   * BEEF merging the deploy's and the payment's, `POST <swap>/enable?tokenId=&paymentTxid=&paymentVout=0
+   * &derivationPrefix=&derivationSuffix=` signed (BRC-104). On any refusal or failure after the payment was built, the
+   * unsent payment is aborted in the wallet (`abortAction`), so its coins are free again. → the enabled row.
+   * Refusals are `ClientError` kind `refused` (the exchange's code first in the message); a fetch that does not get
+   * through, `network`; the user declining in the wallet, `user_rejected`.
+   */
+  async function enableTokenPaid(tokenId: TokenId, o: { deployBeef?: number[] } = {}): Promise<EnabledToken & Record<string, unknown>> {
+    const { wallet, signedFor } = needWallet();
+    const id = parseOutpoint(sdkTokenId(tokenId).replace("_", "."));
+    if (!id) throw new Error(`not a token id: ${tokenId}`);
+    const canonical = tokenIdText(id);
+    const price = (await readDefaults(swapBase, freshFetch as typeof fetch)).enablePriceSats;
+    if (!price) throw new ClientError("refused", "paid enable is off");
+    const exchange = await swapIdentity();
+    let deploy = o.deployBeef;
+    if (!deploy) {
+      const res = await freshFetch(`${discoveryBase()}/${canonical}/deploy`);
+      if (!res.ok) throw new ClientError("refused", `no deploy for ${canonical} on discovery (${res.status}): pass deployBeef`);
+      deploy = Array.from(new Uint8Array(await res.arrayBuffer()));
+    }
+    const derivationPrefix = await createNonce(wallet, "self");
+    const derivationSuffix = await createNonce(wallet, "self");
+    const { publicKey } = await wallet.getPublicKey({ protocolID: BRC29_PROTOCOL, keyID: `${derivationPrefix} ${derivationSuffix}`, counterparty: exchange });
+    const created = await wallet.createAction({
+      description: "Open Exchange: enable a token",
+      outputs: [{ satoshis: price, lockingScript: p2pkhHexOf(publicKey), outputDescription: "Open Exchange enable fee", customInstructions: JSON.stringify({ derivationPrefix, derivationSuffix, payee: exchange }) }],
+      options: { randomizeOutputs: false, noSend: true },
+    });
+    const txid = created.txid;
+    if (!txid || !created.tx) throw new Error("the wallet built no payment");
+    try {
+      const b = new Beef();
+      b.mergeBeef(deploy);
+      b.mergeBeef(created.tx);
+      const q = new URLSearchParams({ tokenId: canonical, paymentTxid: txid, paymentVout: "0", derivationPrefix, derivationSuffix });
+      let res: Response;
+      try {
+        res = await signedFor(swapBase).fetch(`${swapBase}/enable?${q.toString()}`, { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(b.toBinary()) });
+      } catch (e) {
+        // The stock AuthFetch takes every 402 for its own payment wire and throws on this route's (no x-bsv-payment-* headers).
+        if (/x-bsv-payment/.test(errText(e))) throw new ClientError("refused", "ERR_PAYMENT_REQUIRED: the exchange did not take this payment (402; its price may have changed)", { cause: e });
+        throw e;
+      }
+      const v = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (res.status !== 200) throw new ClientError("refused", `${String(v.code ?? res.status)}: ${String(v.description ?? v.message ?? "refused")}`);
+      s.listRead = null;
+      emit();
+      return v.result as EnabledToken & Record<string, unknown>;
+    } catch (e) {
+      await wallet.abortAction({ reference: txid }).catch(() => {});
+      throw e;
+    }
+  }
+
   /** A withdrawal's payment taken in by the admin's wallet: `internalizeAction`, output `outputIndex` as a wallet payment from swap (BRC-29, ts-stack's recipient side). */
   async function takeInWithdrawal(wallet: WalletInterface, x: ExchangeWallet["withdrawals"][number], tx: number[]): Promise<boolean> {
     const r = await wallet.internalizeAction({
@@ -1925,6 +1987,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     setEnablePrice: guard(setEnablePrice),
     exchangeWallet: guard(exchangeWallet),
     withdrawAll: guard(withdrawAll),
+    enableTokenPaid: guard(enableTokenPaid),
     settleWithdrawals,
   };
 }

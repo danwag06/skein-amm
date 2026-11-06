@@ -72,7 +72,13 @@ The client (each an async function unless noted):
   every sats row: txid, amount, BEEF, submit), `moveBackStagedSats` (the sats alone), `sendTokens`;
 - settings (root): `deployBeef`, `enableToken`, `tokensToEnable`, `disableToken`, `defaults`,
   `setDefaultTerms`, `clearDefaultTerms`, `setDefaultMarket`, `clearDefaultMarket`, `tokenTerms`,
-  `setTokenTerms` (0.40.0: the terms `{lpBps, validatorBps, commissionBps, minLegSats?}`), `discoveryState`, `setDiscovery`.
+  `setTokenTerms` (0.40.0: the terms `{lpBps, validatorBps, commissionBps, minLegSats?}`), `discoveryState`, `setDiscovery`,
+  `setEnablePrice`, `exchangeWallet`, `withdrawAll`, `settleWithdrawals` (0.42.x);
+- the paid enable (0.42.2, anyone signed; open-exchange 0.15.3): `enableTokenPaid(tokenId, {deployBeef?})` — the price
+  from `/amm/defaults`, a BRC-29 payment to the exchange built with `noSend` (not sent: the exchange's take-in sends it),
+  ONE BEEF with the deploy and the payment, `POST /amm/enable?tokenId=&paymentTxid=&paymentVout=&derivationPrefix=
+  &derivationSuffix=` signed; the enabled row back; on any refusal or failure the unsent payment is aborted
+  (`abortAction`). Refusals are `ClientError` kind `refused`, the exchange's code first in the message.
 
 Pure helpers beside it: `hostedFrom`, `parsePoolEventMessage`, `poolViews`, `poolFees`, `poolsWithMinimums`, `pairPrice`, `legCarrySats`, `hasTerms`,
 `enableCandidates`, `topicOf`, `lookupOf`, `ammLookupOf`, `walletDeployBeef`, `exchangeBase`,

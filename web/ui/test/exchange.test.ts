@@ -31,6 +31,7 @@ import {
   setDefaultTerms,
   setEnablePrice,
   exchangeWallet,
+  exchangeClient,
   withdrawAll,
   settleWithdrawals,
   setTokenTerms,
@@ -103,6 +104,9 @@ interface Instance {
   /** The swap instance's enable list (`/amm/tokens`). */
   enabled: Record<string, unknown>[];
   defaults: Record<string, unknown>;
+  /** 0.42.2: the paid enable's requests and the answer the exchange gives. */
+  enables: { url: string; body: number[] }[];
+  enableAnswer: { status: number; body: unknown };
   /** 0.42.0: the host's read of swap's wallet (`/amm/wallet`). */
   wallet: Record<string, unknown>;
   discovery: Record<string, unknown>;
@@ -145,6 +149,8 @@ function instance(): Instance {
     enabled: [enabledRow(TOKEN, "TST", 0, 2)],
     defaults: {},
     wallet: { sats: 0, outputs: 0 },
+    enables: [],
+    enableAnswer: { status: 200, body: {} },
     discovery: { on: false },
     pools: { [TOKEN]: [wirePool(poolDeploy.id("hex"), v.pool0)] },
     stats: { [TOKEN]: statsRow(TOKEN, { sats: v.pool0.bsv, tokens: v.pool0.tokens }, 1) },
@@ -174,6 +180,11 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
   inst.requests.push(`${init?.method ?? "GET"} ${u.pathname}${u.search}`);
   if (u.pathname.endsWith("/lookup")) return json({ status: "error", message: "the pages send no lookup" }, 400);
   if (u.pathname === "/.well-known/skein") return json({ handle: "swap", identity: SKEIN, origin: ORIGIN, claimed: true });
+  // 0.42.2: the paid enable (a BEEF submission) — the test's answer, the request kept.
+  if (u.pathname === "/amm/enable" && init?.method === "POST") {
+    inst.enables.push({ url, body: Array.from(init.body as Uint8Array) });
+    return json(inst.enableAnswer.body, inst.enableAnswer.status);
+  }
   if (u.pathname === "/sendMessage") {
     inst.sent.push({ url, body: decode(init!.body as Uint8Array) as Record<string, unknown> });
     return new Response(encode({ status: "success", id: `msg${inst.sent.length}` }) as BodyInit, { status: 200 });
@@ -646,6 +657,56 @@ describe("exchange.ts, wired", () => {
     expect(internalized.length).toBe(n0 + 2);
     delete (inst as { wallet?: unknown }).wallet;
     inst.wallet = { sats: 0, outputs: 0, withdrawals: [] };
+  });
+
+  it("enableTokenPaid (0.42.2): the price from /amm/defaults (none: refused, nothing built); a BRC-29 payment to the exchange's key, noSend, exactly the price; ONE BEEF with the deploy and the payment, POSTed signed with the payment named; the row back; a refusal → ClientError refused with the code, the unsent payment aborted", async () => {
+    const KEY = PrivateKey.fromRandom();
+    const deployTx = new Transaction(1, [{ sourceTXID: "aa".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff }], [{ lockingScript: new P2PKH().lock(KEY.toPublicKey().toAddress()), satoshis: 1 }], 0);
+    const deployBeef = deployTx.toAtomicBEEF();
+    const created: CreateActionArgs[] = [];
+    const aborted: unknown[] = [];
+    let payTx: Transaction | undefined;
+    const wallet = {
+      ...fakeWallet(),
+      getPublicKey: async (a: { identityKey?: boolean }) => ({ publicKey: KEY.toPublicKey().toString() }),
+      createHmac: async () => ({ hmac: Array.from({ length: 32 }, (_, i) => i) }),
+      createAction: async (a: CreateActionArgs) => {
+        created.push(a);
+        payTx = new Transaction(1, [{ sourceTXID: "bb".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff }], [{ lockingScript: LockingScript.fromHex(a.outputs![0]!.lockingScript), satoshis: a.outputs![0]!.satoshis }], 0);
+        return { txid: payTx.id("hex"), tx: payTx.toAtomicBEEF() };
+      },
+      abortAction: async (a: unknown) => (aborted.push(a), { aborted: true }),
+    } as unknown as WalletInterface;
+    setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
+    inst.defaults = { enablePriceSats: null };
+    const id = `${deployTx.id("hex")}_0`;
+    await expect(exchangeClient().enableTokenPaid(id, { deployBeef })).rejects.toMatchObject({ kind: "refused", message: "paid enable is off" });
+    expect(created).toHaveLength(0);
+    inst.defaults = { enablePriceSats: 2000 };
+    const row = { tokenId: id, status: "enabled", paidBy: KEY.toPublicKey().toString(), satoshisPaid: 2000 };
+    inst.enableAnswer = { status: 200, body: { fn: "enable", result: row } };
+    expect(await exchangeClient().enableTokenPaid(id, { deployBeef })).toEqual(row);
+    const c = created[0]!;
+    expect(c.options).toEqual({ randomizeOutputs: false, noSend: true });
+    expect(c.outputs).toHaveLength(1);
+    expect(c.outputs![0]!.satoshis).toBe(2000);
+    expect(c.outputs![0]!.lockingScript).toBe(new P2PKH().lock(KEY.toPublicKey().toAddress()).toHex());
+    const sent = inst.enables[0]!;
+    const q = new URL(sent.url).searchParams;
+    expect(q.get("tokenId")).toBe(id);
+    expect(q.get("paymentTxid")).toBe(payTx!.id("hex"));
+    expect(q.get("paymentVout")).toBe("0");
+    expect(q.get("derivationPrefix")).toBeTruthy();
+    expect(q.get("derivationSuffix")).toBeTruthy();
+    const ci = JSON.parse(c.outputs![0]!.customInstructions!) as { derivationPrefix: string; derivationSuffix: string; payee: string };
+    expect([q.get("derivationPrefix"), q.get("derivationSuffix"), ci.payee]).toEqual([ci.derivationPrefix, ci.derivationSuffix, SKEIN]);
+    const b = Beef.fromBinary(sent.body);
+    expect(!!b.findTxid(deployTx.id("hex")) && !!b.findTxid(payTx!.id("hex"))).toBe(true);
+    expect(aborted).toHaveLength(0);
+    // A refusal: the code in the message, kind refused; the unsent payment aborted (its coins free again).
+    inst.enableAnswer = { status: 409, body: { status: "error", code: "ERR_TOKEN_ENABLED", description: "enabled already" } };
+    await expect(exchangeClient().enableTokenPaid(id, { deployBeef })).rejects.toMatchObject({ kind: "refused", message: "ERR_TOKEN_ENABLED: enabled already" });
+    expect(aborted).toEqual([{ reference: payTx!.id("hex") }]);
   });
 
   it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {
