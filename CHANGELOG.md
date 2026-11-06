@@ -4,6 +4,16 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.41.1 (2026-11-05)
+
+- The validator's `pool_spent` refusal whose newest state is CLOSED (`{closed: true, outpoint,
+  closedBy}`: the LP's Close ended the lineage) carries `beef` too: the BEEF of the transaction
+  that ended it, with its ancestry back to proven ones (`state.beefFor`). The relaying host admits
+  it like the other two answers, so its pools list no longer shows that pool when the page reads
+  it next (David Case: the validator's answer always carries the new state in full). Nothing else
+  changes; no client change.
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.41.1 (no code change).
+
 ## 0.41.0 (2026-11-05)
 
 Pool events, and the validator's answer carries the transaction (agent-env
