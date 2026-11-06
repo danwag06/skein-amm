@@ -18,8 +18,8 @@
  * The price to enable a token (0.42.0, open-exchange 0.15.0): one field, root's `price {sats}`
  * (empty: off, only the admin enables); any signed sender may then enable a token on
  * `POST /amm/enable` for it. The exchange's wallet: the sats it holds (`GET <swap>/wallet`), one
- * Withdraw (everything to a key of the admin's own; disabled at 0 sats), and each proven withdrawal
- * taken in on load (`settleWithdrawals`).
+ * Withdraw (everything, a payment to the admin's wallet, taken in at once; disabled at 0 sats), and
+ * the latest withdrawal taken in again on load (`settleWithdrawals`).
  */
 import { useEffect, useState } from "react";
 import { shortTokenId } from "../lib/tokenId";
@@ -476,7 +476,7 @@ export function exchangeWalletText(w: ExchangeWallet): string {
 }
 
 /** What the Withdraw button says once sent (0.42.0). */
-export const WITHDRAW_SENT_TEXT = "Withdraw sent. The sats reach your wallet once the transaction is mined.";
+export const WITHDRAW_SENT_TEXT = (sats: number) => `Withdrawn: ${sats} sats are in your wallet.`;
 
 /** The exchange's wallet (0.42.0, root only): what the paid enables paid into it, and one Withdraw. */
 function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
@@ -505,8 +505,8 @@ function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
           onClick={() => {
             setDone(null);
             run(async () => {
-              await withdrawAll();
-              setDone(WITHDRAW_SENT_TEXT);
+              const x = await withdrawAll();
+              setDone(WITHDRAW_SENT_TEXT(x.sats));
               wallet.reload();
             });
           }}

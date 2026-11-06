@@ -8,7 +8,7 @@
  * and the request counts per page are measured here ("requests per page").
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Beef, Hash, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
+import { Beef, LockingScript, P2PKH, PrivateKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { ColorPlan } from "@bsv/color-permission-module";
 import { sdk as toolboxSdk } from "@bsv/wallet-toolbox-client";
 const { specOpWalletBalance } = toolboxSdk;
@@ -621,31 +621,31 @@ describe("exchange.ts, wired", () => {
     expect(inst.requests.at(-1)).toBe("GET /amm/wallet");
   });
 
-  it("withdrawAll (0.42.0): the admin's {fn: withdraw, args: {lockingScript}} — the P2PKH of the BRC-29 key for self of withdrawal n (the read's count + 1); nothing to withdraw refused before sending; settleWithdrawals takes in each withdrawal the wallet lacks as a wallet payment from /amm/wallet/tx", async () => {
-    // A wallet whose keys are points (the derived key's P2PKH is built).
-    const KEY = PrivateKey.fromRandom().toPublicKey().toString();
-    setExchangeContext({ wallet: { ...fakeWallet(), getPublicKey: async () => ({ publicKey: KEY }) } as unknown as WalletInterface, signedFor: () => af as never, identityKey: ME });
+  it("withdrawAll (0.42.1): the admin's {fn: withdraw} (no args); the withdrawal the read then lists taken in at once — internalizeAction, its output as a wallet payment with the record's derivation and sender, no label; nothing to withdraw refused before sending; settleWithdrawals takes the latest in again", async () => {
+    connect();
     inst.wallet = { sats: 0, outputs: 0, withdrawals: [] };
     await expect(withdrawAll()).rejects.toThrow(/nothing to withdraw/);
     expect(inst.sent).toHaveLength(0);
+    const w1 = { n: 1, txid: "ab".repeat(32), sats: 1977, at: 5, outputIndex: 0, derivationPrefix: "cHJl", derivationSuffix: "c3Vm", senderIdentityKey: SKEIN };
     inst.wallet = { sats: 2000, outputs: 1, withdrawals: [] };
-    expect(await withdrawAll()).toBe(1);
+    // The exchange answers the message: the next read lists the withdrawal.
+    const sent0 = inst.sent.length;
+    const was = inst.wallet;
+    Object.defineProperty(inst, "wallet", { configurable: true, get: () => (inst.sent.length > sent0 ? { sats: 0, outputs: 0, withdrawals: [w1] } : was), set: () => {} });
+    const n0 = internalized.length;
+    expect(await withdrawAll()).toEqual(w1);
     const m = inst.sent[0]!.body.message as { messageBox: string; body: Uint8Array };
     expect(m.messageBox).toBe("amm/admin");
-    expect(decode(m.body)).toEqual({ fn: "withdraw", args: { lockingScript: new P2PKH().lock(PublicKey.fromString(KEY).toAddress()).toHex() } });
-    // Withdrawal 1 kept: taken in once, as a wallet payment to its derived key.
-    inst.wallet = { sats: 0, outputs: 0, withdrawals: [{ n: 1, txid: "ab".repeat(32), sats: 1977, at: 5 }] };
-    const n0 = internalized.length;
-    expect(await settleWithdrawals()).toEqual(["ab".repeat(32)]);
-    const ia = internalized.at(-1) as { tx: number[]; outputs: Array<{ outputIndex: number; protocol: string; paymentRemittance: Record<string, string> }>; labels: string[] };
+    expect(decode(m.body)).toEqual({ fn: "withdraw" });
     expect(internalized.length).toBe(n0 + 1);
+    const ia = internalized.at(-1) as { tx: number[]; outputs: unknown[]; labels?: string[]; description: string };
     expect(ia.tx).toEqual([1, 1, 1, 1, 9]);
-    expect(ia.labels).toEqual(["amm-withdraw"]);
-    expect(ia.outputs).toEqual([{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: {
-      derivationPrefix: Utils.toBase64(Utils.toArray("amm withdraw", "utf8")),
-      derivationSuffix: Utils.toBase64(Hash.sha256(Utils.toArray(`${SKEIN} 1`, "utf8"))),
-      senderIdentityKey: KEY,
-    } }]);
+    expect(ia.labels).toBeUndefined();
+    expect(ia.outputs).toEqual([{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: "cHJl", derivationSuffix: "c3Vm", senderIdentityKey: SKEIN } }]);
+    expect(await settleWithdrawals()).toEqual([w1.txid]);
+    expect(internalized.length).toBe(n0 + 2);
+    delete (inst as { wallet?: unknown }).wallet;
+    inst.wallet = { sats: 0, outputs: 0, withdrawals: [] };
   });
 
   it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {

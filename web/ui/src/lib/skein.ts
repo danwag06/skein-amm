@@ -169,7 +169,7 @@ export interface ExchangeWallet {
   sats: number;
   outputs: number;
   /** The admin's withdrawals, each kept by the swap app once proven; n counts from 1. */
-  withdrawals: { n: number; txid: string; sats: number; at: number }[];
+  withdrawals: { n: number; txid: string; sats: number; at: number; outputIndex: number; derivationPrefix: string; derivationSuffix: string; senderIdentityKey: string }[];
 }
 
 /** `GET <swap>/wallet`: `{sats, outputs, withdrawals}`. */
@@ -179,7 +179,10 @@ export async function readWallet(base: string, fetchFn: typeof fetch = fetch): P
   return {
     sats: typeof a?.sats === "number" ? a.sats : 0,
     outputs: typeof a?.outputs === "number" ? a.outputs : 0,
-    withdrawals: ws.filter((w) => typeof w.n === "number" && typeof w.txid === "string").map((w) => ({ n: w.n as number, txid: w.txid as string, sats: Number(w.sats ?? 0), at: Number(w.at ?? 0) })),
+    withdrawals: ws.filter((w) => typeof w.n === "number" && typeof w.txid === "string").map((w) => ({
+      n: w.n as number, txid: w.txid as string, sats: Number(w.sats ?? 0), at: Number(w.at ?? 0), outputIndex: Number(w.outputIndex ?? 0),
+      derivationPrefix: String(w.derivationPrefix ?? ""), derivationSuffix: String(w.derivationSuffix ?? ""), senderIdentityKey: String(w.senderIdentityKey ?? ""),
+    })),
   };
 }
 
