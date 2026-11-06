@@ -4,6 +4,20 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.42.2 (2026-11-06)
+
+The paid enable as a BEEF submission (open-exchange 0.15.3; David Case: the payment's BEEF in the `X-BSV-Payment`
+header is dropped at ~10–16 KB; "this would not be a payment filter, but a beef submission… an API, both sides").
+Client only; no page, the programs unchanged.
+
+- `enableTokenPaid(tokenId, {deployBeef?})`: the price from `GET <swap>/defaults`; a BRC-29 payment to the exchange
+  built the ts-stack way (createNonce prefix and suffix, the key for the exchange, one P2PKH output of the price,
+  `noSend` — not sent: the exchange's take-in sends it); ONE BEEF with the deploy (given, else discovery's) and the
+  payment; `POST <swap>/enable?tokenId=&paymentTxid=&paymentVout=&derivationPrefix=&derivationSuffix=` signed; the
+  enabled row back. Any refusal or failure aborts the unsent payment (`abortAction`). Refusals: `ClientError` kind
+  `refused`, the exchange's code first in the message. (`enableToken` stays the admin's Settings enable.)
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.42.2 (the client on the engine 0.42.2).
+
 ## 0.42.1 (2026-11-06)
 
 The admin's withdraw is a standard BRC-29 payment (open-exchange 0.15.2; David Case: "The host should not
