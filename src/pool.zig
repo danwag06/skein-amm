@@ -477,18 +477,23 @@ pub fn check(j: bsv21.Judgement) ?Violation {
 
 /// A swap's call to the pool, as Rúnar lays it out (amm-validator unlock.zig):
 /// `_codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-/// commissionPkh, _changePKH, _changeAmount, txPreimage, methodIndex`:
-/// pushes only. (Moved from amm-p2p's relay.zig in 0.32.0: the relay's pair check and
+/// commissionPkh, tokenChangePkh, tokenChange, _changePKH, _changeAmount,
+/// txPreimage, methodIndex`: pushes only (0.40.0: the token change's two args). (Moved from amm-p2p's relay.zig in 0.32.0: the relay's pair check and
 /// amm-lookup's LP fee totals read a swap with this one parser.)
 pub const SwapCall = struct {
     amount_in: u64,
     bsv_in: bool,
     user_pkh: []const u8,
     commission_pkh: []const u8,
+    /// The taker's token change (0.40.0): `token_change` tokens to `token_change_pkh`, an output
+    /// after the fees exactly when nonzero.
+    token_change_pkh: []const u8,
+    token_change: u64,
+    /// Rúnar's sats change amount (`_changeAmount`; its output is the last when nonzero).
     change: u64,
 };
 
-pub const swap_pushes = 1 + 6 + 4;
+pub const swap_pushes = 1 + 8 + 4;
 
 /// A script number push (minimal or not), non-negative, as a u64.
 fn numOf(p: brc162.Push) ?u64 {
@@ -529,15 +534,18 @@ pub fn parseSwapCall(a: std.mem.Allocator, script: []const u8) !?SwapCall {
         .bsv_in = boolOf(arg[3]) orelse return null,
         .user_pkh = arg[4].data,
         .commission_pkh = arg[5].data,
-        .change = numOf(arg[7]) orelse return null,
+        .token_change_pkh = arg[6].data,
+        .token_change = numOf(arg[7]) orelse return null,
+        .change = numOf(arg[9]) orelse return null,
     };
 }
 
 /// Where a Swap writes its fees (pool/Pool.runar.go Swap): output 0 the continuation, output 1
 /// the payout, then the LP's fee output when `lp_fee > 0`, then the validator's when
 /// `validator_fee > 0`, then the commission when `commission > 0`; each `feeOf(amountIn, bps)`
-/// of the continuation's rate, in the input asset. `end` is the index after the fee outputs
-/// (the change, if any, is there).
+/// of the continuation's rate, in the input asset; then (0.40.0) the taker's token change when the
+/// call's `token_change > 0` (`token_change_at`). `end` is the index after those (Rúnar's sats
+/// change, if any, is there).
 pub const FeeLayout = struct {
     lp_fee: u64,
     validator_fee: u64,
@@ -545,6 +553,7 @@ pub const FeeLayout = struct {
     lp_at: ?usize,
     validator_at: ?usize,
     commission_at: ?usize,
+    token_change_at: ?usize,
     end: usize,
 };
 
@@ -555,7 +564,7 @@ pub fn feeLayout(call: SwapCall, cont: Pool) error{ LpFeeBps, ValidatorFeeBps, C
     const val_fee = feeOf(call.amount_in, cont.validator_fee_bps) orelse return error.ValidatorFeeBps;
     const com = feeOf(call.amount_in, cont.commission_bps) orelse return error.CommissionBps;
     var at: usize = 2;
-    var l: FeeLayout = .{ .lp_fee = lp_fee, .validator_fee = val_fee, .commission = com, .lp_at = null, .validator_at = null, .commission_at = null, .end = 0 };
+    var l: FeeLayout = .{ .lp_fee = lp_fee, .validator_fee = val_fee, .commission = com, .lp_at = null, .validator_at = null, .commission_at = null, .token_change_at = null, .end = 0 };
     if (lp_fee > 0) {
         l.lp_at = at;
         at += 1;
@@ -566,6 +575,10 @@ pub fn feeLayout(call: SwapCall, cont: Pool) error{ LpFeeBps, ValidatorFeeBps, C
     }
     if (com > 0) {
         l.commission_at = at;
+        at += 1;
+    }
+    if (call.token_change > 0) {
+        l.token_change_at = at;
         at += 1;
     }
     l.end = at;

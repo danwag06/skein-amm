@@ -428,8 +428,8 @@ fn buildPairWith(a: Allocator, o: PairOpts) !Pair {
     const lock = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.lock;
     const pre = try bsvz.transaction.sighash.formatPreimage(a, &s, 0, Script.init(lock[2..]), @intCast(pool_sats), 0x41);
     // The pool call, push by push (_codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-    // commissionPkh, _changePKH, _changeAmount, txPreimage, methodIndex): the slot empty, the commission's pkh,
-    // no change, the new preimage.
+    // commissionPkh, tokenChangePkh, tokenChange, _changePKH, _changeAmount, txPreimage, methodIndex): the slot
+    // empty, the commission's pkh, no token change (the fixture's), no change, the new preimage.
     const u = base.inputs[0].unlocking_script.bytes;
     var pos: usize = 0;
     var i: usize = 0;
@@ -440,8 +440,8 @@ fn buildPairWith(a: Allocator, o: PairOpts) !Pair {
         try script.appendSlice(a, switch (i) {
             1 => &.{0}, // validatorSig: the slot, empty
             6 => try pushData(a, &o.commission),
-            8 => &.{0}, // _changeAmount = 0
-            9 => try pushData(a, pre),
+            10 => &.{0}, // _changeAmount = 0
+            11 => try pushData(a, pre),
             else => raw,
         });
         pos = p.next;
@@ -497,8 +497,8 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
     {
         var s = try Transaction.parse(a, other.swap);
         const lock = color.brc162.decode(s.outputs[0].locking_script.bytes).?.lock;
-        // CommissionBps (template offset 716) sits at 717 in the lock (the pool test of the slot, test.zig), as OP_10.
-        const at = s.outputs[0].locking_script.bytes.len - lock.len + 717;
+        // CommissionBps (template offset 723) sits at 724 in the lock (the pool test of the slot, test.zig), as OP_10.
+        const at = s.outputs[0].locking_script.bytes.len - lock.len + 724;
         try testing.expectEqual(@as(u8, 0x5a), s.outputs[0].locking_script.bytes[at]);
         const outs = try a.dupe(bsvz.transaction.Output, s.outputs[0..4]);
         const zero = try a.dupe(u8, s.outputs[0].locking_script.bytes);
@@ -552,6 +552,39 @@ test "relay: a pair from the fixtures (the funding transaction pays the swap's i
         elsewhere[4].locking_script = Script.init(try p2pkhScript(a, &(.{0x22} ** 20)));
         s.outputs = elsewhere;
         try expectRefusal(try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+    }
+    // The token change (0.40.0): named in the call (push 8, OP_5) with no output for it; then
+    // with its output (after the commission) it passes; a tokenChangePkh not 20 bytes (push 7).
+    {
+        const S = struct {
+            fn withPush(al: Allocator, swap: []const u8, idx: usize, raw: []const u8) ![]const u8 {
+                var t = try Transaction.parse(al, swap);
+                const u = t.inputs[0].unlocking_script.bytes;
+                var out: std.ArrayList(u8) = .empty;
+                var pos: usize = 0;
+                var i: usize = 0;
+                while (pos < u.len) : (i += 1) {
+                    const q = color.brc162.readPush(u, pos).?;
+                    try out.appendSlice(al, if (i == idx) raw else u[pos..q.next]);
+                    pos = q.next;
+                }
+                const ins = try al.dupe(bsvz.transaction.Input, t.inputs);
+                ins[0].unlocking_script = Script.init(out.items);
+                t.inputs = ins;
+                return t.serialize(al);
+            }
+        };
+        const named = try S.withPush(a, p.swap, 8, &.{0x55});
+        try expectRefusal(try relay.checkPair(a, p.funding, named, p.pool, &p.validator, t_expires, t_now, ours), "bad_outputs");
+        var s = try Transaction.parse(a, named);
+        const pd = try Transaction.parse(a, unhex(a, vec.pool_deploy));
+        const asset = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.id.?.txid;
+        const ch = (try relay.parseSwapCall(a, s.inputs[0].unlocking_script.bytes)).?;
+        s.outputs = try std.mem.concat(a, bsvz.transaction.Output, &.{ s.outputs, &.{.{ .satoshis = 1, .locking_script = Script.init(try pool_lib.payoutScript(a, asset, 5, ch.token_change_pkh[0..20].*, false)) }} });
+        const with = try relay.checkPair(a, p.funding, try s.serialize(a), p.pool, &p.validator, t_expires, t_now, ours);
+        try testing.expect(with == .ok);
+        try testing.expectEqual(@as(u64, 5), with.ok.call.token_change);
+        try expectRefusal(try relay.checkPair(a, p.funding, try S.withPush(a, p.swap, 7, &([_]u8{19} ++ [_]u8{0x55} ** 19)), p.pool, &p.validator, t_expires, t_now, ours), "bad_call");
     }
     // Not a swap: the Rescind fixture's pool input (0.13.0: the validator's, funded by fund:6).
     try expectRefusal(try relay.checkPair(a, unhex(a, vec.fund), unhex(a, vec.rescind), try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(unhex(a, vec.swap_tokens_in)))}), &p.validator, t_expires, t_now, .{}), "not_a_swap");

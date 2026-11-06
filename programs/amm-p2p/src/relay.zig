@@ -319,6 +319,7 @@ pub fn checkPair(a: Allocator, funding_bytes: []const u8, swap_bytes: []const u8
     if (call.amount_in == 0) return refused("bad_call", "amountIn");
     if (call.user_pkh.len != 20) return refused("bad_call", "userPkh");
     if (call.commission_pkh.len != 20) return refused("bad_call", "commissionPkh");
+    if (call.token_change_pkh.len != 20) return refused("bad_call", "tokenChangePkh");
 
     // The outputs, as the contract writes them.
     if (swap.outputs.len < 2) return refused("bad_outputs", "no continuation and payout");
@@ -341,6 +342,8 @@ pub fn checkPair(a: Allocator, funding_bytes: []const u8, swap_bytes: []const u8
         const want = try pool.payoutScript(a, cont.asset_id, com, call.commission_pkh[0..20].*, call.bsv_in);
         if (o.satoshis != pool.payoutSats(com, call.bsv_in) or !eql(u8, o.locking_script.bytes, want)) return refused("bad_outputs", "the commission: not the contract's");
     } else if (fl.end > swap.outputs.len) return refused("bad_outputs", "the fee outputs");
+    // The token change (0.40.0): an output after the fees exactly when the call names one.
+    if (fl.token_change_at) |at| if (at >= swap.outputs.len) return refused("bad_outputs", "the token change: no output");
     if (swap.outputs.len > fl.end + @intFromBool(call.change > 0)) return refused("bad_outputs", "outputs past the contract's");
 
     // Our commission: the swap pays it to us (none when the pool charges none).

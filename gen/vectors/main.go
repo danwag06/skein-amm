@@ -3,8 +3,9 @@
 //	src/fixtures/pool_artifact.zig  the compiled Pool template (code with its
 //	                                constructor-arg placeholders) and the slots
 //	src/fixtures/vectors.zig        a token deploy, a pool deploy (affirmed; an
-//	                                unaffirmed, a forged and an own-key one), two
-//	                                swaps (and one naming a wrong next key), the
+//	                                unaffirmed, a forged and an own-key one), three
+//	                                swaps (one with token change, 0.40.0; and one
+//	                                naming a wrong next key), the
 //	                                LP's Close and the validator's Rescind, built like
 //	                                pool/pool_test.go and each pool spend run
 //	                                through the go-sdk interpreter; and legacy
@@ -434,7 +435,7 @@ func main() {
 	}
 	swap1 := build(swap1Ins, swapOuts(p1))
 	g.unlockPool(swap1, methodSwap, [][]byte{nil, pushData(p1.validator.PubKey().Compressed()), pushNum(amountIn), pushBool(true), pushData(taker.PubKey().Hash()),
-		pushData(relay.PubKey().Hash())}, []*ec.PrivateKey{p0.validator}, []int{0}, taker, change1)
+		pushData(relay.PubKey().Hash()), pushData(taker.PubKey().Hash()), pushNum(0)}, []*ec.PrivateKey{p0.validator}, []int{0}, taker, change1)
 	signP2pkh(swap1, swap1Ins)
 	// The same swap (a competing spend) naming a next key that is not the convention's (the
 	// contract takes any; the lookup does not list the continuation, 0.13.0).
@@ -442,7 +443,7 @@ func main() {
 	pBad.validator = key(0x64)
 	swapBadNext := build(swap1Ins, swapOuts(pBad))
 	g.unlockPool(swapBadNext, methodSwap, [][]byte{nil, pushData(pBad.validator.PubKey().Compressed()), pushNum(amountIn), pushBool(true), pushData(taker.PubKey().Hash()),
-		pushData(relay.PubKey().Hash())}, []*ec.PrivateKey{p0.validator}, []int{0}, taker, change1)
+		pushData(relay.PubKey().Hash()), pushData(taker.PubKey().Hash()), pushNum(0)}, []*ec.PrivateKey{p0.validator}, []int{0}, taker, change1)
 	signP2pkh(swapBadNext, swap1Ins)
 
 	// Swap 2: the taker's 50,000 tokens in for sats.
@@ -462,8 +463,31 @@ func main() {
 		{change2, p2pkhScript(taker)},
 	})
 	g.unlockPool(swap2, methodSwap, [][]byte{nil, pushData(p2.validator.PubKey().Compressed()), pushNum(amountIn2), pushBool(false), pushData(taker.PubKey().Hash()),
-		pushData(relay.PubKey().Hash())}, []*ec.PrivateKey{p1.validator}, []int{0}, taker, change2)
+		pushData(relay.PubKey().Hash()), pushData(taker.PubKey().Hash()), pushNum(0)}, []*ec.PrivateKey{p1.validator}, []int{0}, taker, change2)
 	signP2pkh(swap2, swap2Ins)
+
+	// The same tokens-in swap from swap1's pool (a competing spend of swap2) with token change
+	// (0.40.0): the taker's 50,000-token input, 40,000 in, 10,000 back to the taker after the
+	// fees (output 5), then the sats change.
+	amountIn3 := int64(40_000)
+	tokenChange3 := int64(50_000) - amountIn3
+	lpFee3, valFee3, comm3 := ceilFee(amountIn3, lpFeeBps), ceilFee(amountIn3, validatorFeeBps), ceilFee(amountIn3, commissionBps)
+	net3 := amountIn3 - lpFee3 - valFee3 - comm3
+	bsvOut3 := net3 * p1.bsv / (p1.tokens + net3)
+	p3 := pool{bsv: p1.bsv - bsvOut3, tokens: p1.tokens + net3, lp: p1.lp, validator: validatorKey(swap1.TxID(), 0), affirmation: affirmation}
+	change3 := int64(100_000) + 1 - 4 - 500 // as swap2, one more 1-sat token output (the token change)
+	swap3 := build(swap2Ins, []out{
+		{p3.bsv, g.poolScript(p3)},
+		{bsvOut3, p2pkhScript(taker)},
+		{1, g.tokenP2pkh(lpFee3, p1.lp)},
+		{1, g.tokenP2pkh(valFee3, p1.validator)},
+		{1, g.tokenP2pkh(comm3, relay)},
+		{1, g.tokenP2pkh(tokenChange3, taker)},
+		{change3, p2pkhScript(taker)},
+	})
+	g.unlockPool(swap3, methodSwap, [][]byte{nil, pushData(p3.validator.PubKey().Compressed()), pushNum(amountIn3), pushBool(false), pushData(taker.PubKey().Hash()),
+		pushData(relay.PubKey().Hash()), pushData(taker.PubKey().Hash()), pushNum(tokenChange3)}, []*ec.PrivateKey{p1.validator}, []int{0}, taker, change3)
+	signP2pkh(swap3, swap2Ins)
 
 	// The LP's Close (0.13.0): the LP key's signature, the outputs the LP's wallet chose — the
 	// sats less the fee to one key of the LP's (lpNext: as the pages pay a BRC-29 key), every
@@ -501,7 +525,7 @@ func main() {
 	named := []named{
 		{"fund", fund}, {"token_deploy", deploy}, {"pool_deploy", poolDeploy},
 		{"pool_deploy_unaffirmed", unaffirmed}, {"pool_deploy_forged", forged}, {"pool_deploy_own_key", ownKey},
-		{"swap_bsv_in", swap1}, {"swap_bad_next", swapBadNext}, {"swap_tokens_in", swap2}, {"close", closeTx},
+		{"swap_bsv_in", swap1}, {"swap_bad_next", swapBadNext}, {"swap_tokens_in", swap2}, {"swap_token_change", swap3}, {"close", closeTx},
 		{"rescind", rescind}, {"close_rescinded", closeRescinded},
 	}
 	var b strings.Builder
@@ -509,7 +533,8 @@ func main() {
 	b.WriteString("//! A token deploy; a pool deploy whose pool state carries the validator's nonce and\n")
 	b.WriteString("//! affirmation (0.13.0), and three that must not list (unaffirmed: no affirmation; forged:\n")
 	b.WriteString("//! another key signed it; own_key: the LP's own key signed and is the ValidatorPubKey);\n")
-	b.WriteString("//! a sats-in swap, the same swap naming a wrong next key (swap_bad_next), a tokens-in swap;\n")
+	b.WriteString("//! a sats-in swap, the same swap naming a wrong next key (swap_bad_next), a tokens-in swap,\n")
+	b.WriteString("//! the tokens-in swap's competitor with 10,000 tokens of token change (swap_token_change, 0.40.0);\n")
 	b.WriteString("//! the LP's Close (outputs of its choosing); the validator's Rescind (its own funding) and\n")
 	b.WriteString("//! the LP's Close of the rescinded pool. Each pool spend checked by the go-sdk interpreter.\n")
 	b.WriteString("//! Then legacy BRC-161 token transactions (`legacy_*`, gen/main.go's legacyVectors).\n\n")
@@ -529,6 +554,8 @@ func main() {
 		fmt.Fprintf(&b, "pub const %s = .{ .bsv = %d, .tokens = %d, .validator = \"%s\" };\n", p.name, p.p.bsv, p.p.tokens, hex.EncodeToString(p.p.validator.PubKey().Compressed()))
 	}
 	fmt.Fprintf(&b, "pub const swap_bsv_in_tokens_out = %d;\n", tokOut)
+	fmt.Fprintf(&b, "pub const pool3 = .{ .bsv = %d, .tokens = %d, .validator = \"%s\" };\n", p3.bsv, p3.tokens, hex.EncodeToString(p3.validator.PubKey().Compressed()))
+	fmt.Fprintf(&b, "pub const swap_token_change_amount_in = %d;\npub const swap_token_change_tokens = %d;\n", amountIn3, tokenChange3)
 	must(os.WriteFile(filepath.Join(*outDir, "vectors.zig"), []byte(b.String()), 0o644))
 
 	// The pages' copy (web/ui test/fixtures/amm-topic-vectors.json).
@@ -548,6 +575,8 @@ func main() {
 		v[p.name] = map[string]any{"bsv": p.p.bsv, "tokens": p.p.tokens, "validator": hex.EncodeToString(p.p.validator.PubKey().Compressed())}
 	}
 	v["swapBsvInTokensOut"] = tokOut
+	v["pool3"] = map[string]any{"bsv": p3.bsv, "tokens": p3.tokens, "validator": hex.EncodeToString(p3.validator.PubKey().Compressed())}
+	v["swapTokenChangeAmountIn"], v["swapTokenChangeTokens"] = amountIn3, tokenChange3
 	vj, err := json.MarshalIndent(v, "", "  ")
 	must(err)
 	must(os.WriteFile(filepath.Join(*webDir, "test/fixtures/amm-topic-vectors.json"), append(vj, '\n'), 0o644))

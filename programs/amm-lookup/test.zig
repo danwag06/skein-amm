@@ -346,11 +346,11 @@ test "admitted: a pool's CommissionBps is answered as commissionBps (0: a pool w
     var ch = try e.chain(a);
 
     // The deploy with CommissionBps OP_10 rewritten to OP_0. The lock's
-    // commission slot (template offset 716) sits one byte later, after
+    // commission slot (template offset 723) sits one byte later, after
     // lpFeeBps' two-byte push (the pool test of the slot, test.zig).
     const pd = e.f.tx("pool_deploy");
     const script = try a.dupe(u8, pd.outputs[0].locking_script.bytes);
-    const at = script.len - pool.brc162.decode(script).?.lock.len + 717;
+    const at = script.len - pool.brc162.decode(script).?.lock.len + 724;
     try testing.expectEqual(@as(u8, 0x5a), script[at]);
     script[at] = 0x00;
     // The affirmation signs the pool's fees, so a rewritten script is not affirmed: the pool is
@@ -719,13 +719,13 @@ test "answer: {validatorIdentityKey} returns only that validator's pools" {
 
 // ---------------------------------------------------------------- the fee rows (0.33.0)
 
-/// `swap_bsv_in` with no commission: its continuation's CommissionBps OP_0 (the lock's slot at 717,
+/// `swap_bsv_in` with no commission: its continuation's CommissionBps OP_0 (the lock's slot at 724,
 /// test.zig "CommissionBps is read under the canonical-number rule") and its commission output
 /// (output 4) gone. Same txid as given to the hooks.
 fn noCommission(a: Allocator, sw: bsvz.transaction.Transaction) !bsvz.transaction.Transaction {
     const script = try a.dupe(u8, sw.outputs[0].locking_script.bytes);
     const lock = pool.brc162.decode(script).?.lock;
-    const at = script.len - lock.len + 717;
+    const at = script.len - lock.len + 724;
     try testing.expectEqual(@as(u8, 0x5a), script[at]);
     script[at] = 0x00;
     var outs: std.ArrayList(bsvz.transaction.Output) = .empty;

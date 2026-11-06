@@ -227,7 +227,7 @@ const Fx = struct {
     cfg: validator.Config,
 
     fn raw(self: *Fx, name: []const u8) []const u8 {
-        inline for (.{ "fund", "token_deploy", "pool_deploy", "pool_deploy_unaffirmed", "pool_deploy_forged", "pool_deploy_own_key", "swap_bsv_in", "swap_bad_next", "swap_tokens_in", "close", "rescind", "close_rescinded" }) |n| {
+        inline for (.{ "fund", "token_deploy", "pool_deploy", "pool_deploy_unaffirmed", "pool_deploy_forged", "pool_deploy_own_key", "swap_bsv_in", "swap_bad_next", "swap_tokens_in", "swap_token_change", "close", "rescind", "close_rescinded" }) |n| {
             if (std.mem.eql(u8, n, name)) return unhex(self.a, @field(vec, n));
         }
         @panic("no fixture");
@@ -883,6 +883,54 @@ test "sign: a tokens-in swap (the key rotated once already)" {
     try testing.expectEqualSlices(u8, want, r.ok.tx.?);
 }
 
+test "sign (0.40.0): a tokens-in swap with token change — the change output after the fees, exactly the call's amount to the call's key, 1 sat; refused bad_outputs when it is not" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try Fx.init(a, &.{ "fund", "token_deploy", "pool_deploy", "swap_bsv_in" });
+    const want = f.raw("swap_token_change");
+    const op: Outpoint = .{ .txid = txidOf(f.raw("swap_bsv_in")), .vout = 0 };
+    const req = try request(a, want, 0);
+    const tx = try Transaction.parse(a, req);
+    // pool, payout, LP fee, validator fee, commission, the token change, the sats change
+    try testing.expectEqual(@as(usize, 7), tx.outputs.len);
+    const tc = brc162.decode(tx.outputs[5].locking_script.bytes).?;
+    try testing.expectEqual(@as(u64, vec.swap_token_change_tokens), tc.amount);
+    try testing.expectEqual(@as(i64, 1), tx.outputs[5].satoshis);
+    const call = (try unlock.parseCall(a, tx.inputs[0].unlocking_script.bytes, .swap)).?;
+    const args = validator.swapArgs(call).?;
+    try testing.expectEqual(@as(u64, vec.swap_token_change_tokens), args.token_change);
+    try testing.expectEqual(@as(u64, vec.swap_token_change_amount_in), args.amount_in);
+
+    try f.oracle.record(a, want, 0);
+    const r = try f.spend(.swap, req, op);
+    try testing.expect(r == .ok);
+    try testing.expectEqualSlices(u8, want, r.ok.tx.?);
+    f.oracle.calls = 0;
+
+    const S = struct {
+        fn expectBad(fx: *Fx, raw: []const u8, o: Outpoint, detail: []const u8) !void {
+            const rr = try fx.spend(.swap, raw, o);
+            try expectRefused(rr, .bad_outputs);
+            try testing.expect(std.mem.indexOf(u8, rr.refused.detail.?, detail) != null);
+        }
+    };
+    // The call names another amount (9,999) than output 5 holds.
+    try S.expectBad(f, try withPoolArg(a, req, 7, &.{ 0x0f, 0x27 }), op, "the token change");
+    // The call names another key than output 5 pays.
+    try S.expectBad(f, try withPoolArg(a, req, 6, &(.{0xc0} ** 20)), op, "the token change");
+    // The token change output with 2 sats.
+    var outs = try a.dupe(bsvz.transaction.Output, tx.outputs);
+    outs[5].satoshis = 2;
+    var t2 = tx;
+    t2.outputs = outs;
+    try S.expectBad(f, try t2.serialize(a), op, "the token change");
+    // The call names no token change (0) while output 5 is there: past the contract's (the sats change is not output 5).
+    const r0 = try f.spend(.swap, try withPoolArg(a, req, 7, &.{}), op);
+    try expectRefused(r0, .bad_outputs);
+    try testing.expectEqual(@as(usize, 0), f.oracle.calls);
+}
+
 test "sign: the current key (0.13.0): a deploy's keyed by its nonce (it attests itself), a Swap's continuation's by the pool outpoint the Swap spent; none for a pool that is neither, or rescinded" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1489,13 +1537,13 @@ fn relayPair(a: std.mem.Allocator, f: *Fx, funding_sig: FundingSig) !RelayPair {
     const pre = try unlock.preimage(a, &s, 0, unlock.poolScriptCode(lock).?, pool_sats, unlock.sighash_all_forkid);
     const call = (try unlock.parseCall(a, base.inputs[0].unlocking_script.bytes, .swap)).?;
     // _codePart, validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-    // commissionPkh, _changePKH, _changeAmount, txPreimage, methodIndex.
+    // commissionPkh, tokenChangePkh, tokenChange, _changePKH, _changeAmount, txPreimage, methodIndex.
     try testing.expectEqualSlices(u8, &key20(vec.commission_pkh), call.arg(5).data);
     var script: std.ArrayList(u8) = .empty;
     for (call.pushes, 0..) |p, i| try script.appendSlice(a, switch (i) {
         1 => &.{0}, // validatorSig: the slot, empty
-        8 => &.{0}, // _changeAmount = 0: no change output
-        9 => try unlock.pushData(a, pre),
+        10 => &.{0}, // _changeAmount = 0: no change output
+        11 => try unlock.pushData(a, pre),
         else => call.script[p.start..p.p.next],
     });
     ins[0].unlocking_script = bsvz.script.Script.init(script.items);

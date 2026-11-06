@@ -60,7 +60,10 @@ amm-validator know layout 2 only (below, "Not wired").
   32 bytes, so only a token deployed at output 0 has pools.
 - **Methods** (the contract; 0.13.0, David Case 2026-10-22, three):
   `Swap(validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-  commissionPkh)`, the validator's, unchanged; `Close(lpSig)`, the LP's
+  commissionPkh, tokenChangePkh, tokenChange)`, the validator's (0.40.0,
+  David Case 2026-11-05: `tokenChange ≥ 0`; when nonzero, one more output
+  after the commission and before Rúnar's sats change, 1 sat,
+  `tokenChange` tokens to `tokenChangePkh`; otherwise unchanged); `Close(lpSig)`, the LP's
   alone: a plain `OP_CHECKSIG` against the LP key, the **outputs free** (no
   output covenant: the LP spends the LP's own funds, its wallet decides
   where they go; the method writes no state and adds no output, so Rúnar

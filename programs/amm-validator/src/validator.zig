@@ -33,7 +33,8 @@
 //!      a Swap, the output set is the contract's (`swapOutputs`: the
 //!      continuation's reserves, the payout, the LP fee, the validator fee
 //!      and the commission to the call's commissionPkh, each in its asset
-//!      and only when nonzero, then at most Rúnar's change output, nothing
+//!      and only when nonzero, then the token change when the call names
+//!      one (0.40.0), then at most Rúnar's change output, nothing
 //!      else; for an AddLiquidity, `addLiquidityOutputs`: the continuation
 //!      with the reserves increased by addBsv/addTokens and LpPubKey the
 //!      call's nextLpPubKey, then at most Rúnar's change; reason `bad_outputs`);
@@ -570,13 +571,15 @@ fn completeParents(a: std.mem.Allocator, v: View, sub: Subject) !union(enum) { o
 }
 
 /// A Swap call's args (pool/Pool.runar.go `Swap`): amountIn, bsvIn,
-/// userPkh, commissionPkh, as Rúnar pushes them (minimal numbers, 20-byte
-/// addresses).
+/// userPkh, commissionPkh, tokenChangePkh, tokenChange (0.40.0), as Rúnar pushes them
+/// (minimal numbers, 20-byte addresses), and Rúnar's sats change.
 pub const SwapArgs = struct {
     amount_in: u64,
     bsv_in: bool,
     user_pkh: [20]u8,
     commission_pkh: [20]u8,
+    token_change_pkh: [20]u8,
+    token_change: u64,
     change_pkh: []const u8,
     change: u64,
 };
@@ -589,13 +592,16 @@ fn pkhArg(p: brc162.Push) ?[20]u8 {
 pub fn swapArgs(call: unlock.Call) ?SwapArgs {
     const amount = pool.canonicalNum(call.arg(2)) orelse return null;
     const bsv_in = pool.canonicalNum(call.arg(3)) orelse return null;
+    const token_change = pool.canonicalNum(call.arg(7)) orelse return null;
     const change = pool.canonicalNum(call.changeAmount()) orelse return null;
-    if (amount <= 0 or change < 0 or (bsv_in != 0 and bsv_in != 1)) return null;
+    if (amount <= 0 or token_change < 0 or change < 0 or (bsv_in != 0 and bsv_in != 1)) return null;
     return .{
         .amount_in = @intCast(amount),
         .bsv_in = bsv_in == 1,
         .user_pkh = pkhArg(call.arg(4)) orelse return null,
         .commission_pkh = pkhArg(call.arg(5)) orelse return null,
+        .token_change_pkh = pkhArg(call.arg(6)) orelse return null,
+        .token_change = @intCast(token_change),
         .change_pkh = call.changePkh(),
         .change = @intCast(change),
     };
@@ -606,11 +612,12 @@ pub fn swapArgs(call: unlock.Call) ?SwapArgs {
 /// userPkh in the other asset, then the LP fee (to the LpPubKey's hash), the
 /// validator fee (to the spent ValidatorPubKey's hash) and the commission
 /// (to commissionPkh), each in the input asset and only when nonzero, then
-/// Rúnar's change output (P2PKH to `_changePKH`) when `_changeAmount > 0`,
-/// and nothing else. The contract commits to the same set (hashOutputs);
+/// (0.40.0) the token change (1 sat, `tokenChange` tokens to tokenChangePkh)
+/// exactly when `tokenChange > 0`, then Rúnar's change output (P2PKH to
+/// `_changePKH`) when `_changeAmount > 0`, and nothing else. The contract commits to the same set (hashOutputs);
 /// this refuses before signing, with the reason. Null when it matches.
 pub fn swapOutputs(a: std.mem.Allocator, spent: pool.Pool, satoshis: u64, call: unlock.Call, outs: []const bsvz.transaction.Output) !?[]const u8 {
-    const args = swapArgs(call) orelse return "the Swap args (amountIn, bsvIn, userPkh, commissionPkh, change)";
+    const args = swapArgs(call) orelse return "the Swap args (amountIn, bsvIn, userPkh, commissionPkh, tokenChangePkh, tokenChange, change)";
     const q = pool.quoteSwap(spent, satoshis, args.amount_in, args.bsv_in) orelse return "the contract refuses this amountIn (fees, payout or reserves)";
     if (outs.len == 0) return "no continuation";
     const next = poolAt(outs[0].locking_script.bytes) orelse return "output 0 is not a pool";
@@ -624,6 +631,7 @@ pub fn swapOutputs(a: std.mem.Allocator, spent: pool.Pool, satoshis: u64, call: 
     if (q.lp_fee > 0) try wants.append(a, .{ .name = "the LP fee", .amount = q.lp_fee, .pkh = lp_pkh, .is_bsv = args.bsv_in });
     if (q.validator_fee > 0) try wants.append(a, .{ .name = "the validator fee", .amount = q.validator_fee, .pkh = val_pkh, .is_bsv = args.bsv_in });
     if (q.commission > 0) try wants.append(a, .{ .name = "the commission", .amount = q.commission, .pkh = args.commission_pkh, .is_bsv = args.bsv_in });
+    if (args.token_change > 0) try wants.append(a, .{ .name = "the token change", .amount = args.token_change, .pkh = args.token_change_pkh, .is_bsv = false });
     for (wants.items, 1..) |x, i| {
         if (i >= outs.len) return try std.fmt.allocPrint(a, "{s}: no output {d}", .{ x.name, i });
         const script = try pool.payoutScript(a, spent.asset_id, x.amount, x.pkh, x.is_bsv);

@@ -42,6 +42,7 @@ const Fixtures = struct {
         inline for (.{
             "fund",         "token_deploy",       "pool_deploy",        "swap_bsv_in",     "swap_tokens_in",  "close",
             "rescind",      "close_rescinded",    "pool_deploy_unaffirmed", "pool_deploy_forged", "pool_deploy_own_key", "swap_bad_next",
+            "swap_token_change",
             "legacy_fund",  "legacy_deploy0",     "legacy_deploy1",     "legacy_transfer", "legacy_migrate0", "legacy_migrate1",
             "legacy_mixed", "legacy_binary_json", "legacy_auth_deploy", "legacy_mint",     "legacy_unfunded",
         }) |name| {
@@ -257,7 +258,7 @@ test "pool: prefix disagreeing with state is admitted by the topic; pool.check f
         @memset(other[i..][0..32], 0x5a);
         at = i + 32;
     }
-    try testing.expectEqual(@as(usize, 6), n); // assetId's six slots (0.9.0: Swap and Close)
+    try testing.expectEqual(@as(usize, 7), n); // assetId's seven slots (0.40.0: one more, the token change)
     try testing.expectEqual(pool.Violation.prefix_mismatch, try admittedButFlagged(a, f.id, try withOutput(a, tx, 0, other), &.{0}));
 
     // Slots that disagree with each other: malformed.
@@ -368,7 +369,7 @@ test "pool (0.33.0): parseSwapCall, feeLayout and feesOf read the fixtures' swap
     try testing.expectEqual(@as(?usize, 2), l0.validator_at);
     // No commission: no commission output (the continuation's CommissionBps OP_0, output 4 gone); its fees read as 0.
     const script = try a.dupe(u8, sw1.outputs[0].locking_script.bytes);
-    script[script.len - brc162.decode(script).?.lock.len + 717] = 0x00;
+    script[script.len - brc162.decode(script).?.lock.len + 724] = 0x00;
     var outs3: std.ArrayList(bsvz.transaction.Output) = .empty;
     for (sw1.outputs, 0..) |o, i| if (i != 4) try outs3.append(a, o);
     outs3.items[0].locking_script = bsvz.script.Script.init(script);
@@ -379,17 +380,47 @@ test "pool (0.33.0): parseSwapCall, feeLayout and feesOf read the fixtures' swap
     try testing.expectEqual(@as(u64, 60), f0.lp);
 }
 
+test "pool (0.40.0): the token change — parseSwapCall reads its two args, feeLayout puts its output after the fees (and the sats change after it), none when the amount is 0" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try Fixtures.init(a);
+    const sw = f.txs.get(w.beef.txidOf(f.raws.get("swap_token_change").?)).?;
+    const call = (try pool.parseSwapCall(a, sw.inputs[0].unlocking_script.bytes)).?;
+    try testing.expectEqual(@as(u64, vec.swap_token_change_amount_in), call.amount_in);
+    try testing.expectEqual(@as(u64, vec.swap_token_change_tokens), call.token_change);
+    try testing.expectEqual(@as(usize, 20), call.token_change_pkh.len);
+    try testing.expect(call.change > 0);
+    const cont = pool.poolOfScript(sw.outputs[0].locking_script.bytes).?;
+    const l = try pool.feeLayout(call, cont);
+    try testing.expectEqual(@as(?usize, 4), l.commission_at);
+    try testing.expectEqual(@as(?usize, 5), l.token_change_at);
+    try testing.expectEqual(@as(usize, 6), l.end);
+    try testing.expectEqual(@as(usize, 7), sw.outputs.len); // the sats change at `end`
+    try testing.expectEqualSlices(u8, try pool.payoutScript(a, cont.asset_id, call.token_change, call.token_change_pkh[0..20].*, false), sw.outputs[5].locking_script.bytes);
+    // The fees read as before (the token change is not a fee).
+    const fees = (try pool.feesOf(a, sw, 0)).?;
+    try testing.expectEqual(@as(u64, 120), fees.lp);
+    // No token change: no output for it.
+    const sw2 = f.txs.get(w.beef.txidOf(f.raws.get("swap_tokens_in").?)).?;
+    const call2 = (try pool.parseSwapCall(a, sw2.inputs[0].unlocking_script.bytes)).?;
+    try testing.expectEqual(@as(u64, 0), call2.token_change);
+    const l2 = try pool.feeLayout(call2, pool.poolOfScript(sw2.outputs[0].locking_script.bytes).?);
+    try testing.expectEqual(@as(?usize, null), l2.token_change_at);
+    try testing.expectEqual(@as(usize, 5), l2.end);
+}
+
 test "pool: CommissionBps is read under the canonical-number rule" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const f = try Fixtures.init(a);
     const lock = brc162.decode((try f.tx(a, "pool_deploy")).outputs[0].script).?.lock;
-    // Slots 691 (lpFeeBps 30: `01 1e`, one byte longer than the placeholder)
-    // and 703 (validatorFeeBps 5: OP_5) come first (the codeSepIndex slot at
-    // 608 is OP_1, one byte), so CommissionBps (template offset 716) sits at
-    // 717 in the lock, as OP_10.
-    const at = 717;
+    // Slots 697 (lpFeeBps 30: `01 1e`, one byte longer than the placeholder)
+    // and 710 (validatorFeeBps 5: OP_5) come first (the codeSepIndex slot at
+    // 608 is OP_1, one byte), so CommissionBps (template offset 723) sits at
+    // 724 in the lock, as OP_10.
+    const at = 724;
     try testing.expectEqual(@as(u8, 0x5a), lock[at]);
 
     // OP_0: a pool with no commission.

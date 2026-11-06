@@ -38,11 +38,11 @@ pub const Layout = struct {
 };
 
 /// Swap(validatorSig, nextValidatorPubKey, amountIn, bsvIn, userPkh,
-/// commissionPkh); Rescind(validatorSig) (0.13.0). Close is the LP's alone: no
-/// layout (0.9.0).
+/// commissionPkh, tokenChangePkh, tokenChange) (0.40.0: the token change);
+/// Rescind(validatorSig) (0.13.0). Close is the LP's alone: no layout (0.9.0).
 pub fn layoutOf(m: pool.Method) ?Layout {
     return switch (m) {
-        .swap => .{ .args = 6, .validator_sig = 0, .next_validator = 1 },
+        .swap => .{ .args = 8, .validator_sig = 0, .next_validator = 1 },
         .rescind => .{ .args = 1, .validator_sig = 0, .next_validator = null },
         .close => null,
     };
