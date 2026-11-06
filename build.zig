@@ -16,8 +16,8 @@
 // `1color` module's parser and rules) and its generated fixtures (src/fixtures, gen/).
 //
 //   zig build              → zig-out/bin/{amm-lookup,amm-validator,amm-p2p,amm-setup}.wasm
-//   zig build bin          the four, written to bin/, with bin/overlay.wasm (skein-overlay v0.20.3)
-//                          and bin/color-{topic,lookup}.wasm (skein-1color v0.15.2) copied beside
+//   zig build bin          the four, written to bin/, with bin/overlay.wasm (skein-overlay v0.20.5)
+//                          and bin/color-{topic,lookup}.wasm (skein-1color v0.16.1) copied beside
 //   zig build test         the pool library and the programs' tests, natively
 //
 // The pages are built from the page library web/ui by shruggr/open-exchange (its scripts/www.sh), whose swap app serves them.

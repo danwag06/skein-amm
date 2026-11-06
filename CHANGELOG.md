@@ -4,6 +4,25 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.43.0 (2026-11-06)
+
+One swap in flight per pool (agent-env plans/pool-lock-build-2026-11-06.md D3, D4; on ovh two swaps on one NANNER
+pool were signed seconds apart, both submitted before the chain app held either, both held, neither applied).
+
+- amm-validator: when it signs a swap and submits it, the pool is LOCKED in that step (src/lock.zig, the head
+  `<app>/locks`: the pool output spent, the txid, the signing step's thread, the request's hash, a queue). A request
+  for a locked pool — any output of its lineage — is not refused and not signed: it waits on the holder's thread
+  (`{wait: true}`), in arrival order. The holder's step that takes its submission's answer releases the lock (a holder
+  whose thread rests without one, the local relay's deadline, holds nothing). Each waiter then runs the same check:
+  the first admitted → `pool_spent` with the new state (and its BEEF), as before; rejected → the first waiter is signed
+  and takes the lock. Per pool; the same request sent again is answered as before. The local relay and a remote
+  relay's frame wait the same way.
+- Client: `executeSwap` — a `pool_spent` refusal whose pool the server's fresh list still shows at the outpoint the
+  leg spent excludes that pool for the rest of the swap; a changed list reprices as before.
+- Pins: skein-overlay v0.20.5 (one held spender per coin at intake; a submission that applies nothing answered
+  `rejected`), skein-1color v0.16.1 (on it; 0.16.0's token list search).
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.43.0 (the client on the engine 0.43.0).
+
 ## 0.42.3 (2026-11-06)
 
 - `enableTokenPaid`'s payment is a PROTECTED noSend (BRC-177): `labels: ["p nosend expiry seconds 600"]`

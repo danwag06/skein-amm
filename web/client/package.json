@@ -1,6 +1,6 @@
 {
   "name": "@dcasegr/amm-client",
-  "version": "0.42.3",
+  "version": "0.43.0",
   "type": "module",
   "description": "The Open Exchange client (skein-amm): reads, swap, pool deploy / close / rebalance, move back and positions over a BRC-100 wallet, bound to one exchange by createClient. No React, no styles, no wallet provider.",
   "repository": {
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@1sat/actions": "0.1.3",
-    "@dcasegr/amm-engine": "0.42.3",
+    "@dcasegr/amm-engine": "0.43.0",
     "cbor2": "^2.3.0"
   },
   "peerDependencies": {
