@@ -1,6 +1,6 @@
 /**
- * LP pools and fees (skein-amm 0.34.0, D9): `readPositions` reads `GET /@<token>/amm/positions?lp=k1,k2`
- * once for every key of a token, one record per key (status live / rescinded / closed, the pool
+ * LP pools and fees (skein-amm 0.34.0, D9; 0.40.0: by pool id): `readPositions` reads `GET
+ * /@<token>/amm/positions?pool=id1,id2` once for every pool of a token, one record per pool (status live / rescinded / closed, the pool
  * state, the LP fees); `feesByToken` sums the positions, live and closed, per token (the Liquidity
  * page's line).
  */
@@ -27,23 +27,24 @@ function fakeRoute(result: unknown, status = 200): { fetchFn: (url: string) => P
 }
 
 describe("LP pools (0.34.0: the positions route)", () => {
-  it("readPositions: ONE GET /positions?lp=k1,k2,k3 for all the keys; a live record (outpoint, current), a rescinded one (the Rescind's output and its state), a closed or unknown one (no outpoint, no current)", async () => {
+  it("readPositions (0.40.0): ONE GET /positions?pool=id1,id2,id3 for all the pools; a live record (outpoint, current), a rescinded one (the Rescind's output and its state), a closed or unknown one (no outpoint, no current)", async () => {
     const { fetchFn, asked } = fakeRoute([
-      { lpPubKey: LP1, status: "live", outpoint: `${"ef".repeat(32)}_0`, current: wire(`${"ef".repeat(32)}_0`), sats: 60, tokens: 150, swaps: 2 },
-      { lpPubKey: LP2, status: "rescinded", outpoint: `${"cd".repeat(32)}_0`, current: wire(`${"cd".repeat(32)}_0`), sats: 7, tokens: 0, swaps: 1 },
-      { lpPubKey: LP3, status: "closed", sats: 0, tokens: 0, swaps: 0 },
+      { poolId: "aa_0", lpPubKey: LP1, status: "live", outpoint: `${"ef".repeat(32)}_0`, current: wire(`${"ef".repeat(32)}_0`), sats: 60, tokens: 150, swaps: 2 },
+      { poolId: "bb_0", lpPubKey: LP2, status: "rescinded", outpoint: `${"cd".repeat(32)}_0`, current: wire(`${"cd".repeat(32)}_0`), sats: 7, tokens: 0, swaps: 1 },
+      { poolId: "cc_0", lpPubKey: null, status: "closed", sats: 0, tokens: 0, swaps: 0 },
     ]);
-    const ps = await readPositions(BASE, [LP1, LP2, LP3], fetchFn as never);
-    expect(asked).toEqual([`${BASE}/positions?lp=${LP1},${LP2},${LP3}`]);
-    expect(ps[0]).toMatchObject({ lpPubKey: LP1, status: "live", outpoint: `${"ef".repeat(32)}_0`, sats: 60n, tokens: 150n, swaps: 2 });
+    const ps = await readPositions(BASE, ["aa_0", "bb_0", "cc_0"], fetchFn as never);
+    expect(asked).toEqual([`${BASE}/positions?pool=aa_0,bb_0,cc_0`]);
+    expect(ps[0]).toMatchObject({ poolId: "aa_0", lpPubKey: LP1, status: "live", outpoint: `${"ef".repeat(32)}_0`, sats: 60n, tokens: 150n, swaps: 2 });
     expect(ps[0]!.current?.bsvReserve).toBe(10n);
     expect(ps[1]).toMatchObject({ status: "rescinded", outpoint: `${"cd".repeat(32)}_0`, sats: 7n });
-    expect(ps[2]).toEqual({ lpPubKey: LP3, status: "closed", outpoint: null, current: null, sats: 0n, tokens: 0n, swaps: 0 });
+    expect(ps[2]).toEqual({ poolId: "cc_0", lpPubKey: null, status: "closed", outpoint: null, current: null, sats: 0n, tokens: 0n, swaps: 0 });
+    void LP3;
   });
 
-  it("readPositions: an answer that is not one record per key (a short list, another shape) is refused", async () => {
-    await expect(readPositions(BASE, [LP1], fakeRoute([]).fetchFn as never)).rejects.toThrow(/not one record per key/);
-    await expect(readPositions(BASE, [LP1], fakeRoute({ current: wire("x_0"), hops: 0 }).fetchFn as never)).rejects.toThrow(/not one record per key/);
+  it("readPositions: an answer that is not one record per pool (a short list, another shape) is refused", async () => {
+    await expect(readPositions(BASE, ["aa_0"], fakeRoute([]).fetchFn as never)).rejects.toThrow(/not one record per pool/);
+    await expect(readPositions(BASE, ["aa_0"], fakeRoute({ current: wire("x_0"), hops: 0 }).fetchFn as never)).rejects.toThrow(/not one record per pool/);
   });
 
   it("feesByToken: one line per token, its positions counted (closed ones too), the fees summed; fees not told count as 0", () => {

@@ -1309,7 +1309,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     // The rows by token, one per pool id (0.40.0: the deploy outpoint is the pool's id).
     const byToken = new Map<string, Map<string, PositionRow>>();
     for (const row of positionRowsOf(mergePoolRows(history, poolRows))) {
-      if (!enabled.has(row.tokenId)) continue;
+      if (!row.lpPubKey || !enabled.has(row.tokenId)) continue;
       const ids = byToken.get(row.tokenId) ?? new Map<string, PositionRow>();
       const poolId = row.deployOutpoint.replace(".", "_");
       if (!ids.has(poolId)) ids.set(poolId, row);

@@ -24,7 +24,7 @@ const { YourTokens, SendFormView, SendNoteLine, checkSendAmount, runSend, sendOu
 const TOKEN = `${"c1".repeat(32)}_0`;
 const TXID = "ab".repeat(32);
 const session = { status: "connected", identityKey: `03${"a1".repeat(32)}`, connect: () => {}, disconnect: () => {} } as never;
-const token = (balance: bigint, dec = 2): WalletToken => ({ tokenId: TOKEN, sym: "TST", dec, balance, outputs: 1, inSwaps: 0n, swapSats: 0, onExchange: true });
+const token = (balance: bigint, dec = 2): WalletToken => ({ tokenId: TOKEN, sym: "TST", dec, balance, outputs: 1, inSwaps: 0n, onExchange: true });
 function useWallet(network: "mainnet" | "testnet"): WalletInterface {
   const wallet = { getNetwork: async () => ({ network }) } as unknown as WalletInterface;
   setExchangeContext({ wallet, signedFor: () => ({}) as never });

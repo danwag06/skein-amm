@@ -9,17 +9,17 @@
  *     refused / timeout / an error answer to submit (nothing recorded):
  *       nothing to undo: the leg's `amm-swap` outputs stay there
  *     no answer (a network failure, the host's 503 past its bound, a `pending` record, the
- *       relay's transport `failed`): "no answer yet", left alone — the relay may still carry it;
- *       "Check again" reads the record ONCE (`GET <base>/swaps?id=`, plain) and acts on it.
+ *       relay's transport `failed`): "no answer yet", left alone — the relay may still carry it
+ *       (0.40.0: the swap's loop resolves it from the overlay, sends it once more, or races it;
+ *       src/client.ts `executeSwap`).
  *
  * The swap's id is the relay's (amm-p2p relay.zig `idOf`): sha256 of the swap as submitted (the
  * validator's slot empty), hex — known to the page, so a lost answer can be checked again.
  */
 import { Hash, Utils, type WalletInterface } from "@bsv/sdk";
 import type { PoolState } from "@dcasegr/amm-engine";
-import { RelayError, parseSwapRecord, submitSwap, type AuthFetchLike, type SwapRecord } from "./relay.js";
+import { RelayError, submitSwap, type AuthFetchLike, type SwapRecord } from "./relay.js";
 import { completeSwap, type CompletedSwap, type PreparedSwap } from "./swapAction.js";
-import { readSwap } from "../lib/overlay.js";
 
 export type SwapOutcome =
   | { status: "accepted"; id: string; txid: string; completed: CompletedSwap }
@@ -33,8 +33,6 @@ export interface RelayContext {
   authFetch: AuthFetchLike;
   /** The token instance's AMM base. */
   base: string;
-  /** The plain fetch "Check again" reads the record with (default: the browser's). */
-  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -83,21 +81,5 @@ async function act(c: RelayContext, p: PreparedSwap, r: SwapRecord): Promise<Swa
       return { status: "timeout", id: r.id };
     case "failed":
       return { status: "unknown", id: r.id, reason: `the relay could not reach the validator (${r.reason})` };
-  }
-}
-
-/** "Check again" for an unknown outcome: the record read ONCE, plain (`GET <base>/swaps?id=`, P10), and acted on. */
-export async function checkAgain(c: RelayContext, p: PreparedSwap, id: string): Promise<SwapOutcome> {
-  let raw: unknown;
-  try {
-    raw = await readSwap(c.base, id, c.fetch);
-  } catch (err) {
-    return { status: "unknown", id, reason: `${NO_ANSWER_YET}: ${errText(err)}` };
-  }
-  if (raw === null) return { status: "unknown", id, reason: `${NO_ANSWER_YET}: the relay has no record of it` };
-  try {
-    return await act(c, p, parseSwapRecord(raw));
-  } catch (err) {
-    return { status: "unknown", id, reason: errText(err) };
   }
 }

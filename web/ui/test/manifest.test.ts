@@ -56,6 +56,7 @@ describe("manifest.json", () => {
         for (const l of body.matchAll(/"([^"]+)"/g)) used.add(l[1]!);
       }
     }
+    // 0.40.0: SWAP_STAGE_LABEL ("amm-swap-stage") is used by name, not as a literal; the manifest names it (below).
     expect([...used].sort()).toEqual(["amm-close", "amm-payout", "amm-pool-deploy", "amm-swap"]);
     expect(g.protocolPermissions.map((p: { protocolID: unknown; counterparty?: string }) => [p.protocolID, p.counterparty])).toEqual([
       [[2, "3241645161d8"], "self"],
@@ -68,7 +69,7 @@ describe("manifest.json", () => {
       // encryption's counterparty is the recipient, unknown here (the group check skips a level-2 entry without one: it asks per send).
       [[2, "metanet handles envelope"], "anyone"],
       [[2, "message encryption"], undefined],
-      ...["amm-swap", "amm-pool-deploy", "amm-close", "amm-payout"].map((l) => [[1, `action label ${l}`], undefined]),
+      ...["amm-swap", "amm-swap-stage", "amm-pool-deploy", "amm-close", "amm-payout"].map((l) => [[1, `action label ${l}`], undefined]),
       // The `p nosend expiry seconds <n>` label goes to the toolbox's built-in BRC-177 module, which asks this one fixed label.
       [[1, "action label BRC-177 noSend expiry"], undefined],
     ]);

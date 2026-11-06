@@ -11,12 +11,12 @@
  * receipt before broadcast is proven against the real classes outside this
  * suite: see the 0.29.0 CHANGELOG entry.)
  */
-import { BigNumber, Beef, ECDSA, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
+import { BigNumber, Beef, ECDSA, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { ColorPlan, colorProtocolID } from "@bsv/color-permission-module";
 import { describe, expect, it } from "vitest";
 import { brc29Side, type KeyArgs } from "./brc29Wallet";
-import { moveBack, sendSatsToSwapBasket, sendToSwapBasket, swapKeyID, swapSatsHoldings, swapTotals } from "../src/market/activeSwap";
-import { satsInputsOf, selectExactSatsInput, spendValid, tokenInputsOf } from "../src/market/swapAction";
+import { SWAP_STAGE_LABEL, fileStagedToken, moveBack, moveBackSats, stage, swapKeyDescription, swapKeyIdOfDescription, swapSatsHoldings, swapSatsTotal, swapTotals, unfiledStagedTokens } from "../src/market/activeSwap";
+import { spendValid, tokenInputsOf } from "../src/market/swapAction";
 import { tokenP2pkhScript } from "../src/lp/poolDeploy";
 import v from "./fixtures/amm-topic-vectors.json";
 
@@ -28,9 +28,6 @@ const TOKEN = `${tokenDeploy.id("hex")}_0`;
 const TOPIC = `tm_color_${TOKEN}`;
 const side = brc29Side(key(60));
 const SWAP: [2, string] = [2, "amm swap"];
-/** Two legs' pool outpoints as quoted (0.29.2: the staging keys derive from them). */
-const P1 = `${"a1".repeat(32)}_0`;
-const P2 = `${"b2".repeat(32)}_0`;
 
 /** An `amm-swap` row of `amount`, its source transaction, under keyID `keyID`. */
 function swapRow(amount: bigint, keyID: string) {
@@ -118,112 +115,128 @@ function fakeWallet(rows: { tx: Transaction; row: Record<string, unknown> }[] = 
   return { wallet: w as unknown as WalletInterface, calls };
 }
 
-/** An `amm-swap` sats row of `satoshis` under keyID `keyID`, staged for `assetId`'s swap (0.29.0; 0.29.1 the assetId). */
-function satsRow(satoshis: number, keyID: string, assetId = TOKEN) {
+/** An `amm-swap` sats row of `satoshis` under keyID `keyID` (0.40.0: no token tag). */
+function satsRow(satoshis: number, keyID: string) {
   const tx = new Transaction();
   tx.addInput({ sourceTXID: "78".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
   tx.addOutput({ satoshis, lockingScript: new P2PKH().lock(PublicKey.fromString(side.publicKey({ protocolID: SWAP, keyID, counterparty: "self", forSelf: true })).toAddress()) });
   return {
     tx,
-    row: { outpoint: `${tx.id("hex")}.0`, satoshis, spendable: true, lockingScript: tx.outputs[0]!.lockingScript.toHex(), customInstructions: JSON.stringify({ sats: true, assetId, protocolID: SWAP, keyID, counterparty: "self" }) },
+    row: { outpoint: `${tx.id("hex")}.0`, satoshis, spendable: true, lockingScript: tx.outputs[0]!.lockingScript.toHex(), customInstructions: JSON.stringify({ sats: true, protocolID: SWAP, keyID, counterparty: "self" }) },
   };
 }
 
 
-describe("into the swap basket (0.29.0): ONE send per swap — the module send with the tokens AND the legs' sats, or a plain sats send", () => {
-  it("tokens + sats: keys under [2, \"amm swap\"] (self, a fresh keyID each); the plan a transfer out; the sats outputs after the tokens, filed in amm-swap by the createAction (sats: true); the page's submit; each token output filed with its key", async () => {
+describe("staging (0.40.0): ONE wallet action — sats only a plain createAction; with tokens the module transfer, one token output and one sats output", () => {
+  it("sats only: ONE P2PKH output to a fresh random key under [2, \"amm swap\"] (self), filed in amm-swap by the action with its customInstructions (no token tag); no p color labels; nothing submitted, nothing internalized", async () => {
     const { wallet, calls } = fakeWallet();
     const submitted: string[] = [];
-    const s = await sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [{ amount: 30n, pool: P1 }, { amount: 12n, pool: P2 }], sats: [{ satoshis: 41, pool: P1 }, { satoshis: 37, pool: P2 }] }, { sym: "TST" }, async (topic) => (submitted.push(topic), {}));
+    const s = await stage(wallet, { sats: 20_123 }, { sym: "TST", submit: async (t) => (submitted.push(t), {}) });
     const keys = calls.filter((c) => c.method === "getPublicKey").map((c) => c.args as KeyArgs);
-    expect(keys.map((k) => [k.protocolID, k.counterparty, k.forSelf])).toEqual(Array(4).fill([SWAP, "self", true]));
-    expect(new Set(keys.map((k) => k.keyID)).size).toBe(4);
-    // 0.29.2: derived from each leg's pool outpoint (as quoted, `_` → `.`): the token row's, then the sats row's `:sats`.
-    expect(keys.map((k) => k.keyID)).toEqual([`amm-swap-${P1.replace("_", ".")}`, `amm-swap-${P2.replace("_", ".")}`, `amm-swap-${P1.replace("_", ".")}:sats`, `amm-swap-${P2.replace("_", ".")}:sats`]);
-    expect(swapKeyID(P1, "token")).toBe(keys[0]!.keyID);
-
-    const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
-    expect(create.inputs).toBeUndefined(); // the module selects the token inputs; the wallet funds the sats
-    expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
-    expect(create.labels!.at(-1)).toBe("amm-swap");
-    expect(ColorPlan.fromLabels(create.labels)).toEqual({ version: 1, assets: [TOKEN], ownedOutputs: [], operations: [{ assetId: TOKEN, operation: "transfer" }], inputPositions: [], changePositions: [], sighashTypes: [] });
-    const p2pkh = (k: KeyArgs) => new P2PKH().lock(PublicKey.fromString(side.publicKey({ ...k })).toAddress()).toHex();
-    expect(create.outputs!.map((o) => [o.satoshis, o.lockingScript])).toEqual([
-      [1, tokenP2pkhScript(TOKEN, 30n, side.publicKey({ ...keys[0]! }))],
-      [1, tokenP2pkhScript(TOKEN, 12n, side.publicKey({ ...keys[1]! }))],
-      [41, p2pkh(keys[2]!)],
-      [37, p2pkh(keys[3]!)],
-    ]);
-    // Token outputs: destinations (no basket; filed after, by insertion). Sats outputs: filed in amm-swap by the createAction.
-    expect(create.outputs!.map((o) => o.basket)).toEqual([undefined, undefined, "amm-swap", "amm-swap"]);
-    expect(JSON.parse(create.outputs![2]!.customInstructions!)).toEqual({ sats: true, assetId: TOKEN, protocolID: SWAP, keyID: keys[2]!.keyID, counterparty: "self" });
-    expect(submitted).toEqual([TOPIC]);
-
-    expect(s.holdings.map((h) => [h.outpoint, h.amount, h.keyID])).toEqual([
-      [`${s.txid}.0`, 30n, keys[0]!.keyID],
-      [`${s.txid}.1`, 12n, keys[1]!.keyID],
-    ]);
-    expect(s.sats.map((h) => [h.outpoint, h.satoshis, h.keyID])).toEqual([
-      [`${s.txid}.2`, 41, keys[2]!.keyID],
-      [`${s.txid}.3`, 37, keys[3]!.keyID],
-    ]);
-    const ia = calls.find((c) => c.method === "internalizeAction")!.args as { tx: number[]; outputs: { outputIndex: number; insertionRemittance: { basket: string; customInstructions: string } }[]; labels: string[] };
-    expect(ia.tx).toEqual(s.tx);
-    expect(ia.labels).toEqual(["amm-swap"]);
-    // Only the token outputs are filed by insertion (the sats are already in amm-swap).
-    expect(ia.outputs.map((o) => [o.outputIndex, o.insertionRemittance.basket])).toEqual([[0, "amm-swap"], [1, "amm-swap"]]);
-    expect(JSON.parse(ia.outputs[1]!.insertionRemittance.customInstructions)).toEqual({ assetId: TOKEN, amount: "12", protocolID: SWAP, keyID: keys[1]!.keyID, counterparty: "self" });
-    expect(s).toMatchObject({ filed: true, submitted: "not decided yet", errors: [] });
-
-    // Filed rows read back as the legs' token inputs, the sats rows as their sats, and the page's totals (0.29.6) count the token's staged sats beside its tokens.
-    const tx = Transaction.fromAtomicBEEF(s.tx);
-    const rows = ia.outputs.map((o) => ({ outpoint: `${s.txid}.${o.outputIndex}`, satoshis: 1, lockingScript: tx.outputs[o.outputIndex]!.lockingScript.toHex(), customInstructions: o.insertionRemittance.customInstructions }));
-    const satsRows = [2, 3].map((n) => ({ outpoint: `${s.txid}.${n}`, satoshis: tx.outputs[n]!.satoshis!, lockingScript: tx.outputs[n]!.lockingScript.toHex(), customInstructions: create.outputs![n]!.customInstructions! }));
-    expect(tokenInputsOf([...rows, ...satsRows], TOKEN).map((t) => [t.amount, t.protocolID, t.keyID])).toEqual([[30n, SWAP, keys[0]!.keyID], [12n, SWAP, keys[1]!.keyID]]);
-    expect(satsInputsOf([...rows, ...satsRows]).map((t) => [t.outpoint, t.satoshis, t.keyID])).toEqual([[`${s.txid}.2`, 41, keys[2]!.keyID], [`${s.txid}.3`, 37, keys[3]!.keyID]]);
-    expect(await swapTotals(fakeWallet([{ tx, row: { ...rows[0]!, spendable: true } }, { tx, row: { ...satsRows[0]!, spendable: true } }]).wallet)).toEqual(new Map([[TOKEN, { amount: 30n, outputs: 1, sats: 41 }]]));
-  });
-
-  it("sats only (a sats-in swap, or tokens already staged): a plain createAction, no p color labels, the sats outputs filed in amm-swap; nothing submitted, nothing internalized", async () => {
-    const { wallet, calls } = fakeWallet();
-    const s = await sendSatsToSwapBasket(wallet, TOKEN, [{ satoshis: 20_123, pool: P1 }, { satoshis: 9, pool: P2 }], { sym: "TST" });
+    expect(keys.map((k) => [k.protocolID, k.counterparty, k.forSelf])).toEqual([[SWAP, "self", true]]);
+    expect(keys[0]!.keyID).toMatch(/^amm-swap-[0-9a-f]{32}$/);
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.labels).toEqual(["amm-swap"]);
     expect(create.inputs).toBeUndefined();
     expect(create.options).toEqual({ randomizeOutputs: false, acceptDelayedBroadcast: false });
-    expect(create.outputs!.map((o) => [o.satoshis, o.basket, JSON.parse(o.customInstructions!).sats])).toEqual([[20_123, "amm-swap", true], [9, "amm-swap", true]]);
-    expect(s.sats.map((h) => [h.outpoint, h.satoshis])).toEqual([[`${s.txid}.0`, 20_123], [`${s.txid}.1`, 9]]);
-    expect(s.sats.map((h) => h.keyID)).toEqual([swapKeyID(P1, "sats"), swapKeyID(P2, "sats")]);
-    expect(JSON.parse(create.outputs![1]!.customInstructions!).keyID).toBe(`amm-swap-${P2.replace("_", ".")}:sats`);
-    expect(s.errors).toEqual([]);
+    expect(create.outputs).toHaveLength(1);
+    const o = create.outputs![0]!;
+    expect([o.satoshis, o.basket, o.lockingScript]).toEqual([20_123, "amm-swap", new P2PKH().lock(PublicKey.fromString(side.publicKey(keys[0]!)).toAddress()).toHex()]);
+    expect(JSON.parse(o.customInstructions!)).toEqual({ sats: true, protocolID: SWAP, keyID: keys[0]!.keyID, counterparty: "self" });
+    expect(s.sats).toEqual({ outpoint: `${s.txid}.0`, txid: s.txid, vout: 0, satoshis: 20_123, lockingScript: o.lockingScript, protocolID: SWAP, keyID: keys[0]!.keyID, counterparty: "self" });
+    expect(s.tokens).toBeUndefined();
+    expect(submitted).toEqual([]);
     expect(calls.some((c) => c.method === "internalizeAction" || c.method === "signAction")).toBe(false);
-    // The legs find them (exact amounts only: a leg has no change).
+    // The legs find it.
     const tx = Transaction.fromAtomicBEEF(s.tx);
-    const rows = [0, 1].map((n) => ({ tx, row: { outpoint: `${s.txid}.${n}`, satoshis: tx.outputs[n]!.satoshis!, spendable: true, lockingScript: tx.outputs[n]!.lockingScript.toHex(), customInstructions: create.outputs![n]!.customInstructions! } }));
-    const held = await swapSatsHoldings(fakeWallet(rows).wallet);
-    expect(selectExactSatsInput(held, 9)?.outpoint).toBe(`${s.txid}.1`);
-    expect(selectExactSatsInput(held, 10)).toBeNull();
+    expect(await swapSatsHoldings(fakeWallet([{ tx, row: { outpoint: s.sats.outpoint, satoshis: 20_123, spendable: true, lockingScript: o.lockingScript, customInstructions: o.customInstructions! } }]).wallet)).toEqual([s.sats]);
   });
 
-  it("nothing to send, or a wallet that refuses: an error, nothing filed", async () => {
+  it("with tokens: the plan a transfer out; output 0 the token output to a fresh key, its description naming the key (… · amm-swap <hex>), output 1 the sats output filed by the action; labelled amm-swap-stage; the page's submit; the token output filed by basket insertion", async () => {
     const { wallet, calls } = fakeWallet();
-    await expect(sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [], sats: [] })).rejects.toThrow(/nothing to send/);
-    await expect(sendSatsToSwapBasket(wallet, TOKEN, [])).rejects.toThrow(/nothing to send/);
+    const submitted: string[] = [];
+    const s = await stage(wallet, { sats: 9_000, tokens: { tokenId: TOKEN, amount: 42n } }, { sym: "TST", submit: async (t) => (submitted.push(t), {}) });
+    const keys = calls.filter((c) => c.method === "getPublicKey").map((c) => (c.args as KeyArgs).keyID);
+    expect(keys).toHaveLength(2);
+    const [satsKey, tokenKey] = keys as [string, string];
+    expect(satsKey).not.toBe(tokenKey);
+    const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
+    expect(create.inputs).toBeUndefined();
+    expect(create.labels!.slice(-2)).toEqual(["amm-swap", SWAP_STAGE_LABEL]);
+    expect(SWAP_STAGE_LABEL).toBe("amm-swap-stage");
+    expect(ColorPlan.fromLabels(create.labels)).toEqual({ version: 1, assets: [TOKEN], ownedOutputs: [], operations: [{ assetId: TOKEN, operation: "transfer" }], inputPositions: [], changePositions: [], sighashTypes: [] });
+    expect(create.outputs!.map((o) => [o.satoshis, o.basket])).toEqual([[1, undefined], [9_000, "amm-swap"]]);
+    expect(create.outputs![0]!.lockingScript).toBe(tokenP2pkhScript(TOKEN, 42n, side.publicKey({ protocolID: SWAP, keyID: tokenKey, counterparty: "self", forSelf: true })));
+    expect(create.outputs![0]!.outputDescription).toBe(`TST for a swap · amm-swap ${tokenKey.slice("amm-swap-".length)}`);
+    expect(swapKeyIdOfDescription(create.outputs![0]!.outputDescription)).toBe(tokenKey);
+    expect(submitted).toEqual([TOPIC]);
+    const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: { outputIndex: number; insertionRemittance: { basket: string; customInstructions: string } }[]; labels: string[] };
+    expect(ia.labels).toEqual(["amm-swap"]);
+    expect(ia.outputs.map((o) => [o.outputIndex, o.insertionRemittance.basket])).toEqual([[0, "amm-swap"]]);
+    expect(JSON.parse(ia.outputs[0]!.insertionRemittance.customInstructions)).toEqual({ assetId: TOKEN, amount: "42", protocolID: SWAP, keyID: tokenKey, counterparty: "self" });
+    expect(s).toMatchObject({ filed: true, errors: [], sats: { outpoint: `${s.txid}.1`, satoshis: 9_000, keyID: satsKey }, tokens: { outpoint: `${s.txid}.0`, amount: 42n, keyID: tokenKey } });
+    // Filed, the token row reads back as a leg's token input.
+    const tx = Transaction.fromAtomicBEEF(s.tx);
+    const row = { outpoint: `${s.txid}.0`, satoshis: 1, lockingScript: tx.outputs[0]!.lockingScript.toHex(), customInstructions: ia.outputs[0]!.insertionRemittance.customInstructions };
+    expect(tokenInputsOf([row], TOKEN).map((t) => [t.amount, t.keyID])).toEqual([[42n, tokenKey]]);
+    expect(await swapTotals(fakeWallet([{ tx, row: { ...row, spendable: true } }]).wallet)).toEqual(new Map([[TOKEN, { amount: 42n, outputs: 1 }]]));
+  });
+
+  it("a labelled staged token output the basket lacks is found from its action's description and filed by basket insertion over its BEEF", async () => {
+    const { wallet, calls } = fakeWallet();
+    const keyID = `amm-swap-${"3c".repeat(16)}`;
+    const script = tokenP2pkhScript(TOKEN, 42n, side.publicKey({ protocolID: SWAP, keyID, counterparty: "self", forSelf: true }));
+    const w = {
+      ...wallet,
+      listActions: async (a: { labels: string[] }) => (
+        calls.push({ method: "listActions", args: a }),
+        {
+          totalActions: 1,
+          actions: [
+            {
+              txid: "5e".repeat(32),
+              outputs: [
+                { outputIndex: 0, satoshis: 1, lockingScript: script, outputDescription: swapKeyDescription("TST for a swap", keyID) },
+                { outputIndex: 1, satoshis: 9_000, lockingScript: "76a914" + "00".repeat(20) + "88ac", outputDescription: "Sats for a TST swap", basket: "amm-swap" },
+                { outputIndex: 2, satoshis: 1, lockingScript: script, outputDescription: swapKeyDescription("TST for a swap", keyID), basket: "amm-swap" },
+              ],
+            },
+          ],
+        }
+      ),
+    } as unknown as WalletInterface;
+    const found = await unfiledStagedTokens(w);
+    expect((calls.find((c) => c.method === "listActions")!.args as { labels: string[] }).labels).toEqual([SWAP_STAGE_LABEL]);
+    expect(found).toEqual([{ txid: "5e".repeat(32), vout: 0, tokenId: TOKEN, amount: 42n, keyID }]);
+    const t = new Transaction();
+    t.addInput({ sourceTXID: "77".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+    t.addOutput({ satoshis: 1, lockingScript: LockingScript.fromHex(script) });
+    expect(await fileStagedToken(w, found[0]!, t.toAtomicBEEF(true))).toBe(true);
+    const ia = calls.find((c) => c.method === "internalizeAction")!.args as { outputs: { outputIndex: number; insertionRemittance: { basket: string; customInstructions: string } }[] };
+    expect(ia.outputs.map((o) => [o.outputIndex, o.insertionRemittance.basket, JSON.parse(o.insertionRemittance.customInstructions)])).toEqual([[0, "amm-swap", { assetId: TOKEN, amount: "42", protocolID: SWAP, keyID, counterparty: "self" }]]);
+  });
+
+  it("nothing to stage, or a wallet that refuses: an error, nothing filed", async () => {
+    const { wallet, calls } = fakeWallet();
+    await expect(stage(wallet, { sats: 0 })).rejects.toThrow(/nothing to stage/);
+    await expect(stage(wallet, { sats: 5, tokens: { tokenId: TOKEN, amount: 0n } })).rejects.toThrow(/nothing to stage/);
     (wallet as unknown as { createAction: () => Promise<never> }).createAction = async () => {
       throw new Error("BRC-207: the user declined the color_send request");
     };
-    await expect(sendToSwapBasket(wallet, "http://x/amm", TOKEN, { tokens: [{ amount: 5n, pool: P1 }], sats: [{ satoshis: 3, pool: P1 }] }, {}, async () => ({}))).rejects.toThrow(/declined/);
+    await expect(stage(wallet, { sats: 3, tokens: { tokenId: TOKEN, amount: 5n } }, { submit: async () => ({}) })).rejects.toThrow(/declined/);
     expect(calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 });
 
-describe("move back (0.29.3): ONE module plan — every amm-swap row of the token a (foreign) explicit input, one output to a module receiving key of the user's own as the plan's owned output", () => {
+describe("move back (0.29.3; 0.40.0: with every sats row): ONE module plan — every amm-swap row of the token and every sats row a (foreign) explicit input, one output to a module receiving key of the user's own as the plan's owned output", () => {
   it("createAction {p color plan transfer with ownedOutputs [0 → the receipt's remittance], inputBEEF, inputs (108-byte unlocks), one 1Color output, no basket, no customInstructions} → signAction with the page's unlocks; the wallet funds it; submitted; no take-in, nothing kept", async () => {
     const a = swapRow(30n, "amm-swap-a");
     const b = swapRow(12n, "amm-swap-b");
     const mine = satsRow(77, "amm-swap-s");
-    const others = satsRow(66, "amm-swap-o", `${"ab".repeat(32)}_0`);
-    const { wallet, calls } = fakeWallet([a, b, mine, others]);
+    const more = satsRow(66, "amm-swap-o");
+    const other = swapRow(5n, "amm-swap-x");
+    const otherToken = { ...other, row: { ...other.row, lockingScript: other.row.lockingScript.replace(Utils.toHex(tokenDeploy.hash() as number[]), "ab".repeat(32)) } };
+    const { wallet, calls } = fakeWallet([a, b, mine, more, otherToken]);
     const submitted: { topic: string; beef: number[] }[] = [];
     const r = await moveBack({
       wallet,
@@ -234,11 +247,12 @@ describe("move back (0.29.3): ONE module plan — every amm-swap row of the toke
     });
     expect(r.amount).toBe(42n);
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
-    // The token's rows and (0.29.1) the sats row staged for its legs — not another token's — each an explicit input the page unlocks; their sources in inputBEEF.
+    // The token's rows (not another token's) and (0.40.0) every sats row, each an explicit input the page unlocks; their sources in inputBEEF.
     expect(create.inputs).toEqual([
       { outpoint: a.row.outpoint, unlockingScriptLength: 108, inputDescription: "TST in the swap basket" },
       { outpoint: b.row.outpoint, unlockingScriptLength: 108, inputDescription: "TST in the swap basket" },
-      { outpoint: mine.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats staged for a TST swap" },
+      { outpoint: mine.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats in the swap basket" },
+      { outpoint: more.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats in the swap basket" },
     ]);
     const ib = Beef.fromBinary(Array.from(create.inputBEEF!));
     expect(ib.findTxid(a.tx.id("hex"))).toBeTruthy();
@@ -262,15 +276,15 @@ describe("move back (0.29.3): ONE module plan — every amm-swap row of the toke
     // signAction: the page's unlocks for inputs 0-2 (the wallet's funding is its own).
     const sa = calls.find((c) => c.method === "signAction")!.args as { reference: string; spends: Record<number, { unlockingScript: string }>; options?: unknown };
     expect(sa.reference).toBe("ref-mb");
-    expect(Object.keys(sa.spends)).toEqual(["0", "1", "2"]);
+    expect(Object.keys(sa.spends)).toEqual(["0", "1", "2", "3"]);
     expect(sa.options).toEqual({ acceptDelayedBroadcast: false });
     const tx = Transaction.fromAtomicBEEF(r.beef);
     expect(tx.id("hex")).toBe(r.txid);
-    expect(tx.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([a.row.outpoint, b.row.outpoint, mine.row.outpoint, `${fund.id("hex")}.0`]);
-    for (let n = 0; n < 4; n++) expect(spendValid(tx, n)).toBe(true);
+    expect(tx.inputs.map((i) => `${i.sourceTXID}.${i.sourceOutputIndex}`)).toEqual([a.row.outpoint, b.row.outpoint, mine.row.outpoint, more.row.outpoint, `${fund.id("hex")}.0`]);
+    for (let n = 0; n < 5; n++) expect(spendValid(tx, n)).toBe(true);
     // The sats are absorbed by the wallet's change: the only page output is the 1-sat token output.
     expect(create.outputs).toHaveLength(1);
-    for (const n of [0, 1, 2]) expect(tx.inputs[n]!.unlockingScript!.toHex()).toBe(sa.spends[n]!.unlockingScript);
+    for (const n of [0, 1, 2, 3]) expect(tx.inputs[n]!.unlockingScript!.toHex()).toBe(sa.spends[n]!.unlockingScript);
     expect(submitted.map((x) => x.topic)).toEqual([TOPIC]);
     expect(submitted[0]!.beef).toEqual(r.beef);
     expect(r.submitted).toBe(`admitted under ${TOPIC} (outputs 0)`);
@@ -296,18 +310,17 @@ describe("move back (0.29.3): ONE module plan — every amm-swap row of the toke
     expect(r.errors[0]).toMatch(/submit: 502/);
   });
 
-  it("0.29.6, only sats staged for the token: ONE plain createAction — the token's sats rows the explicit inputs (108-byte unlocks, sources in inputBEEF), NO outputs, labels [amm-swap], no p color plan — then signAction with the page's unlocks; nothing submitted, nothing taken in", async () => {
+  it("0.29.6 (0.40.0: every sats row), no token row: ONE plain createAction — the sats rows the explicit inputs (108-byte unlocks, sources in inputBEEF), NO outputs, labels [amm-swap], no p color plan — then signAction with the page's unlocks; nothing submitted, nothing taken in", async () => {
     const s1 = satsRow(5_000, "amm-swap-s1");
     const s2 = satsRow(2_500, "amm-swap-s2");
-    const others = satsRow(66, "amm-swap-o", `${"ab".repeat(32)}_0`);
-    const { wallet, calls } = fakeWallet([s1, others, s2]);
+    const { wallet, calls } = fakeWallet([s1, s2]);
     const submitted: string[] = [];
     const r = await moveBack({ wallet, base: "http://x/amm", tokenId: TOKEN, meta: { sym: "TST" }, submit: async (topic) => (submitted.push(topic), {}) });
     expect(r.amount).toBe(0n);
     const create = calls.find((c) => c.method === "createAction")!.args as CreateActionArgs;
     expect(create.inputs).toEqual([
-      { outpoint: s1.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats staged for a TST swap" },
-      { outpoint: s2.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats staged for a TST swap" },
+      { outpoint: s1.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats in the swap basket" },
+      { outpoint: s2.row.outpoint, unlockingScriptLength: 108, inputDescription: "Sats in the swap basket" },
     ]);
     expect(create.outputs).toEqual([]);
     expect(create.labels).toEqual(["amm-swap"]);
@@ -326,12 +339,15 @@ describe("move back (0.29.3): ONE module plan — every amm-swap row of the toke
     expect(submitted).toEqual([]);
     expect(calls.some((c) => c.method === "internalizeAction" || c.method === "relinquishOutput")).toBe(false);
     expect(r.errors).toEqual([]);
-    // Another token's sats rows are no sats-only move back for this one.
-    const none = fakeWallet([others]);
-    await expect(moveBack({ wallet: none.wallet, base: "http://x/amm", tokenId: TOKEN })).rejects.toThrow(/holds no token/);
-    expect(none.calls.some((c) => c.method === "createAction")).toBe(false);
-    // swapTotals: a token with only sats staged is listed with amount 0n.
-    expect(await swapTotals(fakeWallet([s1, s2, others]).wallet)).toEqual(new Map([[TOKEN, { amount: 0n, outputs: 0, sats: 7_500 }], [`${"ab".repeat(32)}_0`, { amount: 0n, outputs: 0, sats: 66 }]]));
+    // The sats are no token's (0.40.0): swapTotals lists none; swapSatsTotal sums them, shown once.
+    expect(await swapTotals(fakeWallet([s1, s2]).wallet)).toEqual(new Map());
+    expect(await swapSatsTotal(fakeWallet([s1, s2]).wallet)).toBe(7_500);
+    // moveBackSats on its own (Your tokens' line): the same one action over every sats row.
+    const alone = fakeWallet([s1, s2]);
+    const m = await moveBackSats(alone.wallet);
+    expect((alone.calls.find((c) => c.method === "createAction")!.args as CreateActionArgs).inputs!.map((i) => i.outpoint)).toEqual([s1.row.outpoint, s2.row.outpoint]);
+    expect(m.amount).toBe(0n);
+    await expect(moveBackSats(fakeWallet([]).wallet)).rejects.toThrow(/holds no sats/);
   });
 
   it("nothing in the swap basket: an error before any action", async () => {

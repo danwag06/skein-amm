@@ -89,6 +89,9 @@ describe("Settings: a token's own terms (0.35.0)", () => {
     const live = { lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 };
     expect(tokenTermsText(live)).toBe("LP 30 · validator 5 · commission 25 bps");
     expect(tokenTermsText(null)).toBe("market only");
+    // 0.40.0: the minimum leg when set (0: none).
+    expect(tokenTermsText({ ...live, minLegSats: 2000 })).toBe("LP 30 · validator 5 · commission 25 bps · minimum leg 2000 sats");
+    expect(tokenTermsText({ ...live, minLegSats: 0 })).toBe("LP 30 · validator 5 · commission 25 bps");
     expect(renderToStaticMarkup(<TokenTermsLine terms={live} error={null} note={null} />)).toBe(" · LP 30 · validator 5 · commission 25 bps");
     expect(renderToStaticMarkup(<TokenTermsLine terms={null} error={null} note={null} />)).toBe(" · market only");
     expect(renderToStaticMarkup(<TokenTermsLine terms={null} error={null} note={TERMS_NOT_APPLIED_TEXT} />)).toBe(" · market only · sent, not applied yet");
@@ -101,19 +104,24 @@ describe("Settings: a token's own terms (0.35.0)", () => {
     const read = async () => answers[Math.min(reads++, answers.length - 1)]!;
     expect(await untilTermsApplied(read, { lpBps: 40, validatorBps: 6, commissionBps: 3 }, 1000, 1)).toEqual({ terms: answers[2], applied: true });
     expect(reads).toBe(3);
+    // 0.40.0: the minimum leg is compared too.
+    const { termsApplied } = await import("../src/ox/Settings");
+    expect(termsApplied({ lpFeeBps: 40, validatorFeeBps: 6, commissionBps: 3, minLegSats: 500 }, { lpBps: 40, validatorBps: 6, commissionBps: 3, minLegSats: 500 })).toBe(true);
+    expect(termsApplied({ lpFeeBps: 40, validatorFeeBps: 6, commissionBps: 3, minLegSats: 0 }, { lpBps: 40, validatorBps: 6, commissionBps: 3, minLegSats: 500 })).toBe(false);
     expect(await untilTermsApplied(async () => null, null, 1000, 1)).toEqual({ terms: null, applied: true });
     const late = await untilTermsApplied(async () => answers[0]!, null, 20, 5);
     expect(late).toEqual({ terms: answers[0], applied: false });
   });
 
-  it("the Edit form is the defaults card's three fields: Save and Market only", async () => {
+  it("the Edit form is the defaults card's fields (0.40.0: and Minimum leg (sats)): Save and Market only", async () => {
     const { TermsFields } = await import("../src/ox/Settings");
-    const f = { lp: "40", val: "6", com: "3", setLp: noop, setVal: noop, setCom: noop, terms: { lpBps: 40, validatorBps: 6, commissionBps: 3 } };
+    const f = { lp: "40", val: "6", com: "3", min: "", setLp: noop, setVal: noop, setCom: noop, setMin: noop, terms: { lpBps: 40, validatorBps: 6, commissionBps: 3 } };
     const html = renderToStaticMarkup(<TermsFields f={f} idPrefix="tt-x" busy={false} setLabel="Save" clearLabel="Market only" onClear={noop} />);
-    expect(html.match(/<input/g)).toHaveLength(3);
+    expect(html.match(/<input/g)).toHaveLength(4);
     expect(html).toContain("LP fee (bps)");
     expect(html).toContain("Validator fee (bps)");
     expect(html).toContain("Commission (bps)");
+    expect(html).toContain("Minimum leg (sats)");
     expect(html).toContain(">Save<");
     expect(html).toContain(">Market only<");
   });

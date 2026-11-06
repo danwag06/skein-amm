@@ -51,6 +51,7 @@ import {
   registeredTokens,
   setExchangeContext,
   settleSwaps,
+  swapBasketSats,
   topicOf,
   validatorTerms,
   walletSats,
@@ -88,7 +89,9 @@ function atomic(tx: Transaction, ancestors: Transaction[]): number[] {
   return b.toBinaryAtomic(tx.id("hex"));
 }
 /** A pool row as the pools routes answer it (P2: with the validator's peer ID). */
-const wirePool = (txid: string, p: { bsv: number; tokens: number }, extra: Record<string, unknown> = {}) => ({ lpPubKey: v.lp, outpoint: `${txid}_0`, bsvReserve: p.bsv, tokenReserve: p.tokens, liquidityFeeBps: 30, validationFeeBps: 5, commissionBps: 10, validatorIdentityKey: SKEIN, validatorPeerId: PEER, ...extra });
+/** The fixture's pool id (0.40.0): its deploy outpoint, copied along its swaps. */
+const PID = `${poolDeploy.id("hex")}_0`;
+const wirePool = (txid: string, p: { bsv: number; tokens: number }, extra: Record<string, unknown> = {}) => ({ poolId: PID, lpPubKey: v.lp, swaps: 0, outpoint: `${txid}_0`, bsvReserve: p.bsv, tokenReserve: p.tokens, liquidityFeeBps: 30, validationFeeBps: 5, commissionBps: 10, validatorIdentityKey: SKEIN, validatorPeerId: PEER, ...extra });
 
 /** The exchange: a route table over plain fetch and the wallet's signed fetch alike. */
 interface Instance {
@@ -105,11 +108,13 @@ interface Instance {
   validators: { identity: string; peerId: string }[];
   /** The transactions P3's BEEF carries. */
   poolTxs: Transaction[];
-  /** P4: records by LpPubKey (unknown: closed with zeros). */
+  /** P3 answers no pool (spent since the stream's answer). */
+  beefGone: boolean;
+  /** P4: records by pool id (unknown: closed with zeros, 0.40.0). */
   lpPools: Record<string, unknown>;
   /** P7's validator; null: no terms set. */
   terms: Record<string, unknown> | null;
-  /** P8: by outpoint `<txid>.<vout>`. */
+  /** P8 and the host's H9: by outpoint `<txid>.<vout>`. */
   spends: Record<string, unknown>;
   /** P9: by txid. */
   txs: Record<string, number[]>;
@@ -138,6 +143,7 @@ function instance(): Instance {
     market: { commissionPkh: null, minCommissionBps: 0 },
     validators: [{ identity: SKEIN, peerId: PEER }],
     poolTxs: [fund, tokenDeploy, poolDeploy],
+    beefGone: false,
     lpPools: {},
     terms: { identity: SKEIN, peerId: PEER, lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 0 },
     spends: {},
@@ -185,19 +191,21 @@ async function route(url: string, init?: { method?: string; headers?: Record<str
     if (path === "/admin") return json({});
     if (path === "/pools") return json(inst.enabled.filter((t) => t.status === "enabled").flatMap((t) => (inst.pools[String(t.tokenId)] ?? []).map((p) => ({ tokenId: t.tokenId, ...(p as object) }))));
     if (path === "/stats") return json(inst.enabled.filter((t) => t.status === "enabled" && inst.stats[String(t.tokenId)]).map((t) => inst.stats[String(t.tokenId)]));
+    // H9 (0.40.0, the host's): each outpoint's spender over every enabled token.
+    if (path === "/spends") return json(list(u, "outpoint").map((o) => inst.spends[o] ?? { outpoint: o }));
     return json({ error: `no route ${url}` }, 404);
   }
   const [, token, path] = tok;
   const rows = (inst.pools[token!] ?? []) as Record<string, unknown>[];
   if (path === "/pools") return json({ market: inst.market, validators: inst.validators, pools: rows });
   if (path === "/pools/beef") {
-    const keys = list(u, "lp");
+    const ids = list(u, "pool");
     const b = new Beef();
     for (const t of inst.poolTxs) b.mergeRawTx(t.toBinary());
-    const pools = rows.filter((r) => keys.includes(String(r.lpPubKey))).map(({ validatorPeerId: _, ...r }) => r);
+    const pools = inst.beefGone ? [] : rows.filter((r) => ids.includes(String(r.poolId))).map(({ validatorPeerId: _, ...r }) => r);
     return json({ pools, beef: Utils.toBase64(b.toBinary()) });
   }
-  if (path === "/positions") return json(list(u, "lp").map((k) => inst.lpPools[k] ?? { lpPubKey: k, status: "closed", sats: 0, tokens: 0, swaps: 0 }));
+  if (path === "/positions") return json(list(u, "pool").map((k) => inst.lpPools[k] ?? { poolId: k, lpPubKey: null, status: "closed", sats: 0, tokens: 0, swaps: 0 }));
   if (path === "/terms") return json({ validator: inst.terms, market: inst.market });
   if (path === "/spends") {
     const ops = list(u, "outpoint");
@@ -354,11 +362,11 @@ describe("exchange.ts, wired", () => {
   });
 
   it("poolViews: the token's pools route's rows, outpoints dotted, every validator live (the host lists no other)", async () => {
-    expect(poolViews(await held(), TOKEN)).toEqual([{ outpoint: `${poolDeploy.id("hex")}.0`, tokenId: TOKEN, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: true } }]);
+    expect(poolViews(await held(), TOKEN)).toEqual([{ outpoint: `${poolDeploy.id("hex")}.0`, poolId: PID, tokenId: TOKEN, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: true } }]);
     expect(poolViews(null, TOKEN)).toEqual([]);
   });
 
-  it("quoteSwap (D12): the matching engine's plan over the held pools, no request; a buy pays above marginal, a sell gets below; no pool: refused", async () => {
+  it("quoteSwap (D12; 0.40.0): the matching engine's plan over the held pools, no request; a buy pays above the price now, a sell gets below; each leg its pool's id and fees; what Swap stages; no pool: refused", async () => {
     const h = await held();
     const n = inst.requests.length;
     const buy = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, h, META);
@@ -368,32 +376,52 @@ describe("exchange.ts, wired", () => {
     expect(buy.amountOut).toBe(BigInt(v.swapBsvInTokensOut));
     expect(buy.minAmountOut).toBeLessThanOrEqual(buy.amountOut);
     expect(buy.effectivePrice).toBeGreaterThan(buy.marginalPrice);
-    expect(buy.fees).toEqual({ lpBps: 30, validatorBps: 5, commissionBps: 10 });
-    const sell = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, allowPartial: false }, h, META);
+    expect(buy.legs[0]).toMatchObject({ poolId: PID, fees: { lpBps: 30, validatorBps: 5, commissionBps: 10 } });
+    expect(buy.stage.amount).toBe(20_000n);
+    expect(buy.stage.feeSats).toBe(3n * (buy.legMinerFeeSats + 1n));
+    // 0.40.0: the price now is a sell of 1% of the pooled tokens (50,000 here): a larger sell gets below it.
+    const sell = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 100_000n, maxSlippageBps: 100, allowPartial: false }, h, META);
     expect(sell.effectivePrice).toBeLessThan(sell.marginalPrice);
     expect(inst.requests.length).toBe(n);
     expect(() => quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, { ...h, pools: [] }, META)).toThrow(/No pool to swap against/);
   });
 
-  it("executeSwap (D14): needs a wallet; a planned pool gone from ONE /pools/beef?lp= read stops it (no partial fills)", async () => {
+  it("executeSwap (0.40.0): needs a wallet; the overlay pass first (ONE /amm/spends over the swap basket's rows; none, no read); a pool gone from its id's read (ONE /pools/beef?pool=) is no pool: stop no_pool", async () => {
     const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, await held(), META);
     await expect(executeSwap(q)).rejects.toThrow(/Connect a wallet/);
-    connect();
-    inst.pools[TOKEN] = [];
+    const sent: CreateActionArgs[] = [];
+    const wallet = {
+      ...fakeWallet(),
+      async getPublicKey(args: { identityKey?: boolean }) {
+        return { publicKey: args.identityKey ? ME : new PrivateKey(79).toPublicKey().toString() };
+      },
+      async createAction(args: CreateActionArgs) {
+        sent.push(args);
+        const tx = new Transaction();
+        tx.addInput({ sourceTXID: fund.id("hex"), sourceOutputIndex: 0, sourceTransaction: fund, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
+        for (const o of args.outputs ?? []) tx.addOutput({ satoshis: o.satoshis, lockingScript: LockingScript.fromHex(o.lockingScript) });
+        return { txid: tx.id("hex"), tx: tx.toAtomicBEEF(true) };
+      },
+    } as unknown as WalletInterface;
+    setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
+    inst.beefGone = true;
     const n = inst.requests.length;
-    await expect(executeSwap(q)).rejects.toThrow(/spent since the quote/);
-    expect(since(n)).toEqual([`GET /@${TOKEN}/amm/pools/beef?lp=${v.lp}`]);
+    const r = await executeSwap(q);
+    expect(r).toMatchObject({ status: "failed", stop: "no_pool", legs: [] });
+    // The stage (a buy: sats only, ONE plain createAction), the pool by its id, nothing relayed; besides, the token's pools stream.
+    expect(sent.map((a) => a.labels)).toEqual([["amm-swap"]]);
+    expect(since(n).filter((x) => !x.endsWith("/amm/pools"))).toEqual([`GET /@${TOKEN}/amm/pools/beef?pool=${PID}`]);
+    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
+    expect(inst.calls).toEqual([]);
   });
 
-  it("executeSwap, tokens in (0.12.0; 0.29.0): each leg spends amm-swap outputs carrying its amount exactly and one sats output of its exact sats; what they do not cover is staged by ONE send first (the module's with the tokens, else a plain sats send)", async () => {
+  it("executeSwap (0.40.0), a sell with nothing staged: ONE module transfer stages the tokens (one output, its key id in the description, labelled amm-swap-stage) and the fee sats (one output, filed in amm-swap), submitted at the host root; then the leg finds no row the wallet lists to spend: stop fees", async () => {
     const swapKey = new PrivateKey(77);
     const sent: CreateActionArgs[] = [];
-    const swapRows: unknown[] = [];
-    const swapBeef = new Beef();
     const wallet = {
       ...fakeWallet(),
       async listOutputs(args: { basket: string }) {
-        if (args.basket === "amm-swap") return { totalOutputs: swapRows.length, outputs: swapRows, BEEF: swapBeef.toBinary() };
+        if (args.basket === "amm-swap") return { totalOutputs: 0, outputs: [], BEEF: new Beef().toBinary() };
         return { totalOutputs: 0, outputs: [] };
       },
       async getPublicKey(args: { identityKey?: boolean }) {
@@ -412,79 +440,19 @@ describe("exchange.ts, wired", () => {
     } as unknown as WalletInterface;
     setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
     const q = quoteSwap({ tokenId: TOKEN, side: "sell", amountIn: 50_000n, maxSlippageBps: 100, allowPartial: false }, await held(), META);
-    expect(q.legs.map((l) => l.amountIn)).toEqual([50_000n]);
-    // Nothing in the swap basket: ONE module send of exactly the leg's amount AND the leg's sats (0.29.0), before the leg; no funding action.
-    await executeSwap(q);
+    const r = await executeSwap(q);
+    expect(r).toMatchObject({ status: "failed", stop: "fees" });
     expect(sent).toHaveLength(1);
     const plan = ColorPlan.fromLabels(sent[0]!.labels)!;
     expect(plan).toMatchObject({ assets: [TOKEN], ownedOutputs: [], operations: [{ assetId: TOKEN, operation: "transfer" }] });
+    expect(sent[0]!.labels!.slice(-2)).toEqual(["amm-swap", "amm-swap-stage"]);
     expect(sent[0]!.outputs).toHaveLength(2);
     expect(decodeOneColor(Utils.toArray(sent[0]!.outputs![0]!.lockingScript, "hex"))!.amount).toBe(50_000n);
+    expect(sent[0]!.outputs![0]!.outputDescription).toMatch(/^TST for a swap · amm-swap [0-9a-f]{32}$/);
     const satsOut = sent[0]!.outputs![1]!;
-    expect(decodeOneColor(Utils.toArray(satsOut.lockingScript, "hex"))).toBeNull();
-    expect([satsOut.basket, JSON.parse(satsOut.customInstructions!).sats]).toEqual(["amm-swap", true]);
-    // D19: the swap-basket send is submitted at the host root, routed by X-Topics.
+    expect([satsOut.satoshis, satsOut.basket, JSON.parse(satsOut.customInstructions!).sats]).toEqual([Number(q.stage.feeSats), "amm-swap", true]);
     expect(inst.requests).toContain("POST /submit");
-    // The swap basket holds an output of exactly the leg's amount: the sats only, by a plain send (no p color plan).
-    const heldTx = new Transaction();
-    heldTx.addInput({ sourceTXID: "77".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-    heldTx.addOutput({ satoshis: 1, lockingScript: LockingScript.fromHex(tokenP2pkhScript(TOKEN, 50_000n, swapKey.toPublicKey().toString())) });
-    swapBeef.mergeTransaction(heldTx);
-    swapRows.push({ outpoint: `${heldTx.id("hex")}.0`, satoshis: 1, spendable: true, lockingScript: heldTx.outputs[0]!.lockingScript.toHex(), customInstructions: JSON.stringify({ assetId: TOKEN, amount: "50000", protocolID: [2, "amm swap"], keyID: "amm-swap-x", counterparty: "self" }) });
-    sent.length = 0;
-    await executeSwap(q);
-    expect(sent.map((a) => [ColorPlan.fromLabels(a.labels) !== undefined, a.labels, a.outputs!.map((o) => [o.satoshis, o.basket])])).toEqual([[false, ["amm-swap"], [[satsOut.satoshis, "amm-swap"]]]]);
-    // It holds the leg's exact sats too: no send at all.
-    const heldSats = new Transaction();
-    heldSats.addInput({ sourceTXID: "78".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-    heldSats.addOutput({ satoshis: satsOut.satoshis, lockingScript: LockingScript.fromHex(satsOut.lockingScript) });
-    swapBeef.mergeTransaction(heldSats);
-    swapRows.push({ outpoint: `${heldSats.id("hex")}.0`, satoshis: satsOut.satoshis, spendable: true, lockingScript: satsOut.lockingScript, customInstructions: satsOut.customInstructions });
-    sent.length = 0;
-    await executeSwap(q);
-    expect(sent).toEqual([]);
     noLookup();
-  });
-
-  it("executeSwap, sats in (0.29.0; 0.34.0): the leg's sats staged by ONE plain createAction, then the leg; ONE /pools/beef read, no terms read (the market's key hash is the held pools route's)", async () => {
-    const sent: CreateActionArgs[] = [];
-    const wallet = {
-      ...fakeWallet(),
-      async listOutputs(args: { basket: string }) {
-        if (args.basket === "amm-swap") return { totalOutputs: 0, outputs: [], BEEF: new Beef().toBinary() };
-        return { totalOutputs: 0, outputs: [] };
-      },
-      async getPublicKey(args: { identityKey?: boolean }) {
-        return { publicKey: args.identityKey ? ME : new PrivateKey(78).toPublicKey().toString() };
-      },
-      async createAction(args: CreateActionArgs) {
-        sent.push(args);
-        const tx = new Transaction();
-        tx.addInput({ sourceTXID: fund.id("hex"), sourceOutputIndex: 0, sourceTransaction: fund, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });
-        for (const o of args.outputs ?? []) tx.addOutput({ satoshis: o.satoshis, lockingScript: LockingScript.fromHex(o.lockingScript) });
-        return { txid: tx.id("hex"), tx: tx.toAtomicBEEF(true) };
-      },
-    } as unknown as WalletInterface;
-    setExchangeContext({ wallet, signedFor: () => af as never, identityKey: ME });
-    inst.market = { commissionPkh: v.commissionPkh, minCommissionBps: 10 };
-    const h = await held();
-    expect(h.market.commissionPkh).toBe(v.commissionPkh);
-    const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, h, META);
-    expect(q.legs.map((l) => l.amountIn)).toEqual([20_000n]);
-    const n = inst.requests.length;
-    const r = await executeSwap(q);
-    // ONE read of the pools the legs spend; no terms read (this fake wallet signs nothing, so the leg stops before its relay: test/swap.test.ts relays one).
-    expect(since(n)).toEqual([`GET /@${TOKEN}/amm/pools/beef?lp=${v.lp}`]);
-    expect(inst.calls.map((c) => c.fn)).toEqual([]);
-    expect(r.status).toBe("failed");
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.labels).toEqual(["amm-swap"]);
-    expect(ColorPlan.fromLabels(sent[0]!.labels)).toBeUndefined();
-    const o = sent[0]!.outputs![0]!;
-    expect(o.basket).toBe("amm-swap");
-    expect(JSON.parse(o.customInstructions!)).toMatchObject({ sats: true, protocolID: [2, "amm swap"], counterparty: "self" });
-    expect(o.satoshis).toBeGreaterThan(20_001);
-    expect(o.satoshis).toBeLessThan(20_001 + 2_000);
   });
 
   it("walletSats (0.31.4): one listOutputs on the toolbox's balance special operation (no limit, no other basket), its totalOutputs as a bigint", async () => {
@@ -501,19 +469,17 @@ describe("exchange.ts, wired", () => {
     expect(await walletSats()).toBe(3_500n);
   });
 
-  it("myPositions (D9): the wallet's pool rows grouped by token, ONE GET /positions?lp= per token for each pool's state and fees; the token list read once; nothing else read on load", async () => {
+  it("myPositions (D9; 0.40.0: by pool id): the wallet's pool rows grouped by token, ONE GET /positions?pool= per token for each pool's state and fees; the token list read once; nothing else read on load", async () => {
     const pd = poolDeploy.id("hex");
     const s1 = swap1.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
     const row = { outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci };
-    // A second row of the same pool: one key, one position.
-    const again = { outpoint: `${s1}.0`, satoshis: v.pool1.bsv, lockingScript: swap1.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci };
-    connect({ pools: [row, again] });
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 0, swaps: 1 };
+    connect({ pools: [row] });
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "live", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 0, swaps: 1 };
     expect(await myPositions()).toEqual([
-      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 60n, feesEarnedTokens: 0n },
+      { outpoint: `${s1}.0`, poolId: PID, swaps: 1, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 60n, feesEarnedTokens: 0n },
     ]);
-    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/pools`]);
+    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?pool=${PID}`, `GET /@${TOKEN}/amm/pools`]);
     // 0.34.1: live = the validator is in P2's `validators` (beating now), not whether the pool is listed.
     inst.validators = [];
     expect((await myPositions())[0]!.validator.live).toBe(false);
@@ -522,15 +488,15 @@ describe("exchange.ts, wired", () => {
     expect((await myPositions())[0]!.validator.live).toBe(true);
 
     // Rescinded: the card's status from the record, the Rescind's output and its state.
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "rescinded", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 150, swaps: 2 };
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "rescinded", outpoint: `${s1}_0`, current: wirePool(s1, v.pool1), sats: 60, tokens: 150, swaps: 2 };
     expect(await myPositions()).toEqual([
-      { outpoint: `${s1}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, rescinded: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
+      { outpoint: `${s1}.0`, poolId: PID, swaps: 2, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool1.bsv), tokens: BigInt(v.pool1.tokens), validator: { identityKey: SKEIN, live: true }, rescinded: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
     ]);
 
     // Closed: kept, marked closed (no card), for its fees; a close of a position not held is refused.
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "closed", sats: 60, tokens: 150, swaps: 2 };
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "closed", sats: 60, tokens: 150, swaps: 2 };
     expect(await myPositions()).toEqual([
-      { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: 0n, tokens: 0n, validator: { identityKey: SKEIN, live: false }, closed: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
+      { outpoint: `${pd}.0`, poolId: PID, swaps: 2, tokenId: TOKEN, sym: "TST", dec: 0, sats: 0n, tokens: 0n, validator: { identityKey: SKEIN, live: false }, closed: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
     ]);
     await expect(closePosition({ outpoint: `${s1}.0` })).rejects.toThrow(/No such position/);
     // The list was read once this page load.
@@ -538,7 +504,7 @@ describe("exchange.ts, wired", () => {
     noLookup();
   });
 
-  it("myPositions (D23): a deploy only in the history (listActions amm-pool-deploy, its output script) is asked by its LP key and listed; while its pool is still at the deploy's output, its row is filed in amm-pools (basket insertion over GET /tx?id=); a row with no script (no LP key) is not", async () => {
+  it("myPositions (D23): a deploy only in the history (listActions amm-pool-deploy, its output script) is asked by its pool id (0.40.0: the deploy outpoint) and listed; while its pool is still at the deploy's output, its row is filed in amm-pools (basket insertion over GET /tx?id=); a row with no script (no LP key) is not", async () => {
     const pd = poolDeploy.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
     const action = (script?: string) => ({
@@ -556,12 +522,12 @@ describe("exchange.ts, wired", () => {
       ],
     });
     connect({ pools: [], actions: [action(poolDeploy.outputs[0]!.lockingScript.toHex())] });
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
     inst.txs[pd] = atomic(poolDeploy, [fund, tokenDeploy]);
     expect(await myPositions()).toEqual([
-      { outpoint: `${pd}.0`, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 0n, feesEarnedTokens: 0n },
+      { outpoint: `${pd}.0`, poolId: PID, swaps: 0, tokenId: TOKEN, sym: "TST", dec: 0, sats: BigInt(v.pool0.bsv), tokens: BigInt(v.pool0.tokens), validator: { identityKey: SKEIN, live: true }, feesEarnedSats: 0n, feesEarnedTokens: 0n },
     ]);
-    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/pools`, `GET /@${TOKEN}/amm/tx?id=${pd}`]);
+    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?pool=${PID}`, `GET /@${TOKEN}/amm/pools`, `GET /@${TOKEN}/amm/tx?id=${pd}`]);
     expect(internalized).toHaveLength(1);
     const ia = internalized[0] as { tx: number[]; outputs: { outputIndex: number; protocol: string; insertionRemittance: { basket: string; tags: string[]; customInstructions: string } }[]; labels: string[] };
     expect(ia.labels).toEqual(["amm-pool-deploy"]);
@@ -572,24 +538,25 @@ describe("exchange.ts, wired", () => {
     internalized = [];
     connect({ pools: [{ outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci }], actions: [action(poolDeploy.outputs[0]!.lockingScript.toHex())] });
     await myPositions();
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${swap1.id("hex")}_0`, current: wirePool(swap1.id("hex"), v.pool1), sats: 0, tokens: 0, swaps: 1 };
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "live", outpoint: `${swap1.id("hex")}_0`, current: wirePool(swap1.id("hex"), v.pool1), sats: 0, tokens: 0, swaps: 1 };
     connect({ pools: [], actions: [action(poolDeploy.outputs[0]!.lockingScript.toHex())] });
     await myPositions();
     expect(internalized).toEqual([]);
     connect({ pools: [], actions: [action()] });
+    delete inst.lpPools[PID];
     expect(await myPositions()).toEqual([]);
   });
 
-  it("closePosition: the pool's current output and its BEEF by its LP key (GET /pools/beef?lp=<key>)", async () => {
+  it("closePosition (0.40.0): the pool's current output and its BEEF by its pool id (GET /pools/beef?pool=<id>)", async () => {
     const pd = poolDeploy.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
     connect({ pools: [{ outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci }] });
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
     await myPositions();
     const n = inst.requests.length;
     // The fake wallet builds nothing: the close fails after the read, the read is what is checked.
     await expect(closePosition({ outpoint: `${pd}.0` })).rejects.toThrow();
-    expect(since(n)).toEqual([`GET /@${TOKEN}/amm/pools/beef?lp=${v.lp}`]);
+    expect(since(n)).toEqual([`GET /@${TOKEN}/amm/pools/beef?pool=${PID}`]);
   });
 
   it("defaults (0.17.0): GET /defaults; root's {fn: defaults} to <app>/admin, swap's identity (D21: from the claim card) the recipient; bad values refused before anything is sent", async () => {
@@ -625,7 +592,7 @@ describe("exchange.ts, wired", () => {
 
   it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {
     inst.terms = { identity: SKEIN, peerId: "p", lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 };
-    expect(await tokenTerms(TOKEN)).toEqual({ identity: SKEIN, peerId: "p", lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25 });
+    expect(await tokenTerms(TOKEN)).toEqual({ identity: SKEIN, peerId: "p", lpFeeBps: 30, validatorFeeBps: 5, commissionBps: 25, minLegSats: 0 });
     expect(inst.requests.at(-1)).toBe(`GET /@${TOKEN}/amm/terms`);
     inst.terms = null;
     expect(await tokenTerms(TOKEN)).toBeNull();
@@ -634,15 +601,19 @@ describe("exchange.ts, wired", () => {
     const n = inst.requests.length;
     await setTokenTerms(TOKEN, { lpBps: 40, validatorBps: 6, commissionBps: 3 });
     await setTokenTerms(TOKEN, null);
-    expect(since(n).filter((r) => r.startsWith("POST"))).toEqual(["POST /sendMessage", "POST /sendMessage"]);
+    // 0.40.0: the minimum leg, sent when above 0.
+    await setTokenTerms(TOKEN, { lpBps: 40, validatorBps: 6, commissionBps: 3, minLegSats: 2_000 });
+    expect(since(n).filter((r) => r.startsWith("POST"))).toEqual(["POST /sendMessage", "POST /sendMessage", "POST /sendMessage"]);
     const msgs = inst.sent.map((s) => s.body.message as { recipient: Uint8Array; messageBox: string; body: Uint8Array });
     expect(new Set(msgs.map((m) => `${Utils.toHex(Array.from(m.recipient))} ${m.messageBox}`))).toEqual(new Set([`${SKEIN} amm/admin`]));
     expect(msgs.map((m) => decode(m.body))).toEqual([
       { fn: "terms", args: { tokenId: TOKEN, terms: { lpFeeBps: 40, validatorFeeBps: 6, commissionBps: 3 } } },
       { fn: "terms", args: { tokenId: TOKEN, terms: null } },
+      { fn: "terms", args: { tokenId: TOKEN, terms: { lpFeeBps: 40, validatorFeeBps: 6, commissionBps: 3, minLegSats: 2_000 } } },
     ]);
     for (const bad of [{ lpBps: 30.5, validatorBps: 5, commissionBps: 0 }, { lpBps: 30, validatorBps: 10_001, commissionBps: 0 }]) await expect(setTokenTerms(TOKEN, bad)).rejects.toThrow(/0 to 10000/);
-    expect(inst.sent).toHaveLength(2);
+    await expect(setTokenTerms(TOKEN, { lpBps: 30, validatorBps: 5, commissionBps: 0, minLegSats: 1.5 })).rejects.toThrow(/whole number of sats/);
+    expect(inst.sent).toHaveLength(3);
   });
 
   it("discovery: GET /discovery; setDiscovery: root's {fn: discovery, args: {on}} to <app>/admin, the card's identity the recipient (the card read on load is used)", async () => {
@@ -677,7 +648,7 @@ describe("exchange.ts, wired", () => {
   });
 
   it("validatorTerms (D21): GET /terms, plain — this skein's validator, its fees (read-only); none set: {none: true}, which the pages show as the no-terms text", async () => {
-    expect(await validatorTerms(TOKEN)).toEqual({ validator: { identityKey: SKEIN, live: true }, isThisExchange: true, fees: { lpBps: 30, validatorBps: 5, commissionBps: 0 } });
+    expect(await validatorTerms(TOKEN)).toEqual({ validator: { identityKey: SKEIN, live: true }, isThisExchange: true, fees: { lpBps: 30, validatorBps: 5, commissionBps: 0 }, minLegSats: 0 });
     expect(inst.calls).toEqual([]);
     expect(inst.requests.at(-1)).toBe(`GET /@${TOKEN}/amm/terms`);
     inst.terms = null;
@@ -722,13 +693,15 @@ describe("exchange.ts, wired", () => {
     expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, balance: 0n, outputs: 0, inSwaps: 50_000n })]);
   });
 
-  it("myTokens (0.29.6): the sats staged in amm-swap for a token's legs — beside its tokens, and a token with ONLY sats staged still listed", async () => {
-    const satsRow = (n: number, satoshis: number, assetId: string) => ({ outpoint: `${"5a".repeat(32)}.${n}`, satoshis, lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toPublicKey().toAddress()).toHex(), customInstructions: JSON.stringify({ sats: true, assetId, protocolID: [2, "amm swap"], keyID: `amm-swap-${n}:sats`, counterparty: "self" }) });
+  it("myTokens (0.40.0): the swap basket's sats are no token's — a token row shows its tokens only; the sats are read once (swapBasketSats)", async () => {
+    const satsRow = (n: number, satoshis: number) => ({ outpoint: `${"5a".repeat(32)}.${n}`, satoshis, lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toPublicKey().toAddress()).toHex(), customInstructions: JSON.stringify({ sats: true, protocolID: [2, "amm swap"], keyID: `amm-swap-${"0".repeat(31)}${n}`, counterparty: "self" }) });
     const swapRow = { outpoint: `${poolDeploy.id("hex")}.1`, satoshis: 1, lockingScript: poolDeploy.outputs[1]!.lockingScript.toHex(), customInstructions: JSON.stringify({ assetId: TOKEN, amount: "50000", protocolID: [2, "amm swap"], keyID: "amm-swap-1", counterparty: "self" }) };
-    connect({ swaps: [swapRow, satsRow(0, 4_000, TOKEN), satsRow(1, 1_000, TOKEN)] });
-    expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, balance: 0n, inSwaps: 50_000n, swapSats: 5_000 })]);
-    connect({ swaps: [satsRow(2, 2_500, TOKEN)] });
-    expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, sym: "TST", balance: 0n, outputs: 0, inSwaps: 0n, swapSats: 2_500 })]);
+    connect({ swaps: [swapRow, satsRow(0, 4_000), satsRow(1, 1_000)] });
+    expect(await myTokens()).toEqual([expect.objectContaining({ tokenId: TOKEN, balance: 0n, inSwaps: 50_000n })]);
+    expect(await swapBasketSats()).toBe(5_000);
+    connect({ swaps: [satsRow(2, 2_500)] });
+    expect(await myTokens()).toEqual([]);
+    expect(await swapBasketSats()).toBe(2_500);
   });
 
   it("myTokens (D17): the list once, then ONE discovery GET /tokens?ids= for every held token the list lacks; a token not on discovery keeps its own metadata", async () => {
@@ -749,16 +722,21 @@ describe("exchange.ts, wired", () => {
     noLookup();
   });
 
-  it("the silent pass (D18): per token with staged rows ONE /spends?outpoint= over their pools; nothing staged, no read", async () => {
+  it("the pass on load (0.40.0): the swap basket empty, no read; with rows, ONE host /amm/spends over every row; a row's spender read once (/tx), another's swap taken in nowhere", async () => {
     connect();
     expect(await settleSwaps()).toEqual([]);
     expect(since(0)).toEqual([]);
-    const p1 = `${"a1".repeat(32)}.0`;
-    const p2 = `${"a2".repeat(32)}.1`;
-    const sats = (pool: string) => ({ outpoint: `${"5a".repeat(32)}.0`, satoshis: 10, lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toPublicKey().toAddress()).toHex(), customInstructions: JSON.stringify({ sats: true, assetId: TOKEN, protocolID: [2, "amm swap"], keyID: `amm-swap-${pool}:sats`, counterparty: "self" }) });
-    connect({ swaps: [sats(p1), sats(p2)] });
+    const sats = (n: number) => ({ outpoint: `${"5a".repeat(32)}.${n}`, satoshis: 10, lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toPublicKey().toAddress()).toHex(), customInstructions: JSON.stringify({ sats: true, protocolID: [2, "amm swap"], keyID: `amm-swap-${n}`, counterparty: "self" }) });
+    connect({ swaps: [sats(0), sats(1)] });
     expect(await settleSwaps()).toEqual([]);
-    expect(since(0)).toEqual([`GET /@${TOKEN}/amm/spends?outpoint=${p1},${p2}`]);
+    expect(since(0)).toEqual([`GET /amm/spends?outpoint=${"5a".repeat(32)}.0,${"5a".repeat(32)}.1`]);
+    // A spender this wallet lacks: its transaction read from the token's instance; not this wallet's leg: nothing taken in.
+    inst.spends[`${"5a".repeat(32)}.0`] = { outpoint: `${"5a".repeat(32)}.0`, tokenId: TOKEN, spentBy: swap1.id("hex") };
+    inst.txs[swap1.id("hex")] = atomic(swap1, [fund, tokenDeploy, poolDeploy]);
+    const n = inst.requests.length;
+    expect(await settleSwaps()).toEqual([]);
+    expect(since(n)).toEqual([`GET /amm/spends?outpoint=${"5a".repeat(32)}.0,${"5a".repeat(32)}.1`, `GET /@${TOKEN}/amm/tx?id=${swap1.id("hex")}`]);
+    expect(internalized).toEqual([]);
   });
 
   it("enableToken / disableToken: root's {fn: enable, args: {tokenId, beef}} to swap's <app>/admin, the deploy's Atomic BEEF from the wallet's module basket, else from discovery (GET /@discovery/1color/<token>/deploy), else refused naming both; disable {tokenId}; a stopped token enabled again without a BEEF; the list read again after each", async () => {
@@ -914,7 +892,7 @@ describe("requests per page (0.34.0)", () => {
     const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, allowPartial: false }, h ?? parsePools({}), META);
     expect(since(n)).toEqual([]);
     expect(q.legs).toHaveLength(1);
-    // A swap: ONE /pools/beef (the executeSwap tests above), then each leg's relay /call (test/swap.test.ts).
+    // A swap (0.40.0): the overlay pass, then per leg ONE /pools/beef?pool= and its relay /call (test/clientSwap.test.ts).
     // After it: the pages' data reloads (onDataChange) read the wallet and the cached list; the pools come on the stream.
     await myTokens();
     await walletSats();
@@ -922,7 +900,7 @@ describe("requests per page (0.34.0)", () => {
     offs.forEach((f) => f());
   });
 
-  it("Your tokens: load = the token list + (only for held tokens the list lacks) ONE ?ids= + (only with staged rows) ONE /spends per token", async () => {
+  it("Your tokens: load = the token list + (only for held tokens the list lacks) ONE ?ids= + (only with rows in the swap basket) ONE host /amm/spends", async () => {
     heldWallet();
     await myTokens();
     await settleSwaps();
@@ -933,11 +911,11 @@ describe("requests per page (0.34.0)", () => {
     const pd = poolDeploy.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
     connect({ held: [{ outpoint: `${DEPLOY}.0`, satoshis: 1, spendable: true, lockingScript: tokenDeploy.outputs[0]!.lockingScript.toHex() }], pools: [{ outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci }] });
-    inst.lpPools[v.lp] = { lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
+    inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
     await myPositions();
     await myTokens();
     await validatorTerms(TOKEN);
-    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?lp=${v.lp}`, `GET /@${TOKEN}/amm/pools`, `GET /@${TOKEN}/amm/terms`]);
+    expect(since(0)).toEqual(["GET /amm/tokens", `GET /@${TOKEN}/amm/positions?pool=${PID}`, `GET /@${TOKEN}/amm/pools`, `GET /@${TOKEN}/amm/terms`]);
     expect(streams).toEqual([]);
   });
 

@@ -61,7 +61,13 @@ describe("the shared names (D10)", () => {
     expect(pkg.SWAP_BASKET).toBe("amm-swap");
     expect(pkg.SWAP_PROTOCOL).toEqual([2, "amm swap"]);
     expect(pkg.SWAP_KEY_PREFIX).toBe("amm-swap-");
-    expect(pkg.swapKeyID(`${"cd".repeat(32)}_1`, "sats")).toBe(`amm-swap-${"cd".repeat(32)}.1:sats`);
+    // 0.40.0: a staged row's keyID random; a change row's from the leg's first input of that kind; the stage label and the description mark.
+    expect(pkg.newSwapKeyID()).toMatch(/^amm-swap-[0-9a-f]{32}$/);
+    expect(pkg.changeKeyID(`${"cd".repeat(32)}.1`)).toBe(`amm-swap-${"cd".repeat(32)}.1:change`);
+    expect(pkg.SWAP_STAGE_LABEL).toBe("amm-swap-stage");
+    expect(pkg.SWAP_KEY_MARK).toBe(" · amm-swap ");
+    expect(pkg.swapKeyIdOfDescription(pkg.swapKeyDescription("TST for a swap", `amm-swap-${"0f".repeat(16)}`))).toBe(`amm-swap-${"0f".repeat(16)}`);
+    expect(pkg.legDerivation(`${"cd".repeat(32)}.1`, "change").derivationPrefix).toBe("YW1tIHN3YXAgY2hhbmdl");
     expect(pkg.LP_KEY_PROTOCOL).toEqual([2, "3241645161d8"]);
     expect(pkg.LP_KEY_MARK).toBe(" · amm-lp ");
     expect(pkg.POOL_DEPLOY_LABEL).toBe("amm-pool-deploy");
@@ -79,7 +85,7 @@ describe("the shared names (D10)", () => {
 
 describe("error kinds (D13)", () => {
   it("the kinds, and what each error is", () => {
-    expect([...CLIENT_ERROR_KINDS]).toEqual(["stale_pool", "fee_mismatch", "quote_mismatch", "slippage", "pool_spent", "user_rejected", "no_answer", "refused", "network"]);
+    expect([...CLIENT_ERROR_KINDS]).toEqual(["stale_pool", "fee_mismatch", "quote_mismatch", "slippage", "pool_spent", "user_rejected", "no_answer", "below_minimum", "refused", "network"]);
     for (const code of ["stale_pool", "fee_mismatch", "quote_mismatch", "slippage"] as const) expect(errorKind(new PoolBuildError(code, "x"))).toBe(code);
     expect(errorKind(new PoolBuildError("token_mismatch", "x"))).toBeUndefined();
     expect(errorKind(new RelayError("failed", "x", 500))).toBe("refused");
