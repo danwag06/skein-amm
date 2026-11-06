@@ -128,8 +128,8 @@ Bodies are dag-cbor. An outpoint is text, BRC-162's form: `<txid, 64 hex, displa
 ```
 frame    {message, body: <request>, topic: "tm_color_<assetId>"}   the signed package ("A direct call"); topic routes, 0.31.0
 request  {tx: bytes, pool: "<txid>_<vout>"}
-reply    {ok: true, tx: bytes, txid: "<hex>"}           admitted in the validator's overlay
-         {ok: false, reason, detail?, txid?, pool?}
+reply    {ok: true, tx: bytes, txid: "<hex>", beef: bytes}   admitted in the validator's overlay
+         {ok: false, reason, detail?, txid?, pool?, beef?}
 ```
 
 - `tx` is the complete transaction, funded and signed by the taker (LP) on its own inputs, with the validator's signature slot in the pool call left as `OP_0`. It may be raw bytes, or a BEEF (V1, V2, Atomic) whose subject it is: its ancestry travels with the submission. Send a BEEF: a raw request is submitted as a V1 BEEF of the signed transaction alone, which verifies only if the instance holds every parent (`submit_refused`, `MissingInput`, otherwise).
@@ -137,6 +137,7 @@ reply    {ok: true, tx: bytes, txid: "<hex>"}           admitted in the validato
 - The reply's `tx` is the same transaction with the validator's signature in its slot (the STEAK is the overlay's; the validator answers with the transaction).
 - `txid` in a refusal: the signed transaction's, when the refusal is about it (after signing).
 - `pool` in a refusal: when the pool was already spent (`pool_spent`, or `rejected` when another transaction spent it meanwhile), its newest state, followed from spender to spender (continuations are always output 0): `{outpoint, bsvReserve, tokenReserve, lpFeeBps, validatorFeeBps, commissionBps, tokenId, lpPubKey, validatorPubKey, validatorIdentity}`, or `{closed: true, outpoint, closedBy}`. A spender awaiting the network counts (the instance holds it).
+- `beef` (0.41.0, David 2026-11-05: "Its own host will catch up when it receives the refusal from the validator"): on `ok`, the BEEF the validator submitted to its own overlay (`submissionBeef`: the signed swap with its ancestry and the pool's transaction back to proven ones); on `pool_spent` with a live newest state, that output's transaction with its ancestry back to proven ones (the chain state's, `state.beefFor`). The relaying instance submits it to its own overlay before it answers the page (amm-p2p README, "The marketplace relay").
 - **The same request again** is recognised: the pool's spender is this request with the validator's signature in it, so it is not signed again; it waits on the first submission's thread, or is answered from the state.
 
 **`affirm`** (0.13.0)

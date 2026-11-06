@@ -56,7 +56,8 @@ import {
   validatorTerms,
   walletSats,
   watchStats,
-  watchTokenPools,
+  tokenPools,
+  watchPoolEvents,
   claimStatus,
   SPEC_OP_WALLET_BALANCE,
   type PoolsAnswer,
@@ -328,12 +329,13 @@ describe("exchange.ts, wired", () => {
     expect(hostedFrom(inst.enabled as never, [toStats(st)!])[1]).toMatchObject({ marginalPrice: 1.5, pools: 1 });
   });
 
-  it("the pools stream (D16; 0.39.0, D7): only a token's route is held as an EventSource (no host-wide stream); each answer handed on", async () => {
-    const answers: PoolsAnswer[] = [];
-    const off = watchTokenPools(TOKEN, (a) => answers.push(a));
-    await new Promise((r) => setTimeout(r, 10));
-    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
-    expect(answers[0]!.pools.map((p) => p.outpoint)).toEqual([`${poolDeploy.id("hex")}_0`]);
+  it("the pools route (0.41.0): a plain read, no stream; the pool events on the host's feed `/@<token>/amm/events`", async () => {
+    const a = await tokenPools(TOKEN);
+    expect(a.pools.map((p) => p.outpoint)).toEqual([`${poolDeploy.id("hex")}_0`]);
+    expect(since(0)).toEqual([`GET /@${TOKEN}/amm/pools`]);
+    expect(streams).toEqual([]);
+    const off = watchPoolEvents(TOKEN, () => {});
+    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/events`]);
     off();
   });
 
@@ -408,10 +410,11 @@ describe("exchange.ts, wired", () => {
     const n = inst.requests.length;
     const r = await executeSwap(q);
     expect(r).toMatchObject({ status: "failed", stop: "no_pool", legs: [] });
-    // The stage (a buy: sats only, ONE plain createAction), the pool by its id, nothing relayed; besides, the token's pools stream.
+    // The stage (a buy: sats only, ONE plain createAction), the pools route read fresh, the pool by its id, nothing relayed; no stream (0.41.0).
     expect(sent.map((a) => a.labels)).toEqual([["amm-swap"]]);
     expect(since(n).filter((x) => !x.endsWith("/amm/pools"))).toEqual([`GET /@${TOKEN}/amm/pools/beef?pool=${PID}`]);
-    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
+    expect(since(n).filter((x) => x.endsWith("/amm/pools")).length).toBeGreaterThan(0);
+    expect(streams).toEqual([]);
     expect(inst.calls).toEqual([]);
   });
 
@@ -874,26 +877,27 @@ describe("requests per page (0.34.0)", () => {
   /** A connected wallet holding the token (on the exchange) and nothing staged. */
   const heldWallet = () => connect({ held: [{ outpoint: `${DEPLOY}.0`, satoshis: 1, spendable: true, lockingScript: tokenDeploy.outputs[0]!.lockingScript.toHex() }] });
 
-  it("Swap: load = the token list + ONE host-wide stats read + the token's pools stream; a quote = 0; a swap = ONE /pools/beef + the relay's /call per leg; after the swap = 0 (the stream carries the change)", async () => {
+  it("Swap: load = the token list + ONE host-wide stats read + ONE plain pools read (0.41.0) and the token's pool event feed; a quote = 0; a swap = per leg the pools read, ONE /pools/beef + the relay's /call; after the swap = 0 (a pool event makes the page read the pools again)", async () => {
     heldWallet();
     const offs: (() => void)[] = [];
     let h: PoolsAnswer | null = null;
-    // Load: App's useHostedTokens (the list, H4 once), Swap's useTokenPools (P2 stream), useMyTokens, useWalletSats.
+    // Load: App's useHostedTokens (the list, H4 once), Swap's useTokenPools (P2 read, the token's feed), useMyTokens, useWalletSats.
     await registeredTokens();
     offs.push(watchStats(() => {}));
-    offs.push(watchTokenPools(TOKEN, (a) => (h = a)));
+    offs.push(watchPoolEvents(TOKEN, () => {}));
+    h = await tokenPools(TOKEN);
     await myTokens();
     await walletSats();
     await new Promise((r) => setTimeout(r, 10));
     const load = since(0);
-    expect(load).toEqual(["GET /amm/tokens", `GET /amm/stats`, `GET /@${TOKEN}/amm/pools`]);
-    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/pools`]);
+    expect(load).toEqual(["GET /amm/tokens", `GET /amm/stats`, `GET /@${TOKEN}/amm/events`, `GET /@${TOKEN}/amm/pools`]);
+    expect(streams).toEqual([`${ORIGIN}/@${TOKEN}/amm/events`]);
     const n = inst.requests.length;
     const q = quoteSwap({ tokenId: TOKEN, side: "buy", amountIn: 20_000n, maxSlippageBps: 100, maxSources: 1 }, h ?? parsePools({}), META);
     expect(since(n)).toEqual([]);
     expect(q.legs).toHaveLength(1);
     // A swap (0.40.0): the overlay pass, then per leg ONE /pools/beef?pool= and its relay /call (test/clientSwap.test.ts).
-    // After it: the pages' data reloads (onDataChange) read the wallet and the cached list; the pools come on the stream.
+    // After it: the pages' data reloads (onDataChange) read the wallet and the cached list; a pool event makes the page read the pools.
     await myTokens();
     await walletSats();
     expect(since(n)).toEqual([]);

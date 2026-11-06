@@ -259,10 +259,22 @@ launched              emit dial {peer: the validator's peer ID (as the caller na
                       to the libp2p provider; await it; deadline `expires`
 {stream} (box dial)   emit send {stream, body: the package}; rest again
 {stream, body} (frame) the validator's answer: {ok: true, tx, txid} → accepted; {ok: false, reason, detail?, pool?}
-                      → refused; emit close; answer the message caller
+                      → refused; emit close; answer the message caller — or (0.41.0) when it carries
+                      `beef` (accepted; pool_spent): emit close, send {fn: "submit", args: {beef,
+                      topics: [the token topic]}} to this instance in box `amm/submit` (amm-validator's
+                      submit.zig message), await it; deadline `expires`
+the overlay's answer  (0.41.0) the validator's answer applied (accepted | refused); a rejection or
+                      error there said in `detail` ("this host's overlay refused the validator's
+                      transaction: …"), the verdict standing; answer the message caller
 {stream, closed} | {error}   failed (reason `unreachable`)
-woke at `expires`     timeout (close the stream if open); before it, rest again
+woke at `expires`     timeout (close the stream if open); before it, rest again; while this
+                      overlay has not answered (0.41.0): the validator's answer applied, `detail`
+                      "this host's overlay did not answer before expires"
 ```
+
+So when the page hears `accepted` or `pool_spent` from a remote validator, its own host already
+lists the pool where the validator says it is (0.41.0, David 2026-11-05). A local validator (this
+instance) needs none of it: its submission is this overlay's.
 
 **The package** (the frame): the signed-message package amm-validator opens (its README, "A direct call"): `{message, body, topic}`, the mail record `{kind: "mail", op: "put", sender: this instance's identity, recipient: validator, box: "swap", body: <cid>, nonce: sha256("amm-swap-relay" ‖ id)[0..16], signature}` signed BRC-169's way through the `wallet` import (`createSignature`, `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone, over sha256 of the record without `signature`), and the body `{tx: <one V2 BEEF: the funding transaction's ancestry from its BEEF, the funding transaction (unproven), the swap>, pool}`. The pool's own ancestry is not sent: the validator holds the pool (it is its overlay). `topic` (0.31.0) is this instance's token topic `tm_color_<assetId>` (head `amm/token`'s `tokenId`, `names.overlayOf`), at the frame's top level outside the signed record: the validator's host runs several instances on one libp2p node and picks the one a stream is for by the first frame's `topic` (skein `src/host/p2p.ts` `streamHandle`); without it such a host answers `topic required` and the swap times out.
 

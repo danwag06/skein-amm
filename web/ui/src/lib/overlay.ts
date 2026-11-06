@@ -8,8 +8,8 @@
  *
  * | # | route | answer |
  * |---|---|---|
- * | P1 | `GET <origin>/amm/pools` (and as an event stream) | `[{tokenId, …P2 row}]`, every enabled token's live pools (the host's) |
- * | P2 | `GET <origin>/@<token>/amm/pools` (and as an event stream) | `{market: {commissionPkh, minCommissionBps}, validators: [{identity, peerId, minLegSats?}] (0.34.1: beating now; 0.40.0: the minimum leg its terms announce), pools: [{poolId, lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId, swaps}]}`: only pools whose validator beats now and whose commission is at or above the market's minimum (the host's) |
+ * | P1 | `GET <origin>/amm/pools` | `[{tokenId, …P2 row}]`, every enabled token's live pools (the host's) |
+ * | P2 | `GET <origin>/@<token>/amm/pools` (0.41.0: a plain read only) | `{market: {commissionPkh, minCommissionBps}, validators: [{identity, peerId, minLegSats?}] (0.34.1: beating now; 0.40.0: the minimum leg its terms announce), pools: [{poolId, lpPubKey, outpoint, bsvReserve, tokenReserve, liquidityFeeBps, validationFeeBps, commissionBps, validatorIdentityKey, validatorPeerId, swaps}]}`: only pools whose validator beats now and whose commission is at or above the market's minimum (the host's) |
  * | P3 | `GET /@<token>/amm/pools/beef?pool=id1,id2` (0.40.0: by pool id) | `{pools: [P2 row without validatorPeerId], beef: <base64 BEEF of their transactions>}` |
  * | P4 | `GET /@<token>/amm/positions?pool=id1,id2` (0.40.0) | `[{poolId, lpPubKey, status: live|rescinded|closed, outpoint?, current?, sats, tokens, swaps}]` |
  * | P5 | `GET /@<token>/amm/fees/validator?id=k1,k2` | `[{validatorIdentityKey, sats, tokens, swaps, pools}]` |
@@ -34,10 +34,11 @@
  * | H8 | `GET /@<token>/amm/pools/history?from=&to=&pool=&limit=&after=` (0.40.0) | `{events: [PoolEvent], next}` oldest first; `next` → `after` |
  * | H9 | `GET <origin>/amm/spends?outpoint=a,b` (0.40.0, the host's) | `[{outpoint, tokenId?, spentBy?}]`: each enabled token's `/spends`, the first that names a spender |
  * | H6 | `GET /@<token>/amm/color/<token>/holders?limit=&skip=` | `{count, rows: [{address, balance}]}` largest first |
+ * | E1 | `GET /@<token>/amm/events`, `GET <origin>/amm/events` (0.41.0, the host's) | Server-Sent Events, each `event: pool`, `data: {tokenId, …row}`: the AMM lookup's pool event (a deploy, swap, close or rescind: the H8 row; a `revert`), one token's or every enabled token's; nothing on connect, nothing replayed |
  *
- * 0.39.0 (agent-env plans/history-api-2026-11-05.md D7): P2's stream sends the whole answer once
- * (`pools`), then ONE `change` per pool change (`{kind, poolId, outpoint, pool?, trade?}`, 0.40.0:
- * `poolId`); the host-wide stream is gone (P1, H4 and H5 are plain reads).
+ * 0.41.0 (agent-env plans/swap-balance-build-2026-11-05.md §5): P2's event-stream form is gone
+ * (0.39.0's `pools` / `change` events); the pool events are the lookup's, passed through by the
+ * host's feeds (E1): signals for display, the pools route the truth.
  *
  * 0.40.0 (agent-env plans/swap-balance-build-2026-11-05.md §0 3): a pool's id is its deploy outpoint
  * `<txid>_<vout>` (`poolId`, copied forward along its swaps); every read by LP key is by pool id
@@ -260,17 +261,16 @@ export function poolsUrl(base: string): string {
   return `${trim(base)}/pools`;
 }
 
-/** P2 once (a one-shot reader; the Swap page holds the stream, `watchPools`). */
+/** P2: the token's pools as the host lists them now (0.41.0: a plain read only). */
 export async function readPools(base: string, fetchFn?: FetchFn): Promise<PoolsAnswer> {
   return parsePools(await getJson(poolsUrl(base), fetchFn));
 }
 
-/** What `watchPools` needs of the browser's `EventSource` (tests pass a fake). */
+/** What `watchPoolEvents` needs of the browser's `EventSource` (tests pass a fake). */
 export interface EventSourceLike {
   addEventListener(type: string, fn: (e: { data?: unknown }) => void): void;
   close(): void;
   onerror?: ((e: unknown) => void) | null;
-  onopen?: ((e: unknown) => void) | null;
 }
 export type EventSourceCtor = new (url: string) => EventSourceLike;
 
@@ -279,81 +279,31 @@ function eventSourceCtor(): EventSourceCtor | null {
   return typeof g.EventSource === "function" ? g.EventSource : null;
 }
 
+/** E1's URL: `<base>/events` (a token instance's app base: that token's; the swap app's: every token's). */
+export function eventsUrl(base: string): string {
+  return `${trim(base)}/events`;
+}
+
 /**
- * Holds a pools route as an event stream (D16; 0.39.0, D7): `GET <url>` with `Accept:
- * text/event-stream` (the browser's EventSource sends it). The event `pools` carries the whole
- * answer (first the current one; again when the host cannot say what changed): it replaces the held
- * answer. With `change` (P2), the event `change` carries one pool change: `change(held, x)` applies
- * it to the held answer (null: it cannot); one it cannot apply (no answer held yet, an unknown
- * kind, a row it names not held) → the route is read again ONCE (a plain GET) and that answer is
- * held (changes arriving while it is read are dropped: the answer read is the newer state). Each
- * new held answer goes to `onAnswer`. Without an EventSource (an old browser, a test): ONE plain
- * GET, no poll. → the unsubscribe.
+ * Listens to a host's pool event feed (E1, 0.41.0): each `pool` message parsed
+ * (`parsePoolEventMessage`) to `onEvent`; one it cannot parse is passed over. Reconnecting is the
+ * browser's EventSource's. Without an EventSource: nothing. → the unsubscribe.
  */
-export function watchPools<T>(
-  url: string,
-  parse: (x: unknown) => T,
-  onAnswer: (a: T) => void,
-  o: { onError?: (e: unknown) => void; onOpen?: () => void; EventSource?: EventSourceCtor | null; fetch?: FetchFn; change?: (held: T, x: unknown) => T | null } = {},
-): () => void {
+export function watchPoolEvents(url: string, onEvent: (e: PoolEventMessage) => void, o: { onError?: (e: unknown) => void; EventSource?: EventSourceCtor | null } = {}): () => void {
   const ES = o.EventSource === undefined ? eventSourceCtor() : o.EventSource;
+  if (!ES) return () => {};
   let stopped = false;
-  if (!ES) {
-    getJson(url, o.fetch).then(
-      (x) => {
-        if (!stopped) onAnswer(parse(x));
-      },
-      (e: unknown) => {
-        if (!stopped) o.onError?.(e);
-      },
-    );
-    return () => {
-      stopped = true;
-    };
-  }
-  let held: T | null = null;
-  let rereading = false;
-  const hold = (a: T) => {
-    held = a;
-    onAnswer(a);
-  };
-  const reread = () => {
-    rereading = true;
-    getJson(url, o.fetch).then(
-      (x) => {
-        rereading = false;
-        if (!stopped) hold(parse(x));
-      },
-      (e: unknown) => {
-        rereading = false;
-        if (!stopped) o.onError?.(e);
-      },
-    );
-  };
   const es = new ES(url);
-  es.addEventListener("pools", (e) => {
+  es.addEventListener("pool", (e) => {
     if (stopped) return;
+    let m: PoolEventMessage | null = null;
     try {
-      hold(parse(JSON.parse(String(e.data))));
-    } catch (err) {
-      o.onError?.(err);
+      m = parsePoolEventMessage(JSON.parse(String(e.data)));
+    } catch {
+      m = null;
     }
+    if (m) onEvent(m);
   });
-  const apply = o.change;
-  if (apply) {
-    es.addEventListener("change", (e) => {
-      if (stopped || rereading) return;
-      let next: T | null = null;
-      try {
-        next = held === null ? null : apply(held, JSON.parse(String(e.data)));
-      } catch {
-        next = null;
-      }
-      if (next === null) reread();
-      else hold(next);
-    });
-  }
-  es.onopen = () => o.onOpen?.();
   es.onerror = (e) => o.onError?.(e);
   return () => {
     stopped = true;
@@ -644,19 +594,6 @@ export interface TokenPosition extends LpPool {
   tokenId: string;
 }
 
-/** One pool change on P2's stream (event `change`, D7). */
-export interface PoolChange {
-  kind: "deploy" | "swap" | "close" | "rescind";
-  /** The pool's id (0.40.0). */
-  poolId: string;
-  /** The new pool output (deploy, swap) or the one gone (close, rescind). */
-  outpoint: string;
-  /** deploy, swap: the pool's row. */
-  pool?: PoolRow;
-  /** swap: its trade row. */
-  trade?: Trade;
-}
-
 const intOrNull = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
 const int = (x: unknown): number => intOrNull(x) ?? 0;
 
@@ -717,48 +654,6 @@ export function toStats(x: unknown): TokenStats | null {
     tvlTokens: wireBig(r.tvlTokens),
     pools: int(r.pools),
   };
-}
-
-/** A `change` event's data, or null when it is not one this client knows. */
-export function parseChange(x: unknown): PoolChange | null {
-  const r = x as Record<string, unknown> | null;
-  if (!r || typeof r !== "object" || typeof r.outpoint !== "string" || typeof r.poolId !== "string") return null;
-  if (r.kind !== "deploy" && r.kind !== "swap" && r.kind !== "close" && r.kind !== "rescind") return null;
-  const pool = r.pool === undefined ? null : toPoolRow(r.pool);
-  const trade = r.trade === undefined ? null : toTrade(r.trade);
-  return { kind: r.kind, poolId: r.poolId.toLowerCase(), outpoint: r.outpoint, ...(pool ? { pool } : {}), ...(trade ? { trade } : {}) };
-}
-
-
-/**
- * One `change` applied to a held P2 answer (D7) → the new answer, or null when it cannot be applied
- * (the caller reads the route again): 0.40.0, by pool id — `swap` — the row of `poolId` replaced
- * by `pool` (its outpoint moved); `deploy` — `pool` added; `close` / `rescind` — the row of
- * `poolId` removed. The market and the validators are kept (a change of either comes as a whole
- * `pools` answer).
- */
-export function applyPoolChange(held: PoolsAnswer, x: unknown): PoolsAnswer | null {
-  const ch = parseChange(x);
-  if (!ch) return null;
-  switch (ch.kind) {
-    case "swap": {
-      if (!ch.pool) return null;
-      const i = held.pools.findIndex((p) => p.poolId === ch.poolId);
-      if (i < 0) return null;
-      const pools = held.pools.slice();
-      pools[i] = ch.pool;
-      return { ...held, pools };
-    }
-    case "deploy":
-      if (!ch.pool) return null;
-      return { ...held, pools: [...held.pools, ch.pool] };
-    case "close":
-    case "rescind": {
-      const pools = held.pools.filter((p) => p.poolId !== ch.poolId);
-      if (pools.length === held.pools.length) return null;
-      return { ...held, pools };
-    }
-  }
 }
 
 const query = (q: Record<string, string | number | undefined>) => {
@@ -906,6 +801,56 @@ function toPoolEvent(x: unknown): PoolEvent | null {
     ...text("commissionPkh"),
     ...text("payoutPkh"),
   } as PoolEvent;
+}
+
+/**
+ * A revert (0.41.0): an admitted transaction later rejected — `txid` the rejected transaction, `at`
+ * the step's time, and the pool as it stands after the undo (its outpoint, reserves, fields,
+ * `swaps`), or none of those when the pool no longer exists.
+ */
+export interface PoolRevert {
+  kind: "revert";
+  txid: string;
+  poolId: string;
+  at: number;
+  outpoint?: string;
+  bsvReserve?: bigint;
+  tokenReserve?: bigint;
+  lpPubKey?: string;
+  liquidityFeeBps?: bigint;
+  validationFeeBps?: bigint;
+  commissionBps?: bigint;
+  validatorIdentityKey?: string;
+  swaps?: number;
+}
+
+/** One message of a pool event feed (E1, 0.41.0): `{tokenId, …row}`, the row an H8 event or a revert. */
+export type PoolEventMessage = { tokenId: string } & (PoolEvent | PoolRevert);
+
+function toPoolRevert(r: Record<string, unknown>): PoolRevert | null {
+  if (r.kind !== "revert" || typeof r.txid !== "string" || typeof r.poolId !== "string") return null;
+  const base: PoolRevert = { kind: "revert", txid: r.txid.toLowerCase(), poolId: r.poolId.toLowerCase(), at: int(r.at) };
+  if (typeof r.outpoint !== "string") return base;
+  return {
+    ...base,
+    outpoint: r.outpoint,
+    bsvReserve: wireBig(r.bsvReserve),
+    tokenReserve: wireBig(r.tokenReserve),
+    lpPubKey: typeof r.lpPubKey === "string" ? r.lpPubKey.toLowerCase() : "",
+    liquidityFeeBps: wireBig(r.liquidityFeeBps),
+    validationFeeBps: wireBig(r.validationFeeBps),
+    commissionBps: wireBig(r.commissionBps),
+    validatorIdentityKey: typeof r.validatorIdentityKey === "string" ? r.validatorIdentityKey.toLowerCase() : "",
+    swaps: int(r.swaps),
+  };
+}
+
+/** A pool event feed message's data, or null when it is not one. */
+export function parsePoolEventMessage(x: unknown): PoolEventMessage | null {
+  const r = x as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.tokenId !== "string") return null;
+  const row = r.kind === "revert" ? toPoolRevert(r) : toPoolEvent(r);
+  return row ? { tokenId: r.tokenId, ...row } : null;
 }
 
 /** H8: `GET <base>/pools/history?from=&to=&pool=&limit=&after=` → the page, oldest first. */

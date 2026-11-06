@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createClient, type PoolsAnswer } from "../src/client";
-import { applyPoolChange, parsePools, watchPools, type EventSourceLike } from "../src/lib/overlay";
+import { parsePoolEventMessage, type EventSourceLike } from "../src/lib/overlay";
 
 const ORIGIN = "https://ex.example";
 const T = `${"ab".repeat(32)}_0`;
@@ -116,88 +116,55 @@ describe("the history readers (H1–H6)", () => {
   });
 });
 
-describe("the token stream's `change` (D7)", () => {
-  const held = (): PoolsAnswer => parsePools({ market: { commissionPkh: null, minCommissionBps: 0 }, validators: [{ identity: K, peerId: PEER }], pools: [pool(LP1, `${"11".repeat(32)}_0`), pool(LP2, `${"22".repeat(32)}_0`)] });
+describe("the pool event feeds (E1, 0.41.0)", () => {
+  const swapRow = { kind: "swap", txid: "CD".repeat(32), poolId: idOf(LP1), outpoint: `${"cd".repeat(32)}_0`, bsvReserve: 1019910, tokenReserve: 4902394, lpPubKey: LP1, liquidityFeeBps: 30, validationFeeBps: 5, commissionBps: 10, validatorIdentityKey: K, at: 7, swaps: 1, side: "buy", amountIn: 20000, amountOut: 97606, feeLp: 60, feeValidator: 10, feeCommission: 20, commissionPkh: "55".repeat(20), payoutPkh: "ee".repeat(20) };
 
-  it("swap (0.40.0: by pool id): the row of `poolId` replaced by `pool` (its outpoint moved), in place; the market and validators kept", () => {
-    const h = held();
-    const next = applyPoolChange(h, { kind: "swap", poolId: idOf(LP1), outpoint: `${"33".repeat(32)}_0`, pool: pool(LP1, `${"33".repeat(32)}_0`, 1_019_910, 4_902_394), trade: tradeRow(LP1, "33".repeat(32)) })!;
-    expect(next.pools.map((p) => [p.lpPubKey, p.outpoint, p.bsvReserve])).toEqual([
-      [LP1, `${"33".repeat(32)}_0`, 1_019_910n],
-      [LP2, `${"22".repeat(32)}_0`, 1_000_000n],
-    ]);
-    expect(next.market).toBe(h.market);
-    expect(next.validators).toBe(h.validators);
-    expect(h.pools[0]!.outpoint).toBe(`${"11".repeat(32)}_0`);
+  it("a message: {tokenId, …row} — an H8 row typed as readPoolHistory types it; a revert with the pool after the undo, or with none left; anything else null", () => {
+    expect(parsePoolEventMessage({ tokenId: T, ...swapRow })).toEqual({
+      tokenId: T, kind: "swap", txid: "cd".repeat(32), poolId: idOf(LP1), outpoint: `${"cd".repeat(32)}_0`, bsvReserve: 1019910n, tokenReserve: 4902394n, lpPubKey: LP1, liquidityFeeBps: 30n, validationFeeBps: 5n, commissionBps: 10n, validatorIdentityKey: K, at: 7, swaps: 1, side: "buy", amountIn: 20000n, amountOut: 97606n, feeLp: 60n, feeValidator: 10n, feeCommission: 20n, commissionPkh: "55".repeat(20), payoutPkh: "ee".repeat(20),
+    });
+    expect(parsePoolEventMessage({ tokenId: T, kind: "revert", txid: "AB".repeat(32), poolId: idOf(LP1), outpoint: `${"11".repeat(32)}_0`, bsvReserve: 1000000, tokenReserve: 5000000, lpPubKey: LP1, liquidityFeeBps: 30, validationFeeBps: 5, commissionBps: 10, validatorIdentityKey: K, at: 9, swaps: 0 })).toEqual({
+      tokenId: T, kind: "revert", txid: "ab".repeat(32), poolId: idOf(LP1), at: 9, outpoint: `${"11".repeat(32)}_0`, bsvReserve: 1000000n, tokenReserve: 5000000n, lpPubKey: LP1, liquidityFeeBps: 30n, validationFeeBps: 5n, commissionBps: 10n, validatorIdentityKey: K, swaps: 0,
+    });
+    expect(parsePoolEventMessage({ tokenId: T, kind: "revert", txid: "ab".repeat(32), poolId: idOf(LP1), at: 9 })).toEqual({ tokenId: T, kind: "revert", txid: "ab".repeat(32), poolId: idOf(LP1), at: 9 });
+    expect(parsePoolEventMessage({ ...swapRow })).toBeNull();
+    expect(parsePoolEventMessage({ tokenId: T, kind: "merge", txid: "ab".repeat(32), poolId: idOf(LP1) })).toBeNull();
   });
 
-  it("deploy: `pool` added; close and rescind: the row of `poolId` removed", () => {
-    const LP3 = "02" + "cc".repeat(32);
-    expect(applyPoolChange(held(), { kind: "deploy", poolId: idOf(LP3), outpoint: `${"44".repeat(32)}_0`, pool: pool(LP3, `${"44".repeat(32)}_0`) })!.pools.map((p) => p.lpPubKey)).toEqual([LP1, LP2, LP3]);
-    expect(applyPoolChange(held(), { kind: "close", poolId: idOf(LP1), outpoint: `${"11".repeat(32)}_0` })!.pools.map((p) => p.lpPubKey)).toEqual([LP2]);
-    expect(applyPoolChange(held(), { kind: "rescind", poolId: idOf(LP2), outpoint: `${"22".repeat(32)}_0` })!.pools.map((p) => p.lpPubKey)).toEqual([LP1]);
-  });
-
-  it("one it cannot apply → null: an unknown kind, no pool id, a swap of a pool not held, a close of a pool not held, a deploy without its pool", () => {
-    expect(applyPoolChange(held(), { kind: "merge", poolId: idOf(LP1), outpoint: "x_0" })).toBeNull();
-    expect(applyPoolChange(held(), { kind: "close", outpoint: `${"11".repeat(32)}_0` })).toBeNull();
-    expect(applyPoolChange(held(), { kind: "swap", poolId: idOf("02" + "dd".repeat(32)), outpoint: `${"55".repeat(32)}_0`, pool: pool("02" + "dd".repeat(32), `${"55".repeat(32)}_0`), trade: tradeRow("02" + "dd".repeat(32), "55".repeat(32)) })).toBeNull();
-    expect(applyPoolChange(held(), { kind: "close", poolId: idOf("02" + "66".repeat(32)), outpoint: `${"66".repeat(32)}_0` })).toBeNull();
-    expect(applyPoolChange(held(), { kind: "deploy", poolId: idOf("02" + "77".repeat(32)), outpoint: `${"77".repeat(32)}_0` })).toBeNull();
-  });
-
-  it("the reader: `pools` replaces the held answer, each `change` applied and handed on; one it cannot apply (or one before any answer) → ONE plain GET of the route, its answer held", async () => {
-    let es: FakeES | null = null;
+  it("watchPoolEvents: the token's feed `/@<token>/amm/events`, every token's `<origin>/amm/events`; each `pool` message parsed and handed on, one not a message passed over; closed on unsubscribe", () => {
+    const made: FakeES[] = [];
     class FakeES implements EventSourceLike {
       fns = new Map<string, (e: { data?: unknown }) => void>();
+      closed = false;
       onerror: ((e: unknown) => void) | null = null;
-      onopen: ((e: unknown) => void) | null = null;
       constructor(readonly url: string) {
-        es = this;
+        made.push(this);
       }
       addEventListener(t: string, fn: (e: { data?: unknown }) => void) {
         this.fns.set(t, fn);
       }
-      close() {}
-      fire(t: string, x: unknown) {
-        this.fns.get(t)!({ data: JSON.stringify(x) });
+      close() {
+        this.closed = true;
       }
     }
-    const asked: string[] = [];
-    const got: PoolsAnswer[] = [];
-    const URL_ = `${ORIGIN}/@${T}/amm/pools`;
-    const reread = { market: {}, validators: [], pools: [pool(LP2, `${"99".repeat(32)}_0`)] };
-    const off = watchPools(URL_, parsePools, (a) => got.push(a), {
-      EventSource: FakeES,
-      change: applyPoolChange,
-      fetch: async (url: string) => {
-        asked.push(url);
-        return json(reread);
-      },
-    });
-    const e = es as unknown as FakeES;
-    // A change before any answer: re-read.
-    e.fire("change", { kind: "close", poolId: idOf(LP1), outpoint: `${"11".repeat(32)}_0` });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(asked).toEqual([URL_]);
-    expect(got.map((a) => a.pools.map((p) => p.outpoint))).toEqual([[`${"99".repeat(32)}_0`]]);
-    // The whole answer replaces it.
-    e.fire("pools", { market: {}, validators: [], pools: [pool(LP1, `${"11".repeat(32)}_0`), pool(LP2, `${"22".repeat(32)}_0`)] });
-    e.fire("change", { kind: "swap", poolId: idOf(LP1), outpoint: `${"33".repeat(32)}_0`, pool: pool(LP1, `${"33".repeat(32)}_0`), trade: tradeRow(LP1, "33".repeat(32)) });
-    e.fire("change", { kind: "close", poolId: idOf(LP2), outpoint: `${"22".repeat(32)}_0` });
-    expect(got.slice(1).map((a) => a.pools.map((p) => p.outpoint))).toEqual([
-      [`${"11".repeat(32)}_0`, `${"22".repeat(32)}_0`],
-      [`${"33".repeat(32)}_0`, `${"22".repeat(32)}_0`],
-      [`${"33".repeat(32)}_0`],
-    ]);
-    expect(asked).toHaveLength(1);
-    // One it cannot apply: ONE re-read; a change while it is read is dropped.
-    e.fire("change", { kind: "rescind", poolId: idOf("02" + "88".repeat(32)), outpoint: `${"88".repeat(32)}_0` });
-    e.fire("change", { kind: "close", poolId: idOf(LP1), outpoint: `${"33".repeat(32)}_0` });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(asked).toEqual([URL_, URL_]);
-    expect(got).toHaveLength(5);
-    expect(got[4]!.pools.map((p) => p.outpoint)).toEqual([`${"99".repeat(32)}_0`]);
-    off();
+    const g = globalThis as { EventSource?: unknown };
+    const was = g.EventSource;
+    g.EventSource = FakeES;
+    try {
+      const c = createClient({ origin: ORIGIN, feeRateSatsPerKb: 100, wallet: null, fetch: async () => json({}) });
+      const got: unknown[] = [];
+      const off1 = c.watchPoolEvents(T, (e) => got.push(e));
+      const off2 = c.watchPoolEvents("all", (e) => got.push(e));
+      expect(made.map((m) => m.url)).toEqual([`${ORIGIN}/@${T}/amm/events`, `${ORIGIN}/amm/events`]);
+      made[0]!.fns.get("pool")!({ data: JSON.stringify({ tokenId: T, ...swapRow }) });
+      made[0]!.fns.get("pool")!({ data: "not json" });
+      made[1]!.fns.get("pool")!({ data: JSON.stringify({ tokenId: T, kind: "revert", txid: "ab".repeat(32), poolId: idOf(LP1), at: 9 }) });
+      expect(got.map((x) => (x as { kind: string }).kind)).toEqual(["swap", "revert"]);
+      off1();
+      off2();
+      expect(made.every((m) => m.closed)).toBe(true);
+    } finally {
+      g.EventSource = was;
+    }
   });
 });

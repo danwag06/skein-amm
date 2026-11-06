@@ -15,14 +15,15 @@
  *   (`hostedTokens`): each token's price, liquidity (TVL) and pool count; no host-wide stream.
  * - **History** (0.39.0, D1–D6): `trades`, `trade`, `candles`, `stats`, `statsAll`, `holders`,
  *   `positionsAll` — plain GETs of the history routes (H1–H6, src/lib/overlay.ts).
- * - **Swap** (D11–D16; 0.40.0): the token's pools route `GET /@<token>/amm/pools` held as an event
- *   stream (`watchTokenPools`: the whole answer once, then one `change` per pool change, by pool
- *   id): the pools whose validator is beating and whose commission meets the market's minimum (the
- *   host's filter), each validator's minimum leg, the market's commission key hash; a quote is the
- *   matching engine's plan over that list (no request); a swap (`executeSwap`) stages what the
- *   swap basket lacks by ONE wallet action, then per leg ONE `GET /@<token>/amm/pools/beef?pool=`
- *   and the leg's relay request (`amm.swap.submit`, held by the host until the relay rests; 15 s
- *   expiry); no answer → the host's `GET /amm/spends`, once more, a race.
+ * - **Swap** (D11–D16; 0.40.0; 0.41.0): the token's pools route `GET /@<token>/amm/pools`, a plain
+ *   read (`tokenPools`): the pools whose validator is beating and whose commission meets the
+ *   market's minimum (the host's filter), each validator's minimum leg, the market's commission key
+ *   hash; a quote is the matching engine's plan over that list (no request); a swap (`executeSwap`)
+ *   stages what the swap basket lacks by ONE wallet action, then per leg the pools route read fresh,
+ *   ONE `GET /@<token>/amm/pools/beef?pool=` and the leg's relay request (`amm.swap.submit`, held by
+ *   the host until the relay rests; 15 s expiry); no answer → the host's `GET /amm/spends`, once
+ *   more, a race. The pool events (`watchPoolEvents`, 0.41.0: the host's feeds) are signals for
+ *   display: a page reads the route again on one.
  * - **Liquidity** (D9, D23; 0.40.0: by pool id): the wallet's pool rows and deploy history, then
  *   ONE `GET /@<token>/amm/positions?pool=` per token; a deploy the history has but the basket
  *   lacks is filed then; Close and Rebalance read their pool's BEEF by its id (`/pools/beef?pool=`);
@@ -47,12 +48,9 @@ import { outpointText, parseOutpoint, parseTokenId, sdkTokenId, tokenIdText } fr
 import { DEFAULT_FEE_RATE_SATS_PER_KB, appName, exchangeBase, tokenBase } from "./lib/config.js";
 import {
   ammLookupService,
-  applyPoolChange,
   liveOfPools,
-  parsePools,
   parseTokenTopic,
   poolOutputOf,
-  poolsUrl,
   readDiscoveryDeploy,
   readDiscoveryIds,
   readDiscoveryList,
@@ -71,7 +69,8 @@ import {
   readTrade,
   readTrades,
   readTx,
-  watchPools,
+  eventsUrl,
+  watchPoolEvents as watchFeed,
   type Candle,
   type CandleSeries,
   type CandleTf,
@@ -89,6 +88,7 @@ import {
   type LpPool,
   type PoolRow,
   type PoolsAnswer,
+  type PoolEventMessage,
   type SignedFetch,
 } from "./lib/overlay.js";
 import { authFetchPerInstance, instanceBase, readDefaults, readDiscovery, readTokens, sendMessage, type Defaults, type Discovery, type EnabledToken, type ListedToken } from "./lib/skein.js";
@@ -393,9 +393,9 @@ export interface RegisteredToken {
 }
 
 export type { EnabledToken, Defaults, Discovery, PoolRow, PoolsAnswer, Candle, CandleSeries, CandleTf, Holders, PoolAt, PoolHistoryPage, SpendAll, TokenPosition, TokenStats, Trade, TradesPage };
-export type { PoolEvent } from "./lib/overlay.js";
-export type { PoolChange, Price } from "./lib/overlay.js";
-export { applyPoolChange, parseChange } from "./lib/overlay.js";
+export type { PoolEvent, PoolEventMessage, PoolRevert } from "./lib/overlay.js";
+export type { Price } from "./lib/overlay.js";
+export { parsePoolEventMessage } from "./lib/overlay.js";
 
 /** A token's symbol, decimals and icon, read off its deploy output. */
 export interface DeployMeta {
@@ -946,13 +946,18 @@ function makeClient(opts: ClientOptions, s: Shared) {
     return hostedFrom(list, stats);
   }
 
+  /** P2 (0.41.0): a token's pools as the host lists them now, read past the browser's cache (`freshFetch`). */
+  async function tokenPools(tokenId: TokenId): Promise<PoolsAnswer> {
+    return readPools(tokenBase(tokenId, swapBase), freshFetch);
+  }
+
   /**
-   * A token's pools route held as an event stream (D16; 0.39.0, D7): the whole answer (`pools`)
-   * held, each `change` applied to it (`applyPoolChange`), one it cannot apply → the route read once
-   * again; each new answer to `onAnswer`. → the unsubscribe.
+   * The host's pool event feed (E1, 0.41.0): one token's (`GET /@<token>/amm/events`) or, with
+   * `"all"`, every enabled token's (`GET <origin>/amm/events`); each message `{tokenId, …row}` to
+   * `onEvent`. Signals for display: the pools route is the truth. → the unsubscribe.
    */
-  function watchTokenPools(tokenId: TokenId, onAnswer: (a: PoolsAnswer) => void, onError?: (e: unknown) => void): () => void {
-    return watchPools(poolsUrl(tokenBase(tokenId, swapBase)), parsePools, onAnswer, { ...(onError ? { onError } : {}), fetch: f, change: applyPoolChange });
+  function watchPoolEvents(tokenId: TokenId | "all", onEvent: (e: PoolEventMessage) => void, onError?: (e: unknown) => void): () => void {
+    return watchFeed(eventsUrl(tokenId === "all" ? swapBase : tokenBase(tokenId, swapBase)), onEvent, onError ? { onError } : {});
   }
 
   // ---------------------------------------------------------------- history (0.39.0, H1–H6)
@@ -993,8 +998,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
   }
 
   /** H4: every enabled token's stats (`ids`: those only, in that order). */
-  async function statsAll(o: { ids?: TokenId[] } = {}): Promise<TokenStats[]> {
-    return readAllStats(swapBase, o.ids, ff);
+  async function statsAll(o: { ids?: TokenId[]; fresh?: boolean } = {}): Promise<TokenStats[]> {
+    return readAllStats(swapBase, o.ids, o.fresh ? freshFetch : ff);
   }
 
   /** H6: a token's holders, largest first (`limit` 1–100, `skip`). */
@@ -1084,17 +1089,16 @@ function makeClient(opts: ClientOptions, s: Shared) {
    *   1. The overlay pass (`resolve`); then what `amm-swap` lacks of what the plan needs — the swap
    *      amount exact, the sats for the carriers and miner fees of `maxSources` legs —
    *      staged by ONE `stage` (`staging`).
-   *   2. The loop: cancelled → `cancelled`; `nextLeg` over the pools held now (the token's pools
-   *      stream, any state a refusal returned, minus the excluded outpoints and the pools set aside),
-   *      `minOut` the quote's floor less what has filled, `maxSources` (0.40.2) the request's less the
-   *      legs filled → its stop ends the swap, unless a pool is set aside: then the swap waits for the
-   *      stream's next answer (or the cancel) and plans again; the pool's current output read by its
-   *      id (`GET /pools/beef?pool=`; moved → its row replaced, planned again); the staged rows that
-   *      cover the leg, else `fees`; built, signed, relayed (`relaying`):
+   *   2. The loop: cancelled → `cancelled`; the SERVER's pool list read fresh (`GET
+   *      /@<token>/amm/pools`, no cache; 0.41.0: before EACH leg, no list of its own kept);
+   *      `nextLeg` over it minus the excluded outpoints, `minOut` the quote's floor less what has
+   *      filled, `maxSources` (0.40.2) the request's less the legs filled → its stop ends the swap;
+   *      the pool's current output read by its id (`GET /pools/beef?pool=`; moved → the list read
+   *      again); the staged rows that cover the leg, else `fees`; built, signed, relayed
+   *      (`relaying`):
    *      - accepted → taken in (ONE internalizeAction) before the next leg;
-   *      - refused `pool_spent` with the pool's state → its row replaced (`repricing`); a state whose
-   *        transaction this host cannot serve yet (`/pools/beef?pool=` lacks it) → the pool set aside
-   *        until the stream shows it at that outpoint (0.40.2: no re-read, no re-relay meanwhile);
+   *      - refused `pool_spent` (`repricing`) → the list read again: the relaying host took the
+   *        validator's state in before it answered (0.41.0);
    *      - refused otherwise (`below_minimum` included) → that outpoint excluded;
    *      - no answer → (a) the overlay: a staged input spent → the leg landed (taken in by the
    *        pass), the pool spent by another's swap → continue with the same rows; (b) else the
@@ -1141,39 +1145,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const minerFee = legMinerFeeSats(feeRate);
     const meta = { sym: p.sym, dec: p.dec };
 
-    // The pools held now: the stream's answer (from the quote's), rows a refusal or a fresh read replaced, outpoints excluded.
-    // 0.40.2: a pool whose newest state a validator returned but whose transaction this host cannot serve yet is set
-    // aside (`waiting`: pool id → that outpoint) until the stream shows it there; each stream answer wakes a waiting swap.
-    let answer = p.answer;
-    const replaced = new Map<string, PoolRow>();
-    const fromRefusal = new Set<string>();
-    const waiting = new Map<string, string>();
-    let wake: (() => void) | null = null;
-    const stop = watchTokenPools(tokenId, (a) => {
-      answer = a;
-      for (const [id, at] of waiting) {
-        if (a.pools.find((x) => x.poolId === id)?.outpoint !== at) continue;
-        waiting.delete(id);
-        replaced.delete(id);
-        fromRefusal.delete(id);
-      }
-      wake?.();
-    });
-    /** The next stream answer, or the cancel signal: no timer. */
-    const nextAnswer = () =>
-      new Promise<void>((res) => {
-        const done = () => {
-          wake = null;
-          res();
-        };
-        wake = done;
-        signal?.addEventListener("abort", done, { once: true });
-      });
+    // 0.41.0: the server's list, read fresh before each leg; the outpoints excluded (a pool that refused other than pool_spent, or did not answer).
     const excluded = new Set<string>();
-    const poolsNow = (): PoolRow[] =>
-      poolsWithMinimums(answer)
-        .map((r) => replaced.get(r.poolId) ?? r)
-        .filter((r) => !excluded.has(r.outpoint) && !waiting.has(r.poolId));
     /** 0.40.2: the legs the order may still fill (the request's maxSources less the legs filled). */
     let budget = quote.request.maxSources;
 
@@ -1196,135 +1169,117 @@ function makeClient(opts: ClientOptions, s: Shared) {
       }
     };
 
-    try {
-      accountResolved(await resolve(wallet));
-      // 1. Stage what the basket lacks.
-      const needTokens = buy ? 0n : quote.stage.amount;
-      const needSats = (buy ? quote.stage.amount : 0n) + quote.stage.feeSats;
-      const haveSats = BigInt(await swapSatsTotal(wallet));
-      const haveTokens = buy ? 0n : (await swapHoldings(wallet, tokenId)).reduce((a, t) => a + t.amount, 0n);
-      const lackSats = needSats > haveSats ? needSats - haveSats : 0n;
-      const lackTokens = needTokens > haveTokens ? needTokens - haveTokens : 0n;
-      if (lackSats > 0n || lackTokens > 0n) {
-        progress({ phase: "staging", sats: lackSats, tokens: lackTokens });
-        await stage(wallet, { sats: Number(lackSats), ...(lackTokens > 0n ? { tokens: { tokenId, amount: lackTokens } } : {}) }, { sym: p.sym, submit: submitAt(base) });
-      }
-
-      // 2. The loop.
-      let why: SwapStop = "filled";
-      for (;;) {
-        if (signal?.aborted) {
-          why = "cancelled";
-          break;
-        }
-        const remaining = quote.request.amountIn - filledIn;
-        const pools = poolsNow();
-        const minOut = quote.minAmountOut > filledOut ? quote.minAmountOut - filledOut : 0n;
-        const next = nextLeg({ pools, direction, remaining, fixedCost: { minerFeeSats: minerFee }, minOut, maxSources: budget });
-        if ("stop" in next) {
-          // A pool set aside for the stream: wait for its next answer (or the cancel), then plan again.
-          if (next.stop !== "filled" && waiting.size > 0) {
-            await nextAnswer();
-            continue;
-          }
-          why = next.stop;
-          break;
-        }
-        const leg = next.leg;
-        const row = pools.find((x) => x.outpoint === leg.outpoint)!;
-        const fresh = await readPoolsBeef(base, [row.poolId], freshFetch);
-        const now = fresh.pools.find((x) => x.poolId === row.poolId);
-        if (!now) {
-          excluded.add(row.outpoint);
-          continue;
-        }
-        if (now.outpoint !== row.outpoint) {
-          // The validator's newer state, which this host cannot serve yet: set aside until the stream shows it.
-          if (fromRefusal.has(row.poolId) && !poolOutputOf(fresh, row.outpoint)) {
-            waiting.set(row.poolId, row.outpoint);
-            continue;
-          }
-          replaced.set(row.poolId, { ...row, ...now });
-          fromRefusal.delete(row.poolId);
-          continue;
-        }
-        fromRefusal.delete(row.poolId); // the host serves the state the refusal returned
-        const poolOutput = poolOutputOf(fresh, leg.outpoint);
-        const peerId = row.validatorPeerId ?? answer.validators.find((v) => v.identity === row.validatorIdentityKey.toLowerCase())?.peerId;
-        if (!poolOutput || !peerId) {
-          excluded.add(row.outpoint);
-          continue;
-        }
-        const common: PlanLegInput = { wallet, tokenId, meta, direction, leg, pool: row, poolOutput, commissionPkh: answer.market.commissionPkh, satsPerKb: feeRate };
-        const inputs = selectLegInputs(common, await swapSatsHoldings(wallet), buy ? [] : await swapHoldings(wallet, tokenId));
-        if (!inputs) {
-          why = "fees";
-          break;
-        }
-        const prepared = await prepareSwap({ ...common, inputs, ...(order ? { order } : {}), last: leg.amountIn === remaining, holdingBeef: await swapHoldingBeef(wallet) });
-        const at = { leg: outpointText(leg.outpoint), amountIn: leg.amountIn, amountOut: leg.amountOut };
-        progress({ phase: "relaying", ...at, filled: [...legs] });
-        let outcome = await relayLeg(wallet, af, base, prepared, peerId);
-        if (outcome.status === "unknown" || outcome.status === "timeout") {
-          // (a) The overlay: what the leg spends.
-          const spent = await readSpendsAll(swapBase, [outpointText(leg.outpoint), ...inputs.sats.map((r) => r.outpoint), ...inputs.tokens.map((r) => r.outpoint)], freshFetch).catch(() => [] as SpendAll[]);
-          const ours = spent.find((x) => x.spentBy && x.outpoint !== outpointText(leg.outpoint));
-          if (ours) {
-            pending.push({ prepared, leg, poolId: row.poolId });
-            accountResolved(await resolve(wallet));
-            continue;
-          }
-          if (spent.some((x) => x.spentBy && x.outpoint === outpointText(leg.outpoint))) continue;
-          // (b) Once more to the same validator.
-          outcome = await relayLeg(wallet, af, base, prepared, peerId);
-          if (outcome.status === "unknown" || outcome.status === "timeout") {
-            // (c) Race: the next leg to another pool with the same rows.
-            pending.push({ prepared, leg, poolId: row.poolId });
-            excluded.add(row.outpoint);
-            continue;
-          }
-        }
-        if (outcome.status === "accepted") {
-          if (!outcome.completed.internalized) {
-            pending.push({ prepared, leg, poolId: row.poolId });
-            accountResolved(await resolve(wallet));
-            continue;
-          }
-          order ??= prepared.order;
-          budget -= 1;
-          filledIn += leg.amountIn;
-          filledOut += leg.amountOut;
-          legs.push({ poolOutpoint: at.leg, poolId: row.poolId, amountIn: leg.amountIn, amountOut: leg.amountOut, txid: outcome.txid });
-          continue;
-        }
-        if (outcome.status === "refused" && outcome.reason.startsWith("pool_spent") && outcome.pool) {
-          progress({ phase: "repricing", ...at, filled: [...legs] });
-          replaced.set(row.poolId, { ...row, ...outcome.pool });
-          fromRefusal.add(row.poolId);
-        } else {
-          excluded.add(row.outpoint);
-        }
-        accountResolved(await resolve(wallet));
-      }
-
-      // 3. The end.
-      const out: SwapResult = { status: filledIn >= quote.request.amountIn ? "filled" : legs.length > 0 ? "partial" : "failed", stop: why, legs, totalIn: filledIn, totalOut: filledOut, unfilled: quote.request.amountIn - filledIn };
-      if (why !== "filled" && pending.length === 0) {
-        const left = (await swapSatsHoldings(wallet)).length + (await swapHoldings(wallet, tokenId)).length;
-        if (left > 0) {
-          progress({ phase: "returning", filled: [...legs] });
-          try {
-            const m = await moveBack({ wallet, base: swapBase, tokenId, meta: { sym: p.sym }, submit: submitAt(swapBase) });
-            out.returned = { txid: m.txid, tokens: m.amount };
-          } catch (e) {
-            out.returned = { error: errText(e) };
-          }
-        }
-      }
-      return out;
-    } finally {
-      stop();
+    accountResolved(await resolve(wallet));
+    // 1. Stage what the basket lacks.
+    const needTokens = buy ? 0n : quote.stage.amount;
+    const needSats = (buy ? quote.stage.amount : 0n) + quote.stage.feeSats;
+    const haveSats = BigInt(await swapSatsTotal(wallet));
+    const haveTokens = buy ? 0n : (await swapHoldings(wallet, tokenId)).reduce((a, t) => a + t.amount, 0n);
+    const lackSats = needSats > haveSats ? needSats - haveSats : 0n;
+    const lackTokens = needTokens > haveTokens ? needTokens - haveTokens : 0n;
+    if (lackSats > 0n || lackTokens > 0n) {
+      progress({ phase: "staging", sats: lackSats, tokens: lackTokens });
+      await stage(wallet, { sats: Number(lackSats), ...(lackTokens > 0n ? { tokens: { tokenId, amount: lackTokens } } : {}) }, { sym: p.sym, submit: submitAt(base) });
     }
+
+    // 2. The loop.
+    let why: SwapStop = "filled";
+    for (;;) {
+      if (signal?.aborted) {
+        why = "cancelled";
+        break;
+      }
+      const remaining = quote.request.amountIn - filledIn;
+      const answer = await tokenPools(tokenId);
+      const pools = poolsWithMinimums(answer).filter((r) => !excluded.has(r.outpoint));
+      const minOut = quote.minAmountOut > filledOut ? quote.minAmountOut - filledOut : 0n;
+      const next = nextLeg({ pools, direction, remaining, fixedCost: { minerFeeSats: minerFee }, minOut, maxSources: budget });
+      if ("stop" in next) {
+        why = next.stop;
+        break;
+      }
+      const leg = next.leg;
+      const row = pools.find((x) => x.outpoint === leg.outpoint)!;
+      const fresh = await readPoolsBeef(base, [row.poolId], freshFetch);
+      const now = fresh.pools.find((x) => x.poolId === row.poolId);
+      if (!now) {
+        excluded.add(row.outpoint);
+        continue;
+      }
+      // Moved since the list was read: read the list again.
+      if (now.outpoint !== row.outpoint) continue;
+      const poolOutput = poolOutputOf(fresh, leg.outpoint);
+      const peerId = row.validatorPeerId ?? answer.validators.find((v) => v.identity === row.validatorIdentityKey.toLowerCase())?.peerId;
+      if (!poolOutput || !peerId) {
+        excluded.add(row.outpoint);
+        continue;
+      }
+      const common: PlanLegInput = { wallet, tokenId, meta, direction, leg, pool: row, poolOutput, commissionPkh: answer.market.commissionPkh, satsPerKb: feeRate };
+      const inputs = selectLegInputs(common, await swapSatsHoldings(wallet), buy ? [] : await swapHoldings(wallet, tokenId));
+      if (!inputs) {
+        why = "fees";
+        break;
+      }
+      const prepared = await prepareSwap({ ...common, inputs, ...(order ? { order } : {}), last: leg.amountIn === remaining, holdingBeef: await swapHoldingBeef(wallet) });
+      const at = { leg: outpointText(leg.outpoint), amountIn: leg.amountIn, amountOut: leg.amountOut };
+      progress({ phase: "relaying", ...at, filled: [...legs] });
+      let outcome = await relayLeg(wallet, af, base, prepared, peerId);
+      if (outcome.status === "unknown" || outcome.status === "timeout") {
+        // (a) The overlay: what the leg spends.
+        const spent = await readSpendsAll(swapBase, [outpointText(leg.outpoint), ...inputs.sats.map((r) => r.outpoint), ...inputs.tokens.map((r) => r.outpoint)], freshFetch).catch(() => [] as SpendAll[]);
+        const ours = spent.find((x) => x.spentBy && x.outpoint !== outpointText(leg.outpoint));
+        if (ours) {
+          pending.push({ prepared, leg, poolId: row.poolId });
+          accountResolved(await resolve(wallet));
+          continue;
+        }
+        if (spent.some((x) => x.spentBy && x.outpoint === outpointText(leg.outpoint))) continue;
+        // (b) Once more to the same validator.
+        outcome = await relayLeg(wallet, af, base, prepared, peerId);
+        if (outcome.status === "unknown" || outcome.status === "timeout") {
+          // (c) Race: the next leg to another pool with the same rows.
+          pending.push({ prepared, leg, poolId: row.poolId });
+          excluded.add(row.outpoint);
+          continue;
+        }
+      }
+      if (outcome.status === "accepted") {
+        if (!outcome.completed.internalized) {
+          pending.push({ prepared, leg, poolId: row.poolId });
+          accountResolved(await resolve(wallet));
+          continue;
+        }
+        order ??= prepared.order;
+        budget -= 1;
+        filledIn += leg.amountIn;
+        filledOut += leg.amountOut;
+        legs.push({ poolOutpoint: at.leg, poolId: row.poolId, amountIn: leg.amountIn, amountOut: leg.amountOut, txid: outcome.txid });
+        continue;
+      }
+      if (outcome.status === "refused" && outcome.reason.startsWith("pool_spent")) {
+        // The relaying host took the validator's state in before it answered: the next read lists it.
+        progress({ phase: "repricing", ...at, filled: [...legs] });
+      } else {
+        excluded.add(row.outpoint);
+      }
+      accountResolved(await resolve(wallet));
+    }
+
+    // 3. The end.
+    const out: SwapResult = { status: filledIn >= quote.request.amountIn ? "filled" : legs.length > 0 ? "partial" : "failed", stop: why, legs, totalIn: filledIn, totalOut: filledOut, unfilled: quote.request.amountIn - filledIn };
+    if (why !== "filled" && pending.length === 0) {
+      const left = (await swapSatsHoldings(wallet)).length + (await swapHoldings(wallet, tokenId)).length;
+      if (left > 0) {
+        progress({ phase: "returning", filled: [...legs] });
+        try {
+          const m = await moveBack({ wallet, base: swapBase, tokenId, meta: { sym: p.sym }, submit: submitAt(swapBase) });
+          out.returned = { txid: m.txid, tokens: m.amount };
+        } catch (e) {
+          out.returned = { error: errText(e) };
+        }
+      }
+    }
+    return out;
   }
 
   /** One relay of a prepared leg (0.34.0: no browser note); a thrown error is no answer. */
@@ -1846,7 +1801,8 @@ function makeClient(opts: ClientOptions, s: Shared) {
     isRoot,
     claimExchange: guard(claimExchange),
     hostedTokens: guard(hostedTokens),
-    watchTokenPools,
+    tokenPools: guard(tokenPools),
+    watchPoolEvents,
     // history (0.39.0)
     trades: guard(trades),
     trade: guard(trade),

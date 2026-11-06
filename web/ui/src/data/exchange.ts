@@ -116,7 +116,8 @@ export const isRoot: AmmClient["isRoot"] = (...a: Parameters<AmmClient["isRoot"]
 export const claimExchange: AmmClient["claimExchange"] = (...a: Parameters<AmmClient["claimExchange"]>) => (client.claimExchange as (...x: unknown[]) => ReturnType<AmmClient["claimExchange"]>)(...a);
 export const hostedTokens: AmmClient["hostedTokens"] = (...a: Parameters<AmmClient["hostedTokens"]>) => (client.hostedTokens as (...x: unknown[]) => ReturnType<AmmClient["hostedTokens"]>)(...a);
 export const statsAll: AmmClient["statsAll"] = (...a: Parameters<AmmClient["statsAll"]>) => (client.statsAll as (...x: unknown[]) => ReturnType<AmmClient["statsAll"]>)(...a);
-export const watchTokenPools: AmmClient["watchTokenPools"] = (...a: Parameters<AmmClient["watchTokenPools"]>) => (client.watchTokenPools as (...x: unknown[]) => ReturnType<AmmClient["watchTokenPools"]>)(...a);
+export const tokenPools: AmmClient["tokenPools"] = (...a: Parameters<AmmClient["tokenPools"]>) => (client.tokenPools as (...x: unknown[]) => ReturnType<AmmClient["tokenPools"]>)(...a);
+export const watchPoolEvents: AmmClient["watchPoolEvents"] = (...a: Parameters<AmmClient["watchPoolEvents"]>) => (client.watchPoolEvents as (...x: unknown[]) => ReturnType<AmmClient["watchPoolEvents"]>)(...a);
 export const quoteSwap: AmmClient["quoteSwap"] = (...a: Parameters<AmmClient["quoteSwap"]>) => (client.quoteSwap as (...x: unknown[]) => ReturnType<AmmClient["quoteSwap"]>)(...a);
 export const executeSwap: AmmClient["executeSwap"] = (...a: Parameters<AmmClient["executeSwap"]>) => (client.executeSwap as (...x: unknown[]) => ReturnType<AmmClient["executeSwap"]>)(...a);
 export const walletSats: AmmClient["walletSats"] = (...a: Parameters<AmmClient["walletSats"]>) => (client.walletSats as (...x: unknown[]) => ReturnType<AmmClient["walletSats"]>)(...a);
@@ -223,7 +224,9 @@ export function watchStats(onStats: (s: TokenStats[]) => void, onError?: (e: unk
 /**
  * The hosted tokens with their prices (0.39.0, D3, D7): the token list once, and the host-wide
  * stats (`watchStats`: one read per load, again every 30 s while the tab is visible) giving each
- * token's price, liquidity and pool count. `live`: the last stats read succeeded.
+ * token's price, liquidity and pool count. `live`: the last stats read succeeded. 0.41.0: the
+ * host's `all` pool event feed — a pool event for a token → that token's stats row read again
+ * (`/amm/stats?ids=<token>`, no cache) and its numbers updated.
  */
 export function useHostedTokens(): { tokens: HostedToken[] | null; error: string | null; live: boolean; reload: () => void } {
   const r = useData(enabledList, []);
@@ -240,14 +243,23 @@ export function useHostedTokens(): { tokens: HostedToken[] | null; error: string
       ),
     [],
   );
+  useEffect(
+    () =>
+      watchPoolEvents("all", (ev) => {
+        statsAll({ ids: [ev.tokenId], fresh: true }).then(
+          (rows) => setStats((held) => (held ? held.map((x) => rows.find((y) => y.tokenId === x.tokenId) ?? x) : held)),
+          () => {},
+        );
+      }),
+    [],
+  );
   return { tokens: r.data ? hostedFrom(r.data, stats) : null, error: r.error, live, reload: r.reload };
 }
 
 /**
- * The Swap page's pools (D11, D16): the token's pools route `GET /@<token>/amm/pools` held as an
- * event stream (an EventSource; without one, ONE GET and no poll): the market and the pools a swap
- * may use, renewed whenever the host's answer changes (0.39.0, D7: each `change` applied to the held
- * answer, `watchTokenPools`). Null until the first answer.
+ * The Swap page's pools (D11; 0.41.0): the token's pools route `GET /@<token>/amm/pools`, a plain
+ * read on load (`tokenPools`), read again (no cache) when a pool event for the token arrives on the
+ * host's feed (`watchPoolEvents`): the market and the pools a swap may use. Null until the first answer.
  */
 export function useTokenPools(tokenId: TokenId | undefined): { data: PoolsAnswer | null; error: string | null } {
   const [data, setData] = useState<PoolsAnswer | null>(null);
@@ -256,10 +268,24 @@ export function useTokenPools(tokenId: TokenId | undefined): { data: PoolsAnswer
     setData(null);
     setError(null);
     if (!tokenId) return;
-    return watchTokenPools(tokenId, (a) => {
-      setData(a);
-      setError(null);
-    }, (e) => setError(e instanceof Error ? e.message : "the pools stream is interrupted"));
+    let stopped = false;
+    const read = () =>
+      tokenPools(tokenId).then(
+        (a) => {
+          if (stopped) return;
+          setData(a);
+          setError(null);
+        },
+        (e: unknown) => {
+          if (!stopped) setError(e instanceof Error ? e.message : "the pools read failed");
+        },
+      );
+    void read();
+    const off = watchPoolEvents(tokenId, () => void read());
+    return () => {
+      stopped = true;
+      off();
+    };
   }, [tokenId]);
   return { data, error };
 }

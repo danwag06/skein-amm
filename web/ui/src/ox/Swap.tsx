@@ -1,7 +1,7 @@
 /**
  * Swap one token: you pay / you receive, the quote routed across the token's pools, and the Route
- * panel. 0.34.0 (D11–D16): the page holds the token's pools route as a stream (`useTokenPools`);
- * a quote is computed from it (no request). 0.40.0 (agent-env plans/swap-balance-build-2026-11-05.md
+ * panel. 0.34.0 (D11–D16): the page reads the token's pools route (`useTokenPools`; 0.41.0: a plain
+ * read, again on each pool event for the token); a quote is computed from it (no request). 0.40.0 (agent-env plans/swap-balance-build-2026-11-05.md
  * Builder 2 item 6): the quote shows what Swap stages (the swap amount, the fee sats with two legs
  * of leeway) and the miner fee per leg; price and impact from the engine's `priceOf`; each leg's
  * fee line from its own pool; while a swap runs, its legs as they fill and Cancel; at the end the

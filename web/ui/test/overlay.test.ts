@@ -1,6 +1,6 @@
 /**
  * The public read API's client (skein-amm 0.34.0, src/lib/overlay.ts; docs/AMM.md "The public read
- * API"): the pools routes' answers (P1, P2) and their stream, P3's pools and BEEF, P7's terms, P9's
+ * API"): the pools routes' answers (P1, P2; 0.41.0: plain reads only), P3's pools and BEEF, P7's terms, P9's
  * bytes, P10's record — every one a plain GET — and the rule that the pages send `/lookup`
  * nowhere (D8).
  */
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { Beef, Transaction, Utils } from "@bsv/sdk";
 import * as overlay from "../src/lib/overlay";
-import { liveOfPools, parseAllPools, parsePools, poolOutputOf, readPoolsBeef, readSwap, readTerms, readTx, toPoolRow, watchPools, type EventSourceLike } from "../src/lib/overlay";
+import { liveOfPools, parseAllPools, parsePools, poolOutputOf, readPoolsBeef, readSwap, readTerms, readTx, toPoolRow } from "../src/lib/overlay";
 import v from "./fixtures/amm-topic-vectors.json";
 
 const K = "03142715675faf8da1ecc4d51e0b9e539fa0d52fdd96ed60dbe99adb15d6b05ad9";
@@ -40,49 +40,6 @@ describe("the pools routes (P1, P2)", () => {
   it("the validators of the rows are live (the host listed only those), with their peer IDs; a row with no peer ID names none", () => {
     const live = liveOfPools([{ validatorIdentityKey: K.toUpperCase(), validatorPeerId: PEER }, { validatorIdentityKey: LP }], 7);
     expect(live).toEqual({ now: 7, kept: true, validators: [{ identityKey: K, peerId: PEER, at: 0, ageMs: 0, live: true }] });
-  });
-
-  it("watchPools: an EventSource on the route, each `pools` event parsed and handed on; closed on unsubscribe", () => {
-    const made: { url: string; es: FakeES }[] = [];
-    class FakeES implements EventSourceLike {
-      fns = new Map<string, (e: { data?: unknown }) => void>();
-      closed = false;
-      onerror: ((e: unknown) => void) | null = null;
-      onopen: ((e: unknown) => void) | null = null;
-      constructor(url: string) {
-        made.push({ url, es: this });
-      }
-      addEventListener(t: string, fn: (e: { data?: unknown }) => void) {
-        this.fns.set(t, fn);
-      }
-      close() {
-        this.closed = true;
-      }
-    }
-    const got: unknown[] = [];
-    const off = watchPools("http://x/@t/amm/pools", parsePools, (a) => got.push(a), { EventSource: FakeES });
-    expect(made.map((m) => m.url)).toEqual(["http://x/@t/amm/pools"]);
-    made[0]!.es.fns.get("pools")!({ data: JSON.stringify({ market: {}, validators: [{ identity: K, peerId: PEER }], pools: [row("aa_0", { validatorPeerId: PEER })] }) });
-    made[0]!.es.fns.get("pools")!({ data: JSON.stringify({ market: {}, validators: [{ identity: K, peerId: PEER }], pools: [] }) });
-    expect(got).toHaveLength(2);
-    expect((got[1] as { pools: unknown[] }).pools).toEqual([]);
-    off();
-    expect(made[0]!.es.closed).toBe(true);
-  });
-
-  it("watchPools without an EventSource: ONE plain GET, no poll", async () => {
-    const asked: string[] = [];
-    const got: unknown[] = [];
-    watchPools("http://x/amm/pools", parseAllPools, (a) => got.push(a), {
-      EventSource: null,
-      fetch: async (url: string) => {
-        asked.push(url);
-        return json([row("aa_0", { tokenId: `${"11".repeat(32)}_0` })]);
-      },
-    });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(asked).toEqual(["http://x/amm/pools"]);
-    expect(got).toHaveLength(1);
   });
 });
 

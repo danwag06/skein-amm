@@ -40,22 +40,24 @@ exchange with another wallet, keeping what was read and quoted.
 The client (each an async function unless noted):
 
 - the exchange: `enabledList`, `registeredTokens`, `tokenBaseOf`, `hostedTokens` (the token list
-  and ONE `GET /amm/stats`), `watchTokenPools` (the token's pools route as an event stream: the
-  whole answer, then each `change` — `swap`, `deploy`, `close`, `rescind` — applied to it, one it
-  cannot apply read again once; sync, returns the unsubscribe; 0.39.0: no host-wide stream),
+  and ONE `GET /amm/stats`), `tokenPools(tokenId)` (0.41.0: the token's pools route, a plain
+  read past the browser's cache), `watchPoolEvents(tokenId | "all", onEvent)` (0.41.0: the host's
+  pool event feed, `/@<token>/amm/events` or `<origin>/amm/events`; each message `{tokenId, …row}`,
+  a `/pools/history` row or a `revert`; signals for display, the pools route the truth; sync,
+  returns the unsubscribe; reconnect is the browser EventSource's),
   `claimStatus`, `isRoot`, `claimExchange`, `discoveryBase` (sync), `onDataChange` (sync);
 - history (plain GETs; 0.40.0: by pool id, `poolId` = the pool's deploy outpoint `<txid>_<vout>`):
   `trades(tokenId, {from?, to?, limit?, before?, pool?})` → `{trades, next}` (each row its
   `poolId` and `payoutPkh`), `trade(tokenId, txid)` → a `Trade` or null, `candles(tokenId, {tf,
   from, to, series?})` (`series` `fill`, the default, or `market`), `stats(tokenId)` /
-  `statsAll({ids?})` (`price` = the midpoint of what a buy and a sell of 1% of the pooled sats
+  `statsAll({ids?, fresh?})` (`price` = the midpoint of what a buy and a sell of 1% of the pooled sats
   would pay now, `buyPrice`, `sellPrice`, `lastTradePrice`), `holders(tokenId, {limit?, skip?})` →
   `{count, rows}`, `positionsAll(poolIds)`, `poolsAt(tokenId, t)` (every pool listed at `t`),
   `poolHistory(tokenId, {from?, to?, pool?, limit?, after?})` → `{events, next}` (oldest first;
   forward paging: `next` as `after`), `spendsAll(outpoints)` (the host's `/amm/spends`); amounts
   bigints, prices `{sats, tokens}` pairs of bigints (base units both);
 - swap: `quoteSwap(request, poolsAnswer, {sym, dec})` (sync: the engine's plan over the pools the
-  token's pools stream gave, each pool with its validator's `minLegSats`; the quote's price and
+  token's pools route gave, each pool with its validator's `minLegSats`; the quote's price and
   impact from the engine's `priceOf`, each leg's own `fees`, `stage` = what Swap sets aside
   (`amount`, `feeSats`: 0.40.2, exactly `maxSources` legs), `legMinerFeeSats`); the request's
   `maxSources` (required, 0.40.2; replaces `allowPartial`) is the most pools the swap may draw on —
@@ -72,7 +74,7 @@ The client (each an async function unless noted):
   `setDefaultTerms`, `clearDefaultTerms`, `setDefaultMarket`, `clearDefaultMarket`, `tokenTerms`,
   `setTokenTerms` (0.40.0: the terms `{lpBps, validatorBps, commissionBps, minLegSats?}`), `discoveryState`, `setDiscovery`.
 
-Pure helpers beside it: `hostedFrom`, `applyPoolChange` (by `poolId`), `parseChange`, `poolViews`, `poolFees`, `poolsWithMinimums`, `pairPrice`, `legCarrySats`, `hasTerms`,
+Pure helpers beside it: `hostedFrom`, `parsePoolEventMessage`, `poolViews`, `poolFees`, `poolsWithMinimums`, `pairPrice`, `legCarrySats`, `hasTerms`,
 `enableCandidates`, `topicOf`, `lookupOf`, `ammLookupOf`, `walletDeployBeef`, `exchangeBase`,
 `tokenBase`; the types (`Quote`, `SwapResult`, `LegResult`, `Position`, `WalletToken`, …).
 
@@ -107,31 +109,29 @@ import { createClient, ClientError } from "@dcasegr/amm-client";
 const client = createClient({ origin: "https://swap.skein.nexus", wallet });
 const tokenId = "<txid>_0";
 
-// The token's pools route as an event stream: the pools a swap may use, the market.
-const stop = client.watchTokenPools(tokenId, async (pools) => {
-  stop();
-  const quote = client.quoteSwap({ tokenId, side: "buy", amountIn: 50_000n, maxSlippageBps: 50, maxSources: 1 }, pools, { sym: "TOK", dec: 0 });
-  try {
-    const cancel = new AbortController();
-    const result = await client.executeSwap(quote, { signal: cancel.signal, onProgress: (p) => console.log(p.phase) });
-    console.log(result.status, result.stop, result.legs, result.returned);
-  } catch (e) {
-    if (e instanceof ClientError) console.log(e.kind, e.message);
-    else throw e;
-  }
-});
+// The token's pools route: the pools a swap may use, the market (read again on a pool event).
+const pools = await client.tokenPools(tokenId);
+const quote = client.quoteSwap({ tokenId, side: "buy", amountIn: 50_000n, maxSlippageBps: 50, maxSources: 1 }, pools, { sym: "TOK", dec: 0 });
+try {
+  const cancel = new AbortController();
+  const result = await client.executeSwap(quote, { signal: cancel.signal, onProgress: (p) => console.log(p.phase) });
+  console.log(result.status, result.stop, result.legs, result.returned);
+} catch (e) {
+  if (e instanceof ClientError) console.log(e.kind, e.message);
+  else throw e;
+}
 ```
 
 `executeSwap` (0.40.0; 0.40.2: at most `maxSources` legs, the budget down by one per FILLED leg —
 a refused or unanswered leg does not count, the last leg takes all that remains): ONE swap at a time. First the pass over the swap basket, then ONE wallet
 action stages what `amm-swap` lacks of `quote.stage` (sats only: a plain createAction; a sell's
-tokens: the module transfer). A pool whose newer state a validator returned but which the host
-cannot serve yet is set aside until the pools stream shows it there; with no other pool to take
-the leg, the swap waits for the stream's next answer (or the cancel), no timer (0.40.2). Then legs one at a time: the engine's `nextLeg` over the pools held
-now (`minOut` = the quote's floor less what has filled), the pool's current output by its id
-(`/pools/beef?pool=`), the staged rows that cover the leg (largest first), built, signed, relayed;
-accepted → taken in (payout, own commission, change) before the next leg; refused `pool_spent` →
-the pool's row replaced; refused otherwise → that pool output excluded; no answer → the overlay
+tokens: the module transfer). Then legs one at a time: the SERVER's pool list read fresh (0.41.0:
+`GET /@<token>/amm/pools` before EACH leg; the client keeps no list of its own), the engine's
+`nextLeg` over it (`minOut` = the quote's floor less what has filled), the pool's current output by
+its id (`/pools/beef?pool=`), the staged rows that cover the leg (largest first), built, signed,
+relayed; accepted → taken in (payout, own commission, change) before the next leg; refused
+`pool_spent` → the list read again (the relaying host took the validator's state in before it
+answered, 0.41.0); refused otherwise → that pool output excluded; no answer → the overlay
 (a staged input spent: the leg landed), else sent once more, else raced on another pool. It stops
 `filled | cancelled | floor | min | no_pool | fees`. Filled: the last leg's change went to the
 wallet. Stopped early with rows left: `moveBack` runs itself (`result.returned`). Progress phases:
