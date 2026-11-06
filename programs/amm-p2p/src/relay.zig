@@ -392,9 +392,11 @@ fn ancestry(a: Allocator, b: beef.Beef, subject: [32]u8) ![]bool {
     return keep;
 }
 
-/// The one BEEF the validator gets: the funding transaction's ancestry (its
-/// BEEF's, when it came as one), the funding transaction (unproven), then
-/// the swap as the subject. V2, parents first.
+/// The one BEEF the validator gets: the ancestry (its BEEF's, when the funding
+/// came as one) of every input of the swap whose source transaction that BEEF
+/// holds (0.40.1: a leg may spend rows of unrelated transactions; before, the
+/// funding transaction's alone), the funding transaction (unproven) among them,
+/// then the swap as the subject. V2, parents first.
 pub fn requestBeef(a: Allocator, p: Pair) ![]u8 {
     var entries: std.ArrayList(beef.Entry) = .empty;
     var bumps: []w.merkle.MerklePath = &.{};
@@ -402,6 +404,11 @@ pub fn requestBeef(a: Allocator, p: Pair) ![]u8 {
         // Parents first (skein-sdk beef.sorted: a writer's order sorted, not refused).
         const b = try beef.sorted(a, given_b);
         const keep = try ancestry(a, b, p.funding.txid);
+        for (p.swap.tx.inputs) |in| {
+            const src = in.previous_outpoint.txid.bytes;
+            if (b.indexOf(src) == null) continue;
+            for (try ancestry(a, b, src), keep) |x, *k| k.* = k.* or x;
+        }
         // Keep the BUMPs as they are (indices stay valid); only the entries are filtered.
         bumps = b.bumps;
         for (b.entries, keep) |e, k| if (k) try entries.append(a, e);

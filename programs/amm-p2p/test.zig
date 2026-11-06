@@ -1877,3 +1877,182 @@ test "spends (0.40.0, VERIFY): /spends answers spentBy for a plain sats output a
     // An output nobody spent (fund:3): no spentBy.
     try testing.expect((try reads.spendOf(a, &e.ch, .{ .txid = fund, .vout = 3 })).spent_by == null);
 }
+
+// ---------------------------------------------------------------- 0.40.1: a leg fed by rows of unrelated transactions
+
+fn merkleParentP(l: [32]u8, r: [32]u8) [32]u8 {
+    return w.store.dblSha256(&(l ++ r));
+}
+
+const PEp = std.meta.Elem(std.meta.Elem(@FieldType(w.merkle.MerklePath, "path")));
+
+/// A two-transaction block of fund and pool_deploy at height 1: its BUMP (both leaves) and merkle root.
+fn twoLeafBump(a: Allocator, l0: [32]u8, l1: [32]u8) !struct { path: w.merkle.MerklePath, root: [32]u8 } {
+    const level = try a.dupe(PEp, &.{ .{ .offset = 0, .hash = .{ .bytes = l0 }, .txid = true }, .{ .offset = 1, .hash = .{ .bytes = l1 }, .txid = true } });
+    const p: w.merkle.MerklePath = .{ .block_height = 1, .path = try a.dupe([]PEp, &.{level}) };
+    return .{ .path = try w.merkle.MerklePath.parse(a, try p.bytes(a)), .root = merkleParentP(l0, l1) };
+}
+
+/// The door's check (skein kernel-zig/src/door.zig `spv`): `chain.spv.verify` over the BEEF, `rootAt`
+/// the block's root at height 1, `knownRaw` none — the BEEF stands alone (amm-validator's test.zig `doorVerify`).
+fn doorVerifyP(a: Allocator, root: [32]u8, bytes: []const u8) !w.spv.Result {
+    const Ctx = struct {
+        root: [32]u8,
+        fn rootAt(ptr: *anyopaque, height: u32) anyerror!?[32]u8 {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            return if (height == 1) c.root else null;
+        }
+        fn knownRaw(_: *anyopaque, _: Allocator, _: [32]u8) anyerror!?[]const u8 {
+            return null;
+        }
+    };
+    var ctx = Ctx{ .root = root };
+    return w.spv.verify(a, try w.beef.parse(a, bytes), .{ .ptr = &ctx, .rootAtFn = Ctx.rootAt, .knownRawFn = Ctx.knownRaw });
+}
+
+/// A swap spending the pool, the funding transaction's output (fund:1 → `exact − 7000`) and an output of
+/// an UNRELATED transaction (fund:2 → 7000): its validator slot signed by the pool's first key
+/// (`1-amm pool-<nonce>`, counterparty anyone, the fixtures' identity), every other input by the taker.
+fn twoSourcePair(a: Allocator) !struct { funding: []const u8, other: []const u8, swap: []const u8, signed: []const u8, pool: []const u8, validator: [33]u8 } {
+    const fund = try Transaction.parse(a, unhex(a, vec.fund));
+    const fund_txid = w.beef.txidOf(unhex(a, vec.fund));
+    const pd_raw = unhex(a, vec.pool_deploy);
+    const pd = try Transaction.parse(a, pd_raw);
+    const base = try Transaction.parse(a, unhex(a, vec.swap_bsv_in));
+    const taker_pkh = hash160(&(try (try bsvz.primitives.ec.PrivateKey.fromBytes(taker_priv)).publicKey()).toCompressedSec1());
+    const taker_lock = try p2pkhScript(a, &taker_pkh);
+    const outs = try a.dupe(bsvz.transaction.Output, base.outputs[0..5]);
+    var out_sum: u64 = 0;
+    for (outs) |x| out_sum += @intCast(x.satoshis);
+    const pool_sats: u64 = @intCast(pd.outputs[0].satoshis);
+    const exact = out_sum - pool_sats + 600;
+    const part: u64 = 7_000;
+
+    const spend = struct {
+        fn tx(al: Allocator, f: Transaction, prev: [32]u8, vout: u32, amount: u64, total: u64, lock: []const u8) !Transaction {
+            var t = f;
+            t.inputs = try al.dupe(bsvz.transaction.Input, &.{.{ .previous_outpoint = .{ .txid = .{ .bytes = prev }, .index = vout }, .unlocking_script = Script.empty(), .sequence = 0xffffffff }});
+            t.outputs = try al.dupe(bsvz.transaction.Output, &.{
+                .{ .satoshis = @intCast(amount), .locking_script = Script.init(lock) },
+                .{ .satoshis = @intCast(total - amount - 300), .locking_script = Script.init(lock) },
+            });
+            return t;
+        }
+    };
+    var f = try spend.tx(a, fund, fund_txid, 1, exact - part, @intCast(fund.outputs[1].satoshis), taker_lock);
+    try signP2pkh(a, &f, 0, fund.outputs[1].locking_script.bytes, @intCast(fund.outputs[1].satoshis), taker_priv);
+    const f_raw = try f.serialize(a);
+    var g = try spend.tx(a, fund, fund_txid, 2, part, @intCast(fund.outputs[2].satoshis), taker_lock);
+    try signP2pkh(a, &g, 0, fund.outputs[2].locking_script.bytes, @intCast(fund.outputs[2].satoshis), taker_priv);
+    const g_raw = try g.serialize(a);
+
+    var s = base;
+    const sins = try a.dupe(bsvz.transaction.Input, &.{
+        base.inputs[0],
+        .{ .previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(f_raw) }, .index = 0 }, .unlocking_script = Script.empty(), .sequence = 0xffffffff },
+        .{ .previous_outpoint = .{ .txid = .{ .bytes = w.beef.txidOf(g_raw) }, .index = 0 }, .unlocking_script = Script.empty(), .sequence = 0xffffffff },
+    });
+    s.inputs = sins;
+    s.outputs = outs;
+    const lock = color.brc162.decode(pd.outputs[0].locking_script.bytes).?.lock;
+    const pre = try bsvz.transaction.sighash.formatPreimage(a, &s, 0, Script.init(lock[2..]), @intCast(pool_sats), 0x41);
+    const u = base.inputs[0].unlocking_script.bytes;
+    const pushes = struct {
+        fn build(al: Allocator, unl: []const u8, slot: []const u8, preimage: []const u8) ![]const u8 {
+            var pos: usize = 0;
+            var i: usize = 0;
+            var script: std.ArrayList(u8) = .empty;
+            while (pos < unl.len) : (i += 1) {
+                const p = color.brc162.readPush(unl, pos).?;
+                try script.appendSlice(al, switch (i) {
+                    1 => slot,
+                    10 => &.{0}, // _changeAmount = 0
+                    11 => try pushData(al, preimage),
+                    else => unl[pos..p.next],
+                });
+                pos = p.next;
+            }
+            return script.items;
+        }
+    };
+    sins[0].unlocking_script = Script.init(try pushes.build(a, u, &.{0}, pre));
+    try signP2pkh(a, &s, 1, taker_lock, exact - part, taker_priv);
+    try signP2pkh(a, &s, 2, taker_lock, part, taker_priv);
+    const unsigned = try s.serialize(a);
+
+    // The validator's slot: its key for the deploy (keyed by the nonce), over the pool input's preimage.
+    const kd = bsvz.primitives.key_deriver.KeyDeriver.init(try bsvz.primitives.ec.PrivateKey.fromBytes(.{0x7f} ** 32));
+    const vk = try kd.derivePrivateKey(a, .{ .security_level = 1, .name = "amm pool" }, vec.nonce, .{ .type_ = .anyone });
+    var want: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&want, vec.pool0.validator);
+    try testing.expectEqualSlices(u8, &want, &(try vk.publicKey()).toCompressedSec1());
+    const sig = try vk.signDigest(bsvz.crypto.hash.hash256(pre).bytes);
+    var signed_tx = try Transaction.parse(a, unsigned);
+    const ins2 = try a.dupe(bsvz.transaction.Input, signed_tx.inputs);
+    ins2[0].unlocking_script = Script.init(try pushes.build(a, u, try pushData(a, try std.mem.concat(a, u8, &.{ sig.asSlice(), &.{0x41} })), pre));
+    signed_tx.inputs = ins2;
+
+    var validator: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&validator, vec.identity);
+    return .{ .funding = f_raw, .other = g_raw, .swap = unsigned, .signed = try signed_tx.serialize(a), .pool = try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(w.beef.txidOf(pd_raw))}), .validator = validator };
+}
+
+test "relay (0.40.1): a swap spending outputs of two unrelated transactions, both in the funding BEEF — the request BEEF keeps both ancestries; with the pool and the validator's signature it passes the door's check; the funding's ancestry alone was MissingInput; the single chain unchanged" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try twoSourcePair(a);
+    const fund_raw = unhex(a, vec.fund);
+    const pd_raw = unhex(a, vec.pool_deploy);
+    const blk = try twoLeafBump(a, w.beef.txidOf(fund_raw), w.beef.txidOf(pd_raw));
+    const bumps = try a.dupe(w.merkle.MerklePath, &.{blk.path});
+    // What the page sends (0.40.1): ONE V2 BEEF of every staged input's source and its ancestry, the funding last.
+    const fbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = bumps, .entries = try a.dupe(w.beef.Entry, &.{
+        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw_with_bump, .bump = 0, .raw = fund_raw },
+        .{ .txid = w.beef.txidOf(p.other), .format = .raw, .raw = p.other },
+        .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
+    }) });
+    const pair = (try relay.checkPair(a, fbeef, p.swap, p.pool, &p.validator, t_expires, t_now, ours)).ok;
+    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.funding), &pair.funding.txid);
+    const req = try w.beef.parse(a, try relay.requestBeef(a, pair));
+    try testing.expectEqual(@as(usize, 4), req.entries.len); // fund, the other source, the funding, the swap
+    try testing.expect(req.find(w.beef.txidOf(p.other)) != null);
+    try testing.expect(req.find(w.beef.txidOf(fund_raw)) != null);
+    try testing.expectEqualSlices(u8, &w.beef.txidOf(p.swap), &req.subject().?);
+    try testing.expect(w.beef.parentsFirst(req));
+
+    // The validator's submission (amm-validator submit.zig): the request with the signed swap, the pool's
+    // transaction merged with its proof — every input's source inside, scripts verified, as the door checks.
+    const submission = struct {
+        fn of(al: Allocator, r: w.beef.Beef, signed: []const u8, pool_raw: []const u8) ![]const u8 {
+            const es = try al.alloc(w.beef.Entry, r.entries.len + 1);
+            es[0] = .{ .txid = w.beef.txidOf(pool_raw), .format = .raw_with_bump, .bump = 0, .raw = pool_raw };
+            for (r.entries, es[1..]) |e, *o| o.* = e;
+            es[es.len - 1] = .{ .txid = w.beef.txidOf(signed), .format = .raw, .raw = signed };
+            return w.beef.serialize(al, .{ .version = w.beef.V2, .bumps = r.bumps, .entries = es });
+        }
+    };
+    const out = try submission.of(a, req, p.signed, pd_raw);
+    const r = try doorVerifyP(a, blk.root, out);
+    try testing.expectEqual(@as(usize, 5), r.proven.len);
+
+    // Before 0.40.1 (the funding transaction's ancestry alone): the other source is missing, MissingInput.
+    const only = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = bumps, .entries = try a.dupe(w.beef.Entry, &.{
+        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw_with_bump, .bump = 0, .raw = fund_raw },
+        .{ .txid = w.beef.txidOf(p.funding), .format = .raw, .raw = p.funding },
+        .{ .txid = w.beef.txidOf(p.swap), .format = .raw, .raw = p.swap },
+    }) });
+    try testing.expectError(error.MissingInput, doorVerifyP(a, blk.root, try submission.of(a, try w.beef.parse(a, only), p.signed, pd_raw)));
+
+    // The single chain: an unrelated entry in the funding BEEF that no input spends is still left out.
+    const q = try buildPair(a);
+    const qbeef = try w.beef.serialize(a, .{ .version = w.beef.V2, .bumps = &.{}, .entries = try a.dupe(w.beef.Entry, &.{
+        .{ .txid = w.beef.txidOf(unhex(a, vec.token_deploy)), .format = .raw, .raw = unhex(a, vec.token_deploy) },
+        .{ .txid = w.beef.txidOf(fund_raw), .format = .raw, .raw = fund_raw },
+        .{ .txid = w.beef.txidOf(q.funding), .format = .raw, .raw = q.funding },
+    }) });
+    const qpair = (try relay.checkPair(a, qbeef, q.swap, q.pool, &q.validator, t_expires, t_now, ours)).ok;
+    const qb = try w.beef.parse(a, try relay.requestBeef(a, qpair));
+    try testing.expectEqual(@as(usize, 3), qb.entries.len);
+    try testing.expect(qb.find(w.beef.txidOf(unhex(a, vec.token_deploy))) == null);
+}
