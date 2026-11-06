@@ -687,7 +687,8 @@ describe("exchange.ts, wired", () => {
     inst.enableAnswer = { status: 200, body: { fn: "enable", result: row } };
     expect(await exchangeClient().enableTokenPaid(id, { deployBeef })).toEqual(row);
     const c = created[0]!;
-    expect(c.options).toEqual({ randomizeOutputs: false, noSend: true });
+    expect(c.options).toEqual({ noSend: true, randomizeOutputs: false });
+    expect(c.labels).toEqual(["p nosend expiry seconds 600"]); // 0.42.3: a protected noSend (BRC-177)
     expect(c.outputs).toHaveLength(1);
     expect(c.outputs![0]!.satoshis).toBe(2000);
     expect(c.outputs![0]!.lockingScript).toBe(new P2PKH().lock(KEY.toPublicKey().toAddress()).toHex());
@@ -707,6 +708,11 @@ describe("exchange.ts, wired", () => {
     inst.enableAnswer = { status: 409, body: { status: "error", code: "ERR_TOKEN_ENABLED", description: "enabled already" } };
     await expect(exchangeClient().enableTokenPaid(id, { deployBeef })).rejects.toMatchObject({ kind: "refused", message: "ERR_TOKEN_ENABLED: enabled already" });
     expect(aborted).toEqual([{ reference: payTx!.id("hex") }]);
+    // A wallet that cannot make a protected noSend: its error surfaced as a ClientError, no plain noSend tried.
+    const n = created.length;
+    (wallet as unknown as { createAction: () => Promise<never> }).createAction = async () => { created.push({} as never); throw new Error("BRC-177 requires the active storage provider"); };
+    await expect(exchangeClient().enableTokenPaid(id, { deployBeef })).rejects.toMatchObject({ kind: "refused", message: "the wallet could not build the protected payment (BRC-177 noSend): BRC-177 requires the active storage provider" });
+    expect(created.length).toBe(n + 1);
   });
 
   it("setTokenTerms (0.35.0): root's {fn: terms, args: {tokenId, terms}} to swap's <app>/admin, null = market only; bad values refused before anything is sent; tokenTerms = the token's GET /terms validator", async () => {

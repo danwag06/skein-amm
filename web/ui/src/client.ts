@@ -579,6 +579,9 @@ export interface EnableCandidate {
   inWallet: boolean;
 }
 
+/** 0.42.3: the paid enable's payment is a protected noSend (BRC-177): the wallet reclaims it if nobody sends it within 600 s. */
+export const ENABLE_PAYMENT_EXPIRY_LABEL = "p nosend expiry seconds 600";
+
 const canonicalId = (tokenId: string): string | null => {
   const ref = parseTokenId(tokenId);
   return ref ? tokenIdText(ref) : null;
@@ -1786,7 +1789,10 @@ function makeClient(opts: ClientOptions, s: Shared) {
    * (`GET <origin>/@discovery/1color/<token>/deploy`). The payment, ts-stack's standard (sdk BasicBRC29): a prefix and
    * a suffix from `createNonce`, the payee key `getPublicKey({protocolID: [2, "3241645161d8"], keyID: "<prefix>
    * <suffix>", counterparty: <the exchange>})`, ONE P2PKH output of exactly the price, `createAction` with
-   * `{randomizeOutputs: false, noSend: true}` — built and signed, NOT sent: the exchange's take-in sends it. Then ONE
+   * `{noSend: true, randomizeOutputs: false}` and the BRC-177 label `ENABLE_PAYMENT_EXPIRY_LABEL` (0.42.3: a protected
+   * noSend — the wallet prefunds an exact anchor and stores the payment, no change; a plain noSend lived only in the
+   * toolbox's client-side batch, so the payer's storage never learned of it) — built and signed, NOT sent: the
+   * exchange's take-in sends it; a wallet whose storage has no BRC-177 fails the createAction (surfaced). Then ONE
    * BEEF merging the deploy's and the payment's, `POST <swap>/enable?tokenId=&paymentTxid=&paymentVout=0
    * &derivationPrefix=&derivationSuffix=` signed (BRC-104). On any refusal or failure after the payment was built, the
    * unsent payment is aborted in the wallet (`abortAction`), so its coins are free again. → the enabled row.
@@ -1813,7 +1819,14 @@ function makeClient(opts: ClientOptions, s: Shared) {
     const created = await wallet.createAction({
       description: "Open Exchange: enable a token",
       outputs: [{ satoshis: price, lockingScript: p2pkhHexOf(publicKey), outputDescription: "Open Exchange enable fee", customInstructions: JSON.stringify({ derivationPrefix, derivationSuffix, payee: exchange }) }],
-      options: { randomizeOutputs: false, noSend: true },
+      // 0.42.3: a protected noSend (BRC-177, as @1sat/actions' payment to a handle): the wallet prefunds an exact anchor,
+      // stores the payment in its storage with no change, and reclaims it if nobody sends it in time.
+      labels: [ENABLE_PAYMENT_EXPIRY_LABEL],
+      options: { noSend: true, randomizeOutputs: false },
+    }).catch((e: unknown) => {
+      // No fallback to a plain noSend: a wallet that cannot make a protected one (BRC-177) says why.
+      const c = toClientError(e);
+      throw c instanceof ClientError ? c : new ClientError("refused", `the wallet could not build the protected payment (BRC-177 noSend): ${errText(e)}`, { cause: e });
     });
     const txid = created.txid;
     if (!txid || !created.tx) throw new Error("the wallet built no payment");
