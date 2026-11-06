@@ -1,5 +1,5 @@
-import { computeSwap } from "./pricing.js";
-import { planSplit, quoteMid } from "./allocation.js";
+import { acceptedSwap, smallestAccepted } from "./pricing.js";
+import { planSplit } from "./allocation.js";
 import type { Direction, FixedCost, Leg, Plan, PlanRequest, PoolState, SlippageBound } from "./types.js";
 
 /** Applies the liveness filter (pure: caller supplies `now`, engine never reads the clock). */
@@ -15,29 +15,27 @@ export function filterLivePools(
 /**
  * Resolves a SlippageBound to a single absolute minAmountOut. When both
  * minAmountOut and toleranceBps are given, the stricter (larger) bound wins.
- * toleranceBps is measured against the "quoted mid": the unconstrained
- * optimal-split amountOut across every eligible pool right now, ignoring
- * fixed per-leg costs.
+ * toleranceBps is measured against `totalAmountOut`, the plan's own total
+ * (the split with the fixed per-leg cost).
  */
-export function resolveMinAmountOut(
-  pools: PoolState[],
-  direction: Direction,
-  amountIn: bigint,
-  slippage: SlippageBound,
-): bigint {
+export function resolveMinAmountOut(totalAmountOut: bigint, slippage: SlippageBound): bigint {
   let bound = 0n;
   if (slippage.minAmountOut !== undefined && slippage.minAmountOut > bound) {
     bound = slippage.minAmountOut;
   }
   if (slippage.toleranceBps !== undefined) {
-    const quote = quoteMid(pools, direction, amountIn);
-    const tolerant = (quote * (10000n - slippage.toleranceBps)) / 10000n;
+    const tolerant = (totalAmountOut * (10000n - slippage.toleranceBps)) / 10000n;
     if (tolerant > bound) bound = tolerant;
   }
   return bound;
 }
 
-function pickBestSingleLeg(
+/** The pools with their minimum leg sizes removed. */
+export function withoutMinimums(pools: PoolState[]): PoolState[] {
+  return pools.map((p) => ({ ...p, minLegSats: undefined }));
+}
+
+export function pickBestSingleLeg(
   pools: PoolState[],
   direction: Direction,
   amountIn: bigint,
@@ -45,7 +43,7 @@ function pickBestSingleLeg(
 ): Leg | null {
   let best: Leg | null = null;
   for (const pool of pools) {
-    const result = computeSwap(pool, direction, amountIn);
+    const result = acceptedSwap(pool, direction, amountIn);
     if (result === null) continue;
     if (minAmountOut > 0n && result.amountOut < minAmountOut) continue;
     const leg: Leg = {
@@ -88,10 +86,20 @@ export function planOrder(
   return planSplit(pools, direction, amountIn, fixedCost);
 }
 
+/** The smallest amountIn one of `pools` accepts (contract-valid and at its minimum), or undefined. */
+export function minAmountInOf(pools: PoolState[], direction: Direction): bigint | undefined {
+  let min: bigint | undefined;
+  for (const pool of pools) {
+    const a = smallestAccepted(pool, direction);
+    if (a !== null && (min === undefined || a < min)) min = a;
+  }
+  return min;
+}
+
 /** Plans a fresh order against the given inventory. Pure, deterministic. */
 export function plan(request: PlanRequest): Plan {
   const eligible = filterLivePools(request.inventory, request.livenessThreshold, request.now);
-  const resolvedMinAmountOut = resolveMinAmountOut(eligible, request.direction, request.amountIn, request.slippage);
+  const explicitMin = request.slippage.minAmountOut ?? 0n;
 
   const legs = planOrder(
     eligible,
@@ -99,15 +107,16 @@ export function plan(request: PlanRequest): Plan {
     request.amountIn,
     request.allowPartial,
     request.fixedCost,
-    resolvedMinAmountOut,
+    explicitMin,
   );
 
   const totalAmountIn = legs.reduce((a, l) => a + l.amountIn, 0n);
   const totalAmountOut = legs.reduce((a, l) => a + l.amountOut, 0n);
+  const resolvedMinAmountOut = resolveMinAmountOut(totalAmountOut, request.slippage);
   const usedOutpoints = new Set(legs.map((l) => l.outpoint));
   const remainingInventory = eligible.filter((p) => !usedOutpoints.has(p.outpoint));
 
-  return {
+  const result: Plan = {
     legs,
     totalAmountIn,
     totalAmountOut,
@@ -124,4 +133,23 @@ export function plan(request: PlanRequest): Plan {
     cumulativeFilledAmountOut: 0n,
     remainingInventory,
   };
+
+  // No legs because of the minimums: the same order without them has legs.
+  if (
+    legs.length === 0 &&
+    planOrder(
+      withoutMinimums(eligible),
+      request.direction,
+      request.amountIn,
+      request.allowPartial,
+      request.fixedCost,
+      explicitMin,
+    ).length > 0
+  ) {
+    result.unfillable = "min";
+    const minAmountIn = minAmountInOf(eligible, request.direction);
+    if (minAmountIn !== undefined) result.minAmountIn = minAmountIn;
+  }
+
+  return result;
 }
