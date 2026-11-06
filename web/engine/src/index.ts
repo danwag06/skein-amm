@@ -4,3 +4,7 @@ export type { SwapResult } from "./pricing.js";
 export { planSplit, quoteMid } from "./allocation.js";
 export { plan, planOrder, filterLivePools, resolveMinAmountOut } from "./planner.js";
 export { replan } from "./replanner.js";
+export { nextLeg } from "./nextLeg.js";
+export type { NextLegRequest, NextLegResult } from "./nextLeg.js";
+export { priceOf, PRICE_SHARE_BPS } from "./price.js";
+export type { Price, PricePair } from "./price.js";

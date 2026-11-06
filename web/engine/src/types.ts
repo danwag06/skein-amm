@@ -28,6 +28,11 @@ export interface PoolState {
   validatorIdentityKey: string;
   /** Last time (ms epoch) this pool's validator was seen live, if known. */
   lastSeen?: number;
+  /**
+   * The validator's minimum leg size in sats, on the leg's sats side (amountIn
+   * for bsvToToken, amountOut for tokenToBsv). Absent or 0 = none.
+   */
+  minLegSats?: bigint;
 }
 
 /** Fixed cost the taker pays to add one more leg to a plan, in satoshis. */
@@ -45,10 +50,9 @@ export interface SlippageBound {
   /** Minimum acceptable total amountOut, in the output asset's smallest unit. */
   minAmountOut?: bigint;
   /**
-   * Tolerance in basis points against the "quoted mid": the total amountOut
-   * an unconstrained optimal split across all eligible pools would produce
-   * right now, ignoring fixed per-leg costs. minAmountOut is then
-   * quote * (10000 - toleranceBps) / 10000.
+   * Tolerance in basis points against the plan's own total amountOut (the
+   * split with the fixed per-leg cost). minAmountOut is then
+   * totalAmountOut * (10000 - toleranceBps) / 10000.
    */
   toleranceBps?: bigint;
 }
@@ -101,6 +105,13 @@ export interface Plan {
   meetsSlippageBound: boolean;
   /** True if this round's legs cover the full remaining order (originalAmountIn - cumulativeFilledAmountIn). */
   filledCompletely: boolean;
+  /**
+   * Set when the pools' minimum leg sizes leave no leg: no pool can take the
+   * order. With it, `minAmountIn` = the smallest amountIn one pool accepts
+   * (absent when no pool accepts any).
+   */
+  unfillable?: "min";
+  minAmountIn?: bigint;
 
   // --- bookkeeping carried across replan() rounds ---
   direction: Direction;

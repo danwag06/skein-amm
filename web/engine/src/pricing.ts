@@ -73,3 +73,40 @@ export function computeSwap(
 
   return { liquidityFee, validationFee, commission, net, amountOut, newBsvReserve, newTokenReserve };
 }
+
+/** A leg's sats side: amountIn when sats go in (bsvToToken), amountOut when sats come out. */
+export function legSats(direction: Direction, amountIn: bigint, amountOut: bigint): bigint {
+  return direction === "bsvToToken" ? amountIn : amountOut;
+}
+
+/** True when a leg's sats side is under its pool's minimum leg size (absent or 0 = none). */
+export function underMinimum(pool: Pick<PoolState, "minLegSats">, direction: Direction, amountIn: bigint, amountOut: bigint): boolean {
+  return legSats(direction, amountIn, amountOut) < (pool.minLegSats ?? 0n);
+}
+
+/** computeSwap, or null when the contract would refuse it or the leg is under the pool's minimum. */
+export function acceptedSwap(pool: PoolState, direction: Direction, amountIn: bigint): SwapResult | null {
+  const result = computeSwap(pool, direction, amountIn);
+  if (result === null || underMinimum(pool, direction, amountIn, result.amountOut)) return null;
+  return result;
+}
+
+/**
+ * The smallest amountIn this pool accepts (contract-valid and at its minimum),
+ * by doubling then bisection over amountIn; null when none up to 2^128.
+ */
+export function smallestAccepted(pool: PoolState, direction: Direction): bigint | null {
+  const cap = 1n << 128n;
+  let hi = 1n;
+  while (acceptedSwap(pool, direction, hi) === null) {
+    if (hi >= cap) return null;
+    hi *= 2n;
+  }
+  let lo = hi / 2n; // not accepted (or 0)
+  while (hi - lo > 1n) {
+    const mid = (lo + hi) / 2n;
+    if (acceptedSwap(pool, direction, mid) === null) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}

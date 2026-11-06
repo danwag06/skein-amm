@@ -33,7 +33,7 @@ npm run build    # dist/
 ## API
 
 ```ts
-import { plan, replan, computeSwap, feeAmount } from "@dcasegr/amm-engine";
+import { plan, replan, nextLeg, priceOf, computeSwap, feeAmount } from "@dcasegr/amm-engine";
 ```
 
 ### `computeSwap(pool, direction, amountIn): SwapResult | null`
@@ -86,6 +86,35 @@ no clock, no randomness; ties are always broken by outpoint (ascending).
   `lastSeen` is older than the threshold, or that have no `lastSeen` at all
   while the filter is active.
 
+- Minimum leg size: a pool's `minLegSats` (the validator's, on the leg's
+  sats side: `amountIn` for `bsvToToken`, `amountOut` for `tokenToBsv`).
+  No leg is under its pool's minimum; such a share folds into the largest
+  other leg (the folding rule above). The minimums choose the pools: when a
+  chosen pool's share is still under its minimum after the folding, every
+  such pool of that round is set aside and the split is planned again over
+  the rest, until every leg meets its pool's minimum or no pool is left.
+  Only then, with no leg (the same order without minimums has one), the
+  plan carries `unfillable: "min"` and `minAmountIn`, the smallest amountIn
+  one pool accepts.
+
+### `nextLeg({pools, direction, remaining, fixedCost, minOut})`
+
+One leg at a time: plans `remaining` against `pools` and returns
+`{leg, projectedOut}` — the plan's leg with the largest `amountIn` (tie:
+outpoint) and the plan's total out — or `{stop}`: `filled` (nothing
+remains), `no_pool`, `min` (only the minimums leave no leg), `floor` (the
+plan's total out < `minOut`). When what would remain after the leg is
+nonzero and under every pool's minimum, the leg takes all of `remaining`
+(the best single pool that accepts it) when one pool can.
+
+### `priceOf(pools, shareBps = PRICE_SHARE_BPS): {buy, sell, mid} | null`
+
+What the next trade would pay, for a reference size of `shareBps`
+(`PRICE_SHARE_BPS = 100n`, 1%) of the pooled sats (a buy) and of the
+pooled tokens (a sell), at least 1, split with no per-leg cost and no
+minimums. Each side is an exact pair `{sats, tokens}`; `mid` is their
+arithmetic midpoint as a pair. Null with no pool or a side with no leg.
+
 ### `replan(plan: Plan, results: LegResult[]): Plan`
 
 Re-plans the remainder of an order after a round of legs has been
@@ -123,11 +152,11 @@ A few judgment calls the task left open, made explicit here:
 
 1. **Slippage bound resolution.** `SlippageBound` supports both
    `minAmountOut` and `toleranceBps`; when both are given, the stricter
-   (larger) resolved bound wins. `toleranceBps` is measured against a
-   "quoted mid": the unconstrained optimal split across *every* eligible
-   pool for the requested `amountIn`, ignoring fixed per-leg costs
-   entirely. This is recomputed once per `plan()` call (not once per
-   `replan()` round — the bound is fixed at the start of the order).
+   (larger) resolved bound wins. `toleranceBps` is measured against the
+   plan's own total out (the split with the fixed per-leg cost):
+   `resolveMinAmountOut(totalAmountOut, slippage)`. It is resolved once
+   per `plan()` call (not once per `replan()` round — the bound is fixed
+   at the start of the order). `quoteMid` stays exported, unused by it.
 2. **Fixed cost units.** `fixedCost` is always denominated in sats (the
    miner fee, paid in BSV regardless of swap direction). The commission is
    not a fixed cost: it is the pool's `commissionBps`, a third fee on
@@ -182,6 +211,9 @@ A few judgment calls the task left open, made explicit here:
 - `src/allocation.ts` — continuous water-filling split + integer rounding (`planSplit`, `quoteMid`).
 - `src/planner.ts` — `plan()`, single-leg selection, liveness filter, slippage bound resolution.
 - `src/replanner.ts` — `replan()`.
+- `src/nextLeg.ts` — `nextLeg()`.
+- `src/price.ts` — `priceOf()`, `PRICE_SHARE_BPS`.
+- `test/balance.test.ts` — the plan-relative bound, minimum leg sizes, `nextLeg`, `priceOf`.
 - `test/pricing.test.ts` — `computeSwap` checked against an independently transcribed oracle of the Go contract's formula, for a table of cases (typical, zero fees, high fees, tiny amounts with ceil-rounding edge cases, a reject case, asymmetric reserves, heavy price impact, realistic large BSV magnitudes).
 - `test/planner.test.ts` — single pool, split-beats-single, fixed-cost-prevents-split, `allowPartial: false`, slippage exhaustion, liveness filter, `bsvToToken` direction, determinism.
 - `test/replanner.test.ts` — re-pricing after rejection (better and worse new state), partial-fill + cumulative slippage budget, stopping when nothing eligible remains, stopping when fully filled, multi-round chaining.

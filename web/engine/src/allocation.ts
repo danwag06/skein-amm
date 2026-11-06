@@ -21,7 +21,7 @@
  * for BSV (<= ~2.1e15 sats) and realistic token amounts fit in a double's
  * 53-bit mantissa with no meaningful loss for this purpose.
  */
-import { computeSwap } from "./pricing.js";
+import { acceptedSwap, computeSwap } from "./pricing.js";
 import type { Direction, FixedCost, Leg, PoolState } from "./types.js";
 
 interface PoolMath {
@@ -160,6 +160,12 @@ function roundAllocation(pms: PoolMath[], floatShares: number[], target: bigint)
  * equalises marginal price across the chosen pools and rounds to exact
  * integer, contract-valid legs.
  *
+ * No returned leg's sats side is under its pool's `minLegSats`: such a share
+ * is folded into the largest other leg; when a chosen pool's share is still
+ * under its minimum after the folding, every such pool of that round is set
+ * aside and the split is planned again over the remaining pools, until every
+ * leg meets its pool's minimum or no pool is left.
+ *
  * Returns legs sorted by outpoint for a deterministic, stable plan shape.
  */
 export function planSplit(
@@ -168,7 +174,27 @@ export function planSplit(
   amountIn: bigint,
   fixedCost: FixedCost,
 ): Leg[] {
-  if (pools.length === 0 || amountIn <= 0n) return [];
+  let candidates = pools;
+  for (;;) {
+    const { legs, underMin } = splitOnce(candidates, direction, amountIn, fixedCost);
+    if (underMin.size === 0) return legs;
+    candidates = candidates.filter((p) => !underMin.has(p.outpoint));
+  }
+}
+
+/**
+ * One round of planSplit over `pools`: the legs, and the outpoints of the
+ * chosen pools left without a leg by their minimum (a share still under it
+ * after the folding, contract-valid without it), which planSplit sets aside.
+ */
+function splitOnce(
+  pools: PoolState[],
+  direction: Direction,
+  amountIn: bigint,
+  fixedCost: FixedCost,
+): { legs: Leg[]; underMin: Set<string> } {
+  const underMin = new Set<string>();
+  if (pools.length === 0 || amountIn <= 0n) return { legs: [], underMin };
 
   const sorted = pools
     .map((p) => toPoolMath(p, direction))
@@ -197,14 +223,15 @@ export function planSplit(
   let allocation = roundAllocation(active, shares, amountIn);
 
   // Fold any allocation the contract would reject (net <= 0 or out <= 0,
-  // possible only for tiny rounded shares) into the largest remaining leg,
-  // deterministically, until every nonzero leg is contract-valid.
+  // possible only for tiny rounded shares), or whose sats side is under its
+  // pool's minimum leg size, into the largest remaining leg,
+  // deterministically, until every nonzero leg is accepted.
   for (let pass = 0; pass < active.length; pass++) {
     let changed = false;
     for (let i = 0; i < active.length; i++) {
       const amt = allocation[i]!;
       if (amt <= 0n) continue;
-      const result = computeSwap(active[i]!.pool, direction, amt);
+      const result = acceptedSwap(active[i]!.pool, direction, amt);
       if (result === null) {
         // fold into the largest other allocation (tie-break by outpoint)
         let bestJ = -1;
@@ -232,8 +259,13 @@ export function planSplit(
     const amt = allocation[i]!;
     if (amt <= 0n) continue;
     const pm = active[i]!;
-    const result = computeSwap(pm.pool, direction, amt);
-    if (result === null) continue; // still invalid even after folding; drop it
+    const result = acceptedSwap(pm.pool, direction, amt);
+    if (result === null) {
+      // still refused even after folding: drop it; set its pool aside when
+      // only its minimum refuses it
+      if (computeSwap(pm.pool, direction, amt) !== null) underMin.add(pm.pool.outpoint);
+      continue;
+    }
     legs.push({
       outpoint: pm.pool.outpoint,
       amountIn: amt,
@@ -247,14 +279,14 @@ export function planSplit(
   }
 
   legs.sort((a, b) => (a.outpoint < b.outpoint ? -1 : a.outpoint > b.outpoint ? 1 : 0));
-  return legs;
+  return { legs, underMin };
 }
 
 /**
  * The unconstrained "quoted mid": the total amountOut an optimal split
  * across every given pool would produce for amountIn, ignoring fixed
- * per-leg costs entirely (used only to resolve a toleranceBps slippage
- * bound into an absolute minAmountOut).
+ * per-leg costs entirely. Not used by the slippage bound (which is
+ * measured against the plan's own total).
  */
 export function quoteMid(pools: PoolState[], direction: Direction, amountIn: bigint): bigint {
   if (pools.length === 0 || amountIn <= 0n) return 0n;
