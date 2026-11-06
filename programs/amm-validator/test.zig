@@ -2167,3 +2167,73 @@ test "answers carry the BEEF (0.41.0): accepted — the BEEF the validator submi
         try testing.expect(after.?.live.outpoint.eql(live.outpoint));
     }
 }
+
+/// A raw transaction through a node's overlay: its BEEF the chain state's BEEF of `parent` (back to
+/// proven ones) with `raw` after it; routed, stepped, accepted.
+fn admitOn(a: std.mem.Allocator, m: *Mined, parent: [32]u8, raw: []const u8) !void {
+    const pb = try w.beef.parse(a, try ov.state.beefFor((try m.node.state()).ch, parent));
+    var b = pb;
+    b.atomic = null;
+    b.entries = try std.mem.concat(a, w.beef.Entry, &.{ pb.entries, &.{.{ .txid = txidOf(raw), .format = .raw, .raw = raw }} });
+    const routed = try ov.submit.route(a, m.node.caller(), try m.node.state(), m.node.in, .{ .bytes = try w.beef.serialize(a, b) }, &.{m.topic}, null, null);
+    const ev = routed.admit.event;
+    _ = try m.node.step(ev);
+    try testing.expect((try m.node.status(ev, "RECEIVED")).admitted);
+}
+
+test "pool_spent past the LP's Close (0.41.1): the refusal carries the closing transaction's BEEF back to proven ones; another host holding the pool admits it and then lists no live pool" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = w.store.MemStore.init(testing.allocator);
+    defer ms.deinit();
+    const m = try Mined.init(a, &ms);
+    // The validator's host: the two swaps and the LP's Close of swap_tokens_in's pool admitted.
+    const sreq = try m.swapRequest(a);
+    const served = try m.respond(a, sreq);
+    const ev = readBack(a, try m.node.launched(served));
+    _ = try m.node.step(ev);
+    _ = try m.node.status(ev, "RECEIVED");
+    const s1 = txidOf(m.f.raw("swap_bsv_in"));
+    try admitOn(a, m, s1, m.f.raw("swap_tokens_in"));
+    const s2 = txidOf(m.f.raw("swap_tokens_in"));
+    try admitOn(a, m, s2, m.f.raw("close"));
+    const close = txidOf(m.f.raw("close"));
+
+    // A stale request for the deploy's pool: pool_spent, the newest state closed by the Close, its BEEF.
+    const stale = try withUnlocking(a, try request(a, m.f.raw("swap_bsv_in"), 0), 1, &.{0x00});
+    const r = try m.respond(a, stale);
+    try expectRefused(r.reply, .pool_spent);
+    const c = r.reply.refused.newest.?.closed;
+    try testing.expectEqualSlices(u8, &close, &c.by);
+    try testing.expect(c.last.eql(.{ .txid = s2, .vout = 0 }));
+    const nb = r.reply.refused.beef.?;
+    const parsed = try w.beef.parse(a, nb);
+    try testing.expectEqualSlices(u8, &close, &parsed.subject().?);
+    _ = try doorVerify(a, m, nb);
+    const rb = readBack(a, try messages.replyValue(a, r.reply));
+    try testing.expectEqualStrings("pool_spent", rb.getText("reason").?);
+    try testing.expectEqual(true, rb.get("pool").?.getBool("closed").?);
+    try testing.expectEqualSlices(u8, nb, rb.getBytes("beef").?);
+
+    // Another host holding the pool (both swaps admitted there, not the Close): the BEEF admitted, then
+    // no live pool in its view.
+    var ms2 = w.store.MemStore.init(testing.allocator);
+    defer ms2.deinit();
+    const m2 = try Mined.init(a, &ms2);
+    {
+        const routed = try ov.submit.route(a, m2.node.caller(), try m2.node.state(), m2.node.in, .{ .bytes = try m2.beef(a, &.{"fund"}, m.f.raw("swap_bsv_in")) }, &.{m2.topic}, null, null);
+        _ = try m2.node.step(routed.admit.event);
+        try testing.expect((try m2.node.status(routed.admit.event, "RECEIVED")).admitted);
+    }
+    try admitOn(a, m2, s1, m.f.raw("swap_tokens_in"));
+    const held = (try validator.newest(a, (try m2.deps()).view, m2.topic, m2.pool_op)).?;
+    try testing.expect(held.live.outpoint.eql(.{ .txid = s2, .vout = 0 }));
+    const routed = try ov.submit.route(a, m2.node.caller(), try m2.node.state(), m2.node.in, .{ .bytes = nb }, &.{m2.topic}, null, null);
+    const ev2 = routed.admit.event;
+    _ = try m2.node.step(ev2);
+    try testing.expect((try m2.node.status(ev2, "RECEIVED")).admitted);
+    const after = (try validator.newest(a, (try m2.deps()).view, m2.topic, m2.pool_op)).?;
+    try testing.expect(after == .closed);
+    try testing.expectEqualSlices(u8, &close, &after.closed.by);
+}

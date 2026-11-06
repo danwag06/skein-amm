@@ -197,15 +197,19 @@ fn finishSpend(a: std.mem.Allocator, reply: Reply, d: Deps) !Served {
     return .{ .reply = reply, .next = .{ .submit = .{ .beef = beef, .topic = sub.topic } }, .broadcast = sub.parents };
 }
 
-/// A `pool_spent` refusal with the pool's newest state live (0.41.0): its `beef`, the newest pool
-/// output's transaction with its ancestry back to proven ones (the chain state's, `state.beefFor`, as
-/// `submissionBeef` merges the pool's). Any other reply as it is.
+/// A `pool_spent` refusal (0.41.0): its `beef`, the transaction of the pool's newest state with its
+/// ancestry back to proven ones (the chain state's, `state.beefFor`, as `submissionBeef` merges the
+/// pool's) — the newest pool output's when live, the one that ended the lineage when closed
+/// (0.41.1: the LP's Close; the relaying host admits it and lists the pool no more). Any other reply
+/// as it is.
 fn withNewestBeef(st: *ov.state.State, reply: Reply) !Reply {
     if (reply != .refused or reply.refused.reason != .pool_spent) return reply;
     const n = reply.refused.newest orelse return reply;
-    if (n != .live) return reply;
     var r = reply;
-    r.refused.beef = try ov.state.beefFor(st.ch, n.live.outpoint.txid);
+    r.refused.beef = try ov.state.beefFor(st.ch, switch (n) {
+        .live => |l| l.outpoint.txid,
+        .closed => |c| c.by,
+    });
     return r;
 }
 
