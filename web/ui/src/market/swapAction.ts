@@ -453,7 +453,7 @@ export interface PreparedSwap {
   /** Whether this leg's change went to the wallet. */
   last: boolean;
   funding: {
-    /** What the relay is sent as `funding` (0.40.1, `fundingBeef`): every staged input's source with its ancestry, the subject the first sats input's transaction. */
+    /** What the relay is sent as `funding` (`fundingBeef`): every staged input's source, raw with its ancestry outside the token's topic, txid-only inside it (0.45.0), the pool's transaction by txid; the subject the first sats input's transaction. */
     atomicBeef: number[];
     txid: string;
     fee: number;
@@ -496,18 +496,48 @@ export function keyInputOf(inputs: Pick<LegInputs, "sats" | "tokens">, bsvIn: bo
 const ATOMIC_BEEF_PREFIX = [0x01, 0x01, 0x01, 0x01];
 
 /**
- * The relay's `funding` (0.40.1): ONE BEEF holding the source transaction of every staged input
- * the leg spends (sats and token rows alike, each with its ancestry as the wallet gives it), its
- * subject the funding transaction (the first sats input's). The form: an Atomic BEEF envelope
- * (the prefix and the subject's txid, as the sdk writes one) around the sdk's V2 BEEF of them all
- * — the relay's `given()` reads the envelope's subject and keeps every transaction in it; the
- * sdk's own `toBinaryAtomic` would drop the sources the subject does not descend from. The
- * relay's request BEEF to the validator is its own V2 (relay.zig `requestBeef`).
+ * Whether the token's topic admitted `tx` as far as the page knows (0.45.0, David 2026-11-07): the pool
+ * output's transaction (the pools list), or any transaction carrying a pool output of this token (a deploy,
+ * a swap the page took in: its change rows' sources). Those the validator's instance holds; a BEEF names
+ * them by txid alone (skein 0.3.3's door: a txid-only entry for a held transaction).
  */
-export function fundingBeef(beef: Beef, fundingTxid: string, sources: string[]): number[] {
+export function topicAdmitted(assetId: string, poolTxid: string): (txid: string, tx?: Transaction) => boolean {
+  return (txid, tx) => {
+    if (txid === poolTxid) return true;
+    if (!tx) return false;
+    return tx.outputs.some((o) => PoolTemplate.decode(o.lockingScript)?.args.assetId === assetId);
+  };
+}
+
+/**
+ * The relay's `funding` (0.40.1; 0.45.0 the rule "raw outside the token's topic, txid-only inside"): ONE
+ * BEEF holding the source transaction of every staged input the leg spends (sats and token rows alike) and,
+ * by txid, the pool output's transaction. A transaction the topic admitted (`admitted`) is a txid-only
+ * entry and its ancestry goes; any other is raw with its ancestry back to proven (its BUMP) or to an
+ * admitted one. Its subject the funding transaction (the first sats input's). The form: an Atomic BEEF
+ * envelope (the prefix and the subject's txid, as the sdk writes one) around the sdk's V2 BEEF of them
+ * all — the host's `requestBeef` reads the envelope's subject and keeps every transaction the swap's
+ * inputs name.
+ */
+export function fundingBeef(beef: Beef, fundingTxid: string, sources: string[], o: { poolTxid?: string; admitted?: (txid: string, tx?: Transaction) => boolean } = {}): number[] {
+  const admitted = o.admitted ?? (() => false);
   const all = new Beef();
   for (const txid of new Set([fundingTxid, ...sources])) all.mergeBeef(beef.toBinaryAtomic(txid));
-  return [...ATOMIC_BEEF_PREFIX, ...Utils.toArray(fundingTxid, "hex").reverse(), ...all.toBinary()];
+  const out = new Beef();
+  const done = new Set<string>();
+  const visit = (txid: string) => {
+    if (done.has(txid)) return;
+    done.add(txid);
+    const e = all.findTxid(txid);
+    const tx = e?.tx ?? (e?.rawTx ? Transaction.fromBinary(e.rawTx) : undefined);
+    if (!e || e.isTxidOnly || !tx || admitted(txid, tx)) { out.mergeTxidOnly(txid); return; }
+    if (e.bumpIndex !== undefined) { out.mergeRawTx(tx.toBinary(), out.mergeBump(all.bumps[e.bumpIndex]!)); return; }
+    for (const i of tx.inputs) if (i.sourceTXID) visit(i.sourceTXID);
+    out.mergeRawTx(tx.toBinary());
+  };
+  for (const txid of new Set([fundingTxid, ...sources])) visit(txid);
+  if (o.poolTxid && !done.has(o.poolTxid)) { done.add(o.poolTxid); out.mergeTxidOnly(o.poolTxid); }
+  return [...ATOMIC_BEEF_PREFIX, ...Utils.toArray(fundingTxid, "hex").reverse(), ...out.toBinary()];
 }
 
 /** Builds and signs the leg (see the module comment). Throws `PoolBuildError` / `LegShapeError`; the wallet is left as it was. */
@@ -626,7 +656,7 @@ export async function prepareSwap(i: PrepareSwapInput): Promise<PreparedSwap> {
     plan,
     order,
     last: i.last,
-    funding: { atomicBeef: fundingBeef(beef, funding.txid, [...inputs.sats, ...inputs.tokens].map((r) => r.txid)), txid: funding.txid, fee: satsChange ? need.feeWithChange : need.fee, need: need.need },
+    funding: { atomicBeef: fundingBeef(beef, funding.txid, [...inputs.sats, ...inputs.tokens].map((r) => r.txid), { poolTxid: poolUtxo.txid, admitted: topicAdmitted(assetIdOf(i.tokenId), poolUtxo.txid) }), txid: funding.txid, fee: satsChange ? need.feeWithChange : need.fee, need: need.need },
     swap,
     satsInputs: inputs.sats,
     tokenInputs: inputs.tokens,

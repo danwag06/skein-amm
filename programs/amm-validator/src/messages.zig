@@ -148,6 +148,16 @@ pub const Deps = struct {
     st: *ov.state.State,
 };
 
+/// What the token's topic admitted (0.45.0): the overlay's applied record of (topic, txid). Those
+/// a submission, an answer's `beef`, names by txid alone (submit.zig `submissionBeef`).
+pub const InTopic = struct {
+    st: *ov.state.State,
+    topic: []const u8,
+    pub fn has(self: InTopic, txid: [32]u8) !bool {
+        return self.st.isApplied(self.topic, txid);
+    }
+};
+
 /// What the handler does after the checks (main.zig):
 pub const Next = union(enum) {
     /// `reply` is the answer, now (a refusal).
@@ -179,38 +189,34 @@ pub const Served = struct {
 /// nothing) — else the signed BEEF submitted by message for the topic the
 /// checks judged it for. A refusal by the engine comes back as its answer
 /// (`answerFromSubmit`).
-fn finishSpend(a: std.mem.Allocator, reply: Reply, d: Deps) !Served {
-    if (reply != .ok) return .{ .reply = try withNewestBeef(d.st, reply) };
+fn finishSpend(a: std.mem.Allocator, reply: Reply, d: Deps, pool: Outpoint) !Served {
+    if (reply != .ok) return .{ .reply = try withNewestBeef(a, d, reply, pool) };
     const sub = reply.ok.submission orelse return .{ .reply = reply };
     const raw = reply.ok.tx orelse return .{ .reply = reply };
     const txid = reply.ok.txid orelse return .{ .reply = reply };
     if (try d.st.isApplied(sub.topic, txid)) return .{ .reply = reply, .next = .from_state };
     if ((try settlementOf(d.st, txid)) != null) return .{ .reply = reply, .next = .from_state };
     if (try d.st.isPending(txid)) if (!(try d.st.isPaused(txid))) return .{ .reply = reply, .next = .{ .wait_on = txid } };
-    // 0.29.5: the pool's transaction with its ancestry back to proven ones (the chain state's
-    // Atomic BEEF of it), merged in: the door verifies the submission with nothing known.
-    const pool_beef = ov.state.beefFor(d.st.ch, sub.pool.txid) catch |e| return .{ .reply = .{ .refused = .{
-        .reason = .submit_refused,
-        .detail = try std.fmt.allocPrint(a, "the chain state has no BEEF of the pool's transaction back to proven ones: {s}", .{@errorName(e)}),
-        .txid = txid,
-    } } };
-    const beef = try submit.submissionBeef(a, raw, sub.ancestry, pool_beef);
+    // 0.45.0: the request's BEEF, the signed swap its subject, every held transaction (the pool's)
+    // by txid; the taker's raw funding with its ancestry.
+    const beef = try submit.submissionBeef(a, raw, sub.ancestry, sub.pool.txid, InTopic{ .st = d.st, .topic = sub.topic });
     return .{ .reply = reply, .next = .{ .submit = .{ .beef = beef, .topic = sub.topic } }, .broadcast = sub.parents };
 }
 
-/// A `pool_spent` refusal (0.41.0): its `beef`, the transaction of the pool's newest state with its
-/// ancestry back to proven ones (the chain state's, `state.beefFor`, as `submissionBeef` merges the
-/// pool's) — the newest pool output's when live, the one that ended the lineage when closed
+/// A `pool_spent` refusal (0.41.0; 0.45.0 `submit.newestBeef`): its `beef`, the transaction of the
+/// pool's newest state, raw, its inputs' sources by txid (held here; proven: with its BUMP) — the newest pool output's when live, the one that ended the lineage when closed
 /// (0.41.1: the LP's Close; the relaying host admits it and lists the pool no more). Any other reply
 /// as it is.
-fn withNewestBeef(st: *ov.state.State, reply: Reply) !Reply {
+fn withNewestBeef(a: std.mem.Allocator, d: Deps, reply: Reply, pool: Outpoint) !Reply {
     if (reply != .refused or reply.refused.reason != .pool_spent) return reply;
     const n = reply.refused.newest orelse return reply;
+    const src = (try d.view.output(a, pool)) orelse return reply;
+    const id = validator.poolTokenId(src.script) orelse return reply;
     var r = reply;
-    r.refused.beef = try ov.state.beefFor(st.ch, switch (n) {
+    r.refused.beef = try submit.newestBeef(a, d.st.ch, switch (n) {
         .live => |l| l.outpoint.txid,
         .closed => |c| c.by,
-    });
+    }, InTopic{ .st = d.st, .topic = try validator.topicOf(a, id) });
     return r;
 }
 
@@ -219,7 +225,7 @@ pub fn respond(a: std.mem.Allocator, op: validator.Op, body: Value, d: Deps) !Se
     switch (op) {
         .swap => {
             const req = parseSpend(body) orelse return .{ .reply = refuse(.bad_request, "want {tx: bytes, pool: \"<txid>_<vout>\"}") };
-            return finishSpend(a, try validator.spend(a, op, req, d.config, d.view, d.oracle), d);
+            return finishSpend(a, try validator.spend(a, op, req, d.config, d.view, d.oracle), d, req.pool);
         },
         .affirm => {
             // Answered now: nothing is signed into a transaction, nothing submitted.
@@ -297,9 +303,9 @@ pub fn answerFromState(a: std.mem.Allocator, st: *ov.state.State, v: View, op: v
             .newest = if (spent) try validator.newest(a, v, topic, req.pool) else null,
         } };
     }
-    // 0.41.0: the BEEF it submitted to its own overlay (`submissionBeef`, the pool's transaction
-    // merged in), so the relaying host admits it too.
-    if (try st.isApplied(topic, txid)) return .{ .ok = .{ .tx = signed.raw, .txid = txid, .beef = try submit.submissionBeef(a, signed.raw, sub.ancestry, try ov.state.beefFor(st.ch, req.pool.txid)) } };
+    // 0.41.0: the BEEF it submitted to its own overlay (`submissionBeef`; 0.45.0: the held ones,
+    // the pool's among them, by txid), so the relaying host admits it too.
+    if (try st.isApplied(topic, txid)) return .{ .ok = .{ .tx = signed.raw, .txid = txid, .beef = try submit.submissionBeef(a, signed.raw, sub.ancestry, req.pool.txid, InTopic{ .st = st, .topic = topic }) } };
     return .{ .refused = .{ .reason = .submit_failed, .detail = "not admitted, pending or rejected: the submission came to nothing", .txid = txid } };
 }
 

@@ -4,6 +4,19 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.45.0 (2026-11-07)
+
+- A swap's BEEFs reference by txid what the token's topic admitted (David 2026-11-07; needs skein 0.3.3's door: a
+  txid-only entry for a transaction the instance holds). Pages (`fundingBeef`, `topicAdmitted`): the funding BEEF
+  carries the staged inputs' sources raw with their ancestry back to proven, except a transaction the topic admitted
+  (the pool's — from the pools list —, any transaction carrying a pool output of this token: a swap the page took in),
+  which is a txid-only entry with no ancestry; the pool's transaction is added by txid. amm-validator: `submissionBeef`
+  = the request's BEEF, the signed swap its subject, every transaction the topic admitted (`InTopic`: the overlay's
+  applied record) by txid, the pool's added, nothing else the subject does not reach; no `beefFor` merge. The
+  accepted answer's `beef` is that bundle; a `pool_spent` refusal's `beef` is `newestBeef` (the newest transaction raw,
+  what the topic admitted by txid, the rest raw back to proven). Rescind (`withPool`) unchanged. bin/amm-validator.wasm
+  CHANGED (sha256 646c5bf0…); the other programs unchanged. `@dcasegr/amm-engine` 0.45.0 (unchanged in behaviour).
+
 ## 0.44.4 (2026-11-07)
 
 - The pages' overlay pass (`resolveFromOverlay`) also tries the spent `amm-swap` row's own outpoint as the order key,

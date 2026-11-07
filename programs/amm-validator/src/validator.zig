@@ -218,8 +218,8 @@ pub const Parent = struct {
 };
 
 /// What a signed spend's submission needs besides the transaction: the
-/// topic it was judged for, the pool it spends (0.29.5: its transaction's BEEF is
-/// merged into the submission), the request's ancestry (the signed BEEF is the
+/// topic it was judged for, the pool it spends (0.45.0: its transaction named by
+/// txid in the submission), the request's ancestry (the signed BEEF is the
 /// request's with its subject replaced, submit.zig `submissionBeef`), and the
 /// unproven parents it carries.
 pub const Submission = struct {
@@ -241,8 +241,9 @@ pub const Reply = union(enum) {
     /// (submit.zig `submissionBeef`), so the relaying host admits it too.
     ok: struct { tx: ?[]const u8 = null, txid: ?[32]u8 = null, submission: ?Submission = null, signature: ?[]const u8 = null, validator_pub_key: ?[33]u8 = null, nonce: ?[32]u8 = null, beef: ?[]const u8 = null },
     /// `txid`: the signed transaction's, when the refusal is about it (after signing). `beef`
-    /// (0.41.0): with `pool_spent`, the BEEF of the newest pool output's transaction back to proven
-    /// ones (`state.beefFor`), so the relaying host catches up from it.
+    /// (0.41.0): with `pool_spent`, the BEEF of the newest pool output's transaction (0.45.0,
+    /// submit.zig `newestBeef`: what the topic admitted by txid, the rest raw back to proven), so the
+    /// relaying host catches up from it.
     refused: struct { reason: Reason, detail: ?[]const u8 = null, newest: ?Newest = null, txid: ?[32]u8 = null, beef: ?[]const u8 = null },
 };
 

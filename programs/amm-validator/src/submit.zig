@@ -6,9 +6,10 @@
 //! box `<app>/submit` (the manifest's row `submit` from `*` takes it to the
 //! engine; shruggr/skein#128: one box per function class), with the
 //! signed BEEF — the request's BEEF (the taker's ancestry and BUMPs) with its
-//! subject replaced by the signed transaction, and the pool's transaction with
-//! its ancestry back to proven ones merged in (`submissionBeef`, 0.29.5: the
-//! kernel's door verifies every BEEF with nothing known). The engine
+//! subject replaced by the signed transaction, every transaction this instance
+//! the token's topic admitted (the pool's among them) named by txid alone
+//! (`submissionBeef`, 0.45.0:
+//! skein 0.3.3's door admits a txid-only entry for a held transaction). The engine
 //! routes it in its step on the message (decoded, checked against the chain
 //! app's headers and SPV, judged by the topic's program; lacking a parent,
 //! paused until one comes) and answers the sender, in the box it wrote to,
@@ -42,20 +43,16 @@ pub fn body(a: std.mem.Allocator, signed_beef: []const u8, topic: []const u8) !V
     }) };
 }
 
-/// The signed BEEF, what a submission carries: the request's with its
-/// subject replaced by the signed transaction (same place, parents first,
-/// its BUMPs kept), or a V1 BEEF of the signed transaction alone (a raw
-/// request) — merged with `pool`, the Atomic BEEF of the transaction whose
-/// output the signed transaction spends as its pool (0.29.5: the chain
-/// state's, `beefOf`, back to proven transactions), when given.
-///
-/// 0.29.5 (David 2026-11-03, "So fix it"): the kernel's door (skein
-/// door.zig, since c6dbbb0) verifies every BEEF with skein-sdk
-/// `chain.spv.verify` and no known transactions — every input of every
-/// transaction no BUMP proves must have its source inside the BEEF. The
-/// relay's request carries the taker's ancestry, never the pool's
-/// transaction, so the submission carries the pool's too (`merged`).
-pub fn submissionBeef(a: std.mem.Allocator, signed: []const u8, ancestry: ?beef.Beef, pool: ?[]const u8) ![]u8 {
+/// The signed BEEF, what a submission carries (0.45.0, David 2026-11-07): the request's with its
+/// subject replaced by the signed transaction (same place, parents first), or the signed transaction
+/// alone (a raw request) — every transaction the token's topic admitted (`topic.has`: the pool's
+/// transaction, a swap before it) named by txid alone, the pool's (`pool_txid`) added so when absent,
+/// and nothing left that only those needed: the taker's raw funding with its ancestry back to proven
+/// (its BUMPs) is what stays raw. The topic admitted them, so this instance holds them, and skein
+/// 0.3.3's door admits a txid-only entry for a held transaction (`kernel.beef`'s `knownRaw` the held
+/// set); no `beefFor` merge, no ancestry walk of the chain state. The signed transaction stays the
+/// subject: an Atomic BEEF names it, a bare one ends with it.
+pub fn submissionBeef(a: std.mem.Allocator, signed: []const u8, ancestry: ?beef.Beef, pool_txid: ?[32]u8, topic: anytype) ![]u8 {
     const txid = beef.txidOf(signed);
     const parsed = try w.bsvz.transaction.Transaction.parse(a, signed);
     var out: beef.Beef = if (ancestry) |b| blk: {
@@ -72,11 +69,129 @@ pub fn submissionBeef(a: std.mem.Allocator, signed: []const u8, ancestry: ?beef.
         .bumps = &.{},
         .entries = try a.dupe(beef.Entry, &.{.{ .txid = txid, .format = .raw, .raw = signed, .tx = parsed }}),
     };
-    if (pool) |p| out = try merged(a, out, try beef.parse(a, p));
-    // The signed transaction stays the subject: an Atomic BEEF names it, a bare one ends with it.
+    out = try topicByTxid(a, out, txid, pool_txid, topic);
     if ((out.subject() == null) or !std.mem.eql(u8, &out.subject().?, &txid)) return error.InvalidBeef;
     return beef.serialize(a, out);
 }
+
+/// Whether the instance holds `txid` (the chain state's `txs`, not rejected): what a BEEF may name by
+/// txid alone at this instance's door (skein 0.3.3).
+pub fn holds(ch: anytype, txid: [32]u8) !bool {
+    return (try ch.holds(txid)) and (try ch.status(txid)) != .rejected;
+}
+
+/// `b` (its subject `subject`) with every transaction but the subject that the topic admitted a
+/// txid-only entry, `extra` added as one when absent, then only what the subject's raw ancestry
+/// reaches (a txid-only or a BUMP-proven entry ends a branch) and the BUMPs those keep; txid-only
+/// entries first, then parents first (skein-sdk `beef.sorted`); V2 when any entry is txid-only.
+fn topicByTxid(a: std.mem.Allocator, b: beef.Beef, subject: [32]u8, extra: ?[32]u8, topic: anytype) !beef.Beef {
+    var entries: std.ArrayList(beef.Entry) = .empty;
+    for (b.entries) |e| {
+        if (!std.mem.eql(u8, &e.txid, &subject) and e.format != .txid_only and try topic.has(e.txid)) {
+            try entries.append(a, .{ .txid = e.txid, .format = .txid_only });
+        } else try entries.append(a, e);
+    }
+    if (extra) |x| {
+        const have = for (entries.items) |*e| {
+            if (std.mem.eql(u8, &e.txid, &x)) {
+                e.* = .{ .txid = x, .format = .txid_only };
+                break true;
+            }
+        } else false;
+        if (!have) try entries.append(a, .{ .txid = x, .format = .txid_only });
+    }
+    // What the subject reaches: raw entries' inputs, back to txid-only or proven ones.
+    const keep = try a.alloc(bool, entries.items.len);
+    @memset(keep, false);
+    var stack: std.ArrayList([32]u8) = .empty;
+    try stack.append(a, subject);
+    while (stack.pop()) |t| {
+        const k = for (entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, &e.txid, &t)) break i;
+        } else continue;
+        if (keep[k]) continue;
+        keep[k] = true;
+        const e = entries.items[k];
+        if (e.format != .raw) continue;
+        const tx = e.tx orelse try w.bsvz.transaction.Transaction.parse(a, e.raw orelse continue);
+        for (tx.inputs) |in| try stack.append(a, in.previous_outpoint.txid.bytes);
+    }
+    // The pool's transaction stays named.
+    if (extra) |x| for (entries.items, 0..) |e, i| {
+        if (std.mem.eql(u8, &e.txid, &x)) keep[i] = true;
+    };
+    var bumps: std.ArrayList(w.bsvz.spv.MerklePath) = .empty;
+    const remap = try a.alloc(?usize, b.bumps.len);
+    @memset(remap, null);
+    var txid_only: std.ArrayList(beef.Entry) = .empty;
+    var rest: std.ArrayList(beef.Entry) = .empty;
+    for (entries.items, keep) |e, k| {
+        if (!k) continue;
+        var n = e;
+        if (e.bump) |bi| {
+            if (remap[bi] == null) {
+                remap[bi] = bumps.items.len;
+                try bumps.append(a, b.bumps[bi]);
+            }
+            n.bump = remap[bi];
+        }
+        if (e.format == .txid_only) try txid_only.append(a, n) else try rest.append(a, n);
+    }
+    var o = b;
+    if (txid_only.items.len > 0) o.version = beef.V2;
+    o.bumps = bumps.items;
+    o.entries = try std.mem.concat(a, beef.Entry, &.{ txid_only.items, rest.items });
+    return beef.sorted(a, o);
+}
+
+/// The `beef` a `pool_spent` refusal carries (0.45.0): the transaction of the pool's newest state
+/// (`txid`) in the same shape as a submission — every transaction the topic admitted (the pool's
+/// transaction before it, a swap) named by txid, the others (the other taker's funding) raw with
+/// their ancestry back to proven (their BUMPs, from the chain state `ch`), the newest itself raw (with
+/// its BUMP once mined). An Atomic BEEF V2.
+pub fn newestBeef(a: std.mem.Allocator, ch: anytype, txid: [32]u8, topic: anytype) ![]const u8 {
+    var acc = Acc{ .a = a };
+    try acc.visit(ch, topic, txid, txid);
+    for (acc.entries.items) |e| {
+        const bi = e.bump orelse continue;
+        for (acc.bumps.items[bi].path[0]) |*l| if (l.hash) |h| if (std.mem.eql(u8, &h.bytes, &e.txid)) {
+            l.txid = true;
+        };
+    }
+    return beef.serialize(a, .{ .version = beef.V2, .atomic = txid, .bumps = acc.bumps.items, .entries = acc.entries.items });
+}
+
+const Acc = struct {
+    a: std.mem.Allocator,
+    entries: std.ArrayList(beef.Entry) = .empty,
+    bumps: std.ArrayList(w.bsvz.spv.MerklePath) = .empty,
+
+    fn visit(acc: *Acc, ch: anytype, topic: anytype, subject: [32]u8, txid: [32]u8) anyerror!void {
+        const a = acc.a;
+        for (acc.entries.items) |e| if (std.mem.eql(u8, &e.txid, &txid)) return;
+        if (!std.mem.eql(u8, &txid, &subject) and try topic.has(txid)) {
+            try acc.entries.append(a, .{ .txid = txid, .format = .txid_only });
+            return;
+        }
+        const raw = (try ch.txRaw(txid)) orelse return error.MissingAncestor;
+        const tx = try w.bsvz.transaction.Transaction.parse(a, raw);
+        if ((try ch.status(txid)) == .proven) {
+            const p = (try ch.proofFor(txid)) orelse return error.MissingProof;
+            const idx = for (acc.bumps.items, 0..) |*q, i| {
+                if (q.block_height != p.block_height) continue;
+                q.combine(&p, a) catch continue;
+                break i;
+            } else blk: {
+                try acc.bumps.append(a, p);
+                break :blk acc.bumps.items.len - 1;
+            };
+            try acc.entries.append(a, .{ .txid = txid, .format = .raw_with_bump, .bump = idx, .raw = raw, .tx = tx });
+            return;
+        }
+        for (tx.inputs) |in| try acc.visit(ch, topic, subject, in.previous_outpoint.txid.bytes);
+        try acc.entries.append(a, .{ .txid = txid, .format = .raw, .raw = raw, .tx = tx });
+    }
+};
 
 /// A signed BEEF (the wallet's Atomic BEEF of a Rescind, 0.29.5) merged with `pool`, the Atomic
 /// BEEF of the pool's transaction (`merged`): the subject unchanged.
