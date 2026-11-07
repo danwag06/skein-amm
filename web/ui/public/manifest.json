@@ -5,8 +5,8 @@
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#0E1526",
-  "theme_color": "#0E1526",
+  "background_color": "#F6F5F1",
+  "theme_color": "#FFFFFF",
   "metanet": {
     "groupPermissions": {
       "description": "Open Exchange builds swaps and pools with your wallet, holds the tokens and sats on their way into a swap, receives the sats pools pay you, and delivers a send to a handle; the list of your tokens and their amounts is read once through your wallet's 1Color module (granted here); sending tokens, and the exact balance of one token, the module asks you about itself.",

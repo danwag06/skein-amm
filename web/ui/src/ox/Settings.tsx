@@ -676,7 +676,7 @@ function EnabledRow({ t }: { t: RegisteredToken }) {
       <span className="req-text">
         <TokenName tokenId={t.tokenId} sym={t.sym} {...(t.icon ? { icon: t.icon } : {})} size="sm" />
         <span className="small muted">
-          {status}
+          <span className={`pill pill-${status}`}>{status}</span>
           {enabled && <TokenTermsLine terms={terms} error={termsError} note={note} />}
         </span>
       </span>

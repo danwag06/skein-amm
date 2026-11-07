@@ -20,7 +20,12 @@ function Row({ t }: { t: HostedToken }) {
       <span className="c-price">
         <span className="lbl">Price</span>
         {t.marginalPrice === null ? (
-          <span className="muted">No pools yet</span>
+          <>
+            <span className="muted">No pools yet</span>
+            <a className="next-step" href={routeHref({ page: "liquidity" })}>
+              Add the first pool
+            </a>
+          </>
         ) : (
           <>
             <span className="num big">
@@ -89,7 +94,12 @@ export function Landing({ session, tokens, error }: { session: Session; tokens: 
         {shown === null ? (
           <p className="empty">Loading the tokens…</p>
         ) : shown.length === 0 ? (
-          <p className="empty">{tokens && tokens.length > 0 ? `No token matches “${q.trim()}”.` : "This exchange hosts no tokens yet."}</p>
+          <>
+            <p className="empty">{tokens && tokens.length > 0 ? `No token matches “${q.trim()}”.` : "This exchange hosts no tokens yet."}</p>
+            <p className="empty-hint">
+              {tokens && tokens.length > 0 ? "Search matches the start or any part of a symbol." : "Tokens appear here once they are enabled in Settings."}
+            </p>
+          </>
         ) : (
           <ul className="ltable-rows">
             {shown.map((t) => (
