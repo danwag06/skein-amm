@@ -253,17 +253,14 @@ fn termsRead(a: Allocator, in: Value) !Value {
     return reads.httpCached(a, 200, "application/json", .state, try reads.termsJson(a, v, com.pkh, m.min_commission_bps));
 }
 
-/// P9 `/tx?id=<txid>`: the transaction's Atomic BEEF from the chain state with EVERY input's source in
-/// it, mined or not, the transaction itself without a BUMP (0.44.2, `reads.txBeef`), `application/octet-stream`; `imm` only when it is
-/// proven; 404 unknown, or when the chain lacks an input's source.
+/// P9 `/tx?id=<txid>`: the transaction's Atomic BEEF from the chain state (its ancestry back to
+/// proven transactions, every input's source in it), `application/octet-stream`; `imm` only when it
+/// is proven; 404 unknown.
 fn txRead(a: Allocator, in: Value, q: []const u8) !Value {
     const id = (try reads.queryParam(a, q, "id")) orelse return reads.httpError(a, 400, "want ?id=<txid>");
     const txid = reads.parseTxid(id) orelse return reads.httpError(a, 400, "want ?id=<txid>: 64 hex characters");
     const st = try loadState(a, in);
-    const beef = (reads.txBeef(a, st.ch, txid) catch |e| switch (e) {
-        error.MissingAncestor => return reads.httpError(a, 404, "the chain state lacks an input's source transaction"),
-        else => return e,
-    }) orelse return reads.httpError(a, 404, "unknown transaction");
+    const beef = (try st.ch.beefOf(txid)) orelse return reads.httpError(a, 404, "unknown transaction");
     return reads.httpCached(a, 200, "application/octet-stream", try reads.txCache(st.ch, txid), beef);
 }
 

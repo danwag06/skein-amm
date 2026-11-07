@@ -471,7 +471,7 @@ BUMP in chain state) transaction, else `state`; `stream` = `text/event-stream`, 
 | P6 | `GET /@<token>/amm/fees/commission?pkh=h1,h2` | amm-p2p (B) via `{commissionPkhs}` | `[{commissionPkh, sats, tokens, swaps}]` | state |
 | P7 | `GET /@<token>/amm/terms` | amm-p2p (B) | `{validator: {identity, peerId, lpFeeBps, validatorFeeBps, commissionBps, minLegSats} \| null, market: {commissionPkh, minCommissionBps}}` (the two `/call` answers in one, unsigned; 0.40.0: `minLegSats` the validator's minimum leg, sats, 0 none) | state |
 | P8 | `GET /@<token>/amm/spends?outpoint=a,b` | amm-p2p (B) | `[{outpoint, spentBy?, current?, hops, closed}]` one per outpoint in query order (today's single form kept working) | state |
-| P9 | `GET /@<token>/amm/tx?id=<txid>` | amm-p2p (B) | the transaction's Atomic BEEF with EVERY input's source in it, mined or not, the transaction itself without a BUMP (0.44.2, `txBeef`), `application/octet-stream`; 404 unknown or an input's source missing | imm |
+| P9 | `GET /@<token>/amm/tx?id=<txid>` | amm-p2p (B) | the transaction's BEEF bytes, `application/octet-stream` (`beefFor`); 404 unknown | imm |
 | P10 | (0.44.0: gone — no swap records: the host relays, the instance logs facts, never attempts) | | | |
 | P11 | `GET /@<token>/amm/token` | unchanged | | state |
 | P12 | `GET <origin>/amm/tokens` | swap app (D) | rows gain `iconUrl` = `/@discovery/1color/<token>/icon` (origin-relative), the data-URL `icon` field GOES | state |

@@ -31,10 +31,8 @@ const color = @import("1color");
 const pool = @import("pool");
 const lookup = @import("lookup");
 const idx = @import("amm_lookup");
-const ov = @import("skein_overlay");
 
 const cbor = w.cbor;
-const beef = w.beef;
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
 const Chain = w.state.State;
@@ -369,28 +367,6 @@ pub fn termsJson(a: Allocator, v: ?ValidatorTerms, commission_pkh: ?[20]u8, min_
 pub fn parseTxid(text: []const u8) ?[32]u8 {
     if (text.len != 64) return null;
     return w.header.fromHex(text) catch null;
-}
-
-/// P9's BEEF (0.44.2): the transaction as an Atomic BEEF with EVERY input's source transaction in it,
-/// mined or not: the sources with their ancestry back to proven transactions (the chain state's
-/// `beefOfMany`: a mined source with its BUMP, an unmined one with its parents), then the transaction
-/// itself WITHOUT a BUMP of its own. `Chain.beefOf` stops at a mined transaction's BUMP, which leaves a
-/// wallet taking the transaction in without its inputs' sources (the color module refuses that,
-/// BRC-207); and an Atomic BEEF cannot carry a proven subject's sources (the SDK's reader rejects them as
-/// unrelated data), so a mined transaction is served as the unmined one is, valid by SPV through its
-/// sources. Null: the chain does not hold the transaction; error.MissingAncestor: it lacks an input's source.
-pub fn txBeef(a: Allocator, ch: *Chain, txid: [32]u8) !?[]const u8 {
-    const raw = (try ch.txRaw(txid)) orelse return null;
-    const tx = try Transaction.parse(a, raw);
-    var ids: std.ArrayList([32]u8) = .empty;
-    for (tx.inputs) |in| {
-        const src = in.previous_outpoint.txid.bytes;
-        for (ids.items) |x| if (eql(u8, &x, &src)) break else {} else try ids.append(a, src);
-    }
-    var b = try beef.parse(a, try ov.state.beefOfMany(ch, ids.items));
-    b.atomic = txid;
-    b.entries = try std.mem.concat(a, beef.Entry, &.{ b.entries, &.{.{ .txid = txid, .format = .raw, .raw = raw, .tx = tx }} });
-    return try beef.serialize(a, b);
 }
 
 /// P9's cache class: `imm` only when the transaction is proven in the chain state (mined, its BUMP
