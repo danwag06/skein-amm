@@ -21,8 +21,9 @@
 //!   live pool;
 //! - P4 `/positions?pool=`, P5 `/fees/validator?id=`, P6 `/fees/commission?pkh=`: the lookup's
 //!   `{poolIds}`, `{validatorIdentityKeys}`, `{commissionPkhs}` answers as JSON;
-//! - (0.40.0) `/pools/at?t=<ms>` and `/pools/history?from=&to=&pool=&limit=&after=`: the pool history
-//!   (`historyRead`);
+//! - (0.40.0) `/pools/at?t=<ms>` and `/pools/history?from=&to=&pool=&limit=&after=&outpoint=`: the pool history
+//!   (`historyRead`). `outpoint` is a pool output this index holds; the scan starts strictly after
+//!   that record's `(admittedAt, swaps)` and the pool id is the record's.
 //! - P7 `/terms`: the validator's terms and the market's, in one (`termsJson`);
 //! - P9 `/tx?id=`: a transaction's BEEF (`imm` when proven);
 const std = @import("std");
@@ -586,16 +587,24 @@ pub fn historyRead(a: Allocator, svc: *lookup.Service, _: *Chain, placed: *w.sto
             try jw.endArray();
         },
         .poolsHistory => {
-            const bad = "want ?from=<ms>&to=<ms>&pool=<txid>_<vout>&limit=<n≤500>&after=<cursor>";
+            const bad = "want ?from=<ms>&to=<ms>&pool=<txid>_<vout>&limit=<n≤500>&after=<cursor>&outpoint=<txid>_<vout>";
             const from = intParam(a, q, "from") catch return httpError(a, 400, bad);
             const to = intParam(a, q, "to") catch return httpError(a, 400, bad);
-            const one = poolParam(a, q) catch return httpError(a, 400, bad);
+            var one = poolParam(a, q) catch return httpError(a, 400, bad);
             var limit: usize = idx.max_events;
             if (intParam(a, q, "limit") catch return httpError(a, 400, bad)) |n| {
                 if (n == 0 or n > idx.max_events) return httpError(a, 400, bad);
                 limit = @intCast(n);
             }
-            const after: ?idx.EventCursor = if (try queryParam(a, q, "after")) |c| parseEventCursor(c) orelse return httpError(a, 400, bad) else null;
+            var after: ?idx.EventCursor = if (try queryParam(a, q, "after")) |c| parseEventCursor(c) orelse return httpError(a, 400, bad) else null;
+            // A wallet outpoint: load that pool output and start strictly after its (admittedAt, swaps).
+            if (try queryParam(a, q, "outpoint")) |text| {
+                const op = parseOutpoint(text) orelse return httpError(a, 400, bad);
+                const rec = (try idx.poolRecord(a, svc, tp, op.txid, op.vout)) orelse return httpError(a, 404, "no pool output at this outpoint");
+                const cur = try idx.cursorOf(rec);
+                one = cur.pid;
+                after = cur;
+            }
             const page = try idx.poolHistory(a, svc, tp, from, to, one, limit, after);
             try jw.beginObject();
             try jw.objectField("events");

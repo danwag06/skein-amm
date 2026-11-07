@@ -5,14 +5,12 @@
  * no token input: the wallet's BRC-207 module selects the token inputs and
  * adds token change; every key and signature comes from the wallet.
  *
- *   1. The LP key: a BRC-29 key to self under a fresh random keyID
- *      (`newLpKey`: derivationPrefix base64("amm-lp"), derivationSuffix 16
- *      random bytes), kept in the position row and (0.29.4, David) in the
- *      pool output's description in the same createAction that makes the
- *      transaction: `AMM pool: <SYM> / BSV · amm-lp <the suffix's 16 bytes,
- *      hex>` (`lpKeyDescription`): the deploy history alone gives it back
- *      (`lpKeyIdOfDescription`; Recover and Positions read it first). Nothing
- *      is kept in the browser.
+ *   1. The LP key: security level 1, protocol `[1, "openex fees"]`, counterparty
+ *      self, keyID 16 random bytes base64 (`newLpKey`). Kept in the position
+ *      row and in the pool output's description: `AMM pool: <SYM> / BSV ·
+ *      openex fees <the keyID's bytes, hex>`. A keyID with a space is an older
+ *      BRC-29 key (` · amm-lp <suffix hex>`). The deploy history gives either
+ *      back. Nothing is kept in the browser.
  *   2. `amm.pool.terms` (the validator and its fees), then `amm.pool.affirm
  *      {pool, satoshis}`: the proposed pool output, its ValidatorPubKey,
  *      Nonce and Affirmation still to come (33 zero bytes, 32 zero bytes,
@@ -44,7 +42,7 @@ import { PoolTemplate, RESCINDED_KEY, decodeOneColor, oneColorValuePrefix, type 
 import { deriveFirstValidatorPubKey } from "../lib/keys.js";
 import { priceOf } from "../market/view.js";
 import { callApp, dagBytes, readBytes, type AuthFetchLike } from "../market/relay.js";
-import { BRC29_PROTOCOL, brc29KeyID, randomBase64 } from "../wallet/brc29.js";
+import { BRC29_PROTOCOL, randomBase64 } from "../wallet/brc29.js";
 import { POOLS_BASKET, runTokenAction, transferPlanLabels, type HeldOutput } from "../wallet/color.js";
 import { POOL_OP, POOL_TAG, isPoolRow } from "./poolRows.js";
 import { parseOutpoint, parseTokenId, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
@@ -57,8 +55,8 @@ export interface ValidatorChoice {
   identityKey: string;
 }
 
-/** The LP key's protocol: BRC-29 (see the module comment). */
-export const LP_KEY_PROTOCOL: WalletProtocol = BRC29_PROTOCOL;
+/** The LP key's protocol for a new pool: level 1, `[1, "openex fees"]`. */
+export const LP_KEY_PROTOCOL: WalletProtocol = [1, "openex fees"];
 const LP_DERIVATION_PREFIX = Utils.toBase64(Utils.toArray("amm-lp", "utf8"));
 /** `amm.pool.affirm` (amm-p2p, 0.11.0; 0.13.0: `{pool, satoshis}` → `{validatorPubKey, nonce, signature}`). */
 export const POOL_AFFIRM_FN = "amm.pool.affirm";
@@ -69,27 +67,47 @@ function describe(text: string): string {
   return text.length <= 50 ? text : `${text.slice(0, 49)}…`;
 }
 
-/** The marker the deploy's pool output description ends with (0.29.4): ` · amm-lp <hex>`. */
+/** The marker an older BRC-29 pool output description ends with: ` · amm-lp <hex>`. */
 export const LP_KEY_MARK = " · amm-lp ";
+/** The marker a new pool output description ends with: ` · openex fees <hex>`. */
+export const FEES_KEY_MARK = " · openex fees ";
 
 /**
- * The pool output's description in the deploy createAction (0.29.4, David Case 2026-11-02): the
- * readable text as before (`AMM pool: <SYM> / BSV`, at most 50 characters) then ` · amm-lp ` and
- * the LP keyID's derivationSuffix bytes in lowercase hex (16 bytes: 32 characters). The sdk takes
- * up to 2000 bytes; the wallet's permissions manager stores it encrypted and decrypts it on the
- * way out (listActions through the manager answers it verbatim).
+ * The pool output's description: the readable text (`AMM pool: <SYM> / BSV`) then the key.
+ * A keyID with a space is the older BRC-29 key (` · amm-lp ` and the suffix bytes, hex).
+ * One base64 token is the `openex fees` key (` · openex fees ` and those bytes, hex).
  */
 export function lpKeyDescription(readable: string, keyID: string): string {
-  const suffix = keyID.split(" ")[1];
-  if (keyID.split(" ")[0] !== LP_DERIVATION_PREFIX || !suffix) throw new PoolDeployError(`not a deploy LP keyID: ${keyID}`);
-  return `${readable}${LP_KEY_MARK}${toHex(Utils.toArray(suffix, "base64"))}`;
+  const space = keyID.indexOf(" ");
+  if (space > 0) {
+    const suffix = keyID.slice(space + 1);
+    if (keyID.slice(0, space) !== LP_DERIVATION_PREFIX || !suffix) throw new PoolDeployError(`not a deploy LP keyID: ${keyID}`);
+    return `${readable}${LP_KEY_MARK}${toHex(Utils.toArray(suffix, "base64"))}`;
+  }
+  let bytes: number[];
+  try {
+    bytes = Utils.toArray(keyID, "base64");
+  } catch {
+    throw new PoolDeployError(`not a deploy LP keyID: ${keyID}`);
+  }
+  if (bytes.length === 0) throw new PoolDeployError(`not a deploy LP keyID: ${keyID}`);
+  return `${readable}${FEES_KEY_MARK}${toHex(bytes)}`;
 }
 
 /** The LP keyID an output description names (`lpKeyDescription`), or null. */
 export function lpKeyIdOfDescription(description: string | undefined): string | null {
-  const m = / · amm-lp ([0-9a-f]{2,128})$/.exec(description ?? "");
-  if (!m || m[1]!.length % 2 !== 0) return null;
-  return `${LP_DERIVATION_PREFIX} ${Utils.toBase64(Utils.toArray(m[1]!, "hex"))}`;
+  const legacy = / · amm-lp ([0-9a-f]{2,128})$/.exec(description ?? "");
+  if (legacy && legacy[1]!.length % 2 === 0) return `${LP_DERIVATION_PREFIX} ${Utils.toBase64(Utils.toArray(legacy[1]!, "hex"))}`;
+  const fees = / · openex fees ([0-9a-f]{2,128})$/.exec(description ?? "");
+  if (fees && fees[1]!.length % 2 === 0) return Utils.toBase64(Utils.toArray(fees[1]!, "hex"));
+  return null;
+}
+
+/** The protocol an output description names, or null when it names no key. */
+export function lpProtocolOfDescription(description: string | undefined): WalletProtocol | null {
+  if (/ · openex fees ([0-9a-f]{2,128})$/.test(description ?? "")) return LP_KEY_PROTOCOL;
+  if (/ · amm-lp ([0-9a-f]{2,128})$/.test(description ?? "")) return BRC29_PROTOCOL;
+  return null;
 }
 
 /** A new pool's LP key derivation (0.13.0): derivationPrefix base64("amm-lp"), derivationSuffix 16 random bytes, base64. */
@@ -233,6 +251,8 @@ export function poolCustomInstructions(o: {
   validatorIdentity: string;
   /** The validator's nonce (0.13.0), hex; absent for a pool before it. */
   nonce?: string;
+  /** The deploy outpoint, `<txid>_<vout>`. Copied onto each continuation the wallet files. */
+  poolId?: string;
 }): string {
   return JSON.stringify({
     id: o.tokenId,
@@ -242,6 +262,7 @@ export function poolCustomInstructions(o: {
     protocolID: o.protocolID,
     keyID: o.keyID,
     counterparty: "self",
+    ...(o.poolId ? { poolId: o.poolId } : {}),
     amm: { role: "lp", validatorIdentity: o.validatorIdentity, lpFeeBps: String(o.args.lpFeeBps), validatorFeeBps: String(o.args.validatorFeeBps), commissionBps: String(o.args.commissionBps), ...(o.nonce ? { nonce: o.nonce } : {}) },
   });
 }
@@ -286,10 +307,10 @@ export async function affirmPool(af: AuthFetchLike, base: string, plan: PoolDepl
 // The wallet sequence
 // ---------------------------------------------------------------------------
 
-/** A new pool's LP key (0.13.0): a BRC-29 key to self under a fresh random keyID (`newLpDerivation`). */
+/** A new pool's LP key: `[1, "openex fees"]`, counterparty self, keyID 16 random bytes, base64. */
 export async function newLpKey(wallet: WalletInterface): Promise<{ protocolID: WalletProtocol; keyID: string; publicKey: string }> {
   const protocolID = LP_KEY_PROTOCOL;
-  const keyID = brc29KeyID(newLpDerivation());
+  const keyID = randomBase64(16);
   const { publicKey } = await wallet.getPublicKey({ protocolID, keyID, counterparty: "self", forSelf: true });
   return { protocolID, keyID, publicKey };
 }
@@ -396,7 +417,7 @@ export async function deployPool(i: DeployPoolInput): Promise<DeployedPool> {
       outputIndex: 0,
       basket: POOLS_BASKET,
       tags: [POOL_TAG],
-      customInstructions: poolCustomInstructions({ tokenId: sdkId, ...meta, protocolID: lpKey.protocolID, keyID: lpKey.keyID, args: plan.args, validatorIdentity: plan.state.validatorIdentity, nonce: affirmation.nonce }),
+      customInstructions: poolCustomInstructions({ tokenId: sdkId, ...meta, protocolID: lpKey.protocolID, keyID: lpKey.keyID, args: plan.args, validatorIdentity: plan.state.validatorIdentity, nonce: affirmation.nonce, poolId: `${txid}_0` }),
     },
     filed: false,
     submitted: "not submitted",

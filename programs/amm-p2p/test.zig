@@ -1126,8 +1126,17 @@ test "pool history reads (0.40.0): /pools/at?t= — every pool listed at t, its 
     try testing.expectEqual(@as(usize, 3), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, try std.fmt.allocPrint(a, "from=7000&to=7001&pool={s}", .{try poolText(a)}), 0)))).object.get("events").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "pool=" ++ unknown_pool, 0)))).object.get("events").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "to=7000", 0)))).object.get("events").?.array.items.len);
-    for ([_][]const u8{ "limit=501", "limit=0", "from=x", "pool=02ab" }) |bad|
+    for ([_][]const u8{ "limit=501", "limit=0", "from=x", "pool=02ab", "outpoint=zz" }) |bad|
         try testing.expectEqual(@as(u64, 400), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, bad, 0)));
+    // `outpoint` is the wallet's pool output: the scan starts strictly after that record.
+    const deploy = try poolText(a);
+    const after_deploy = (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, try std.fmt.allocPrint(a, "outpoint={s}", .{deploy}), 0)))).object.get("events").?.array.items;
+    try testing.expectEqual(@as(usize, 2), after_deploy.len);
+    try testing.expectEqualStrings("swap", after_deploy[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("swap", after_deploy[1].object.get("kind").?.string);
+    const newest = try std.fmt.allocPrint(a, "{s}_0", .{&w.header.toHex(s2)});
+    try testing.expectEqual(@as(usize, 0), (try jsonOf(a, httpBody(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, try std.fmt.allocPrint(a, "outpoint={s}", .{newest}), 0)))).object.get("events").?.array.items.len);
+    try testing.expectEqual(@as(u64, 404), httpStatus(try reads.historyRead(a, &e.svc, &e.ch, &placed, e.token, .poolsHistory, "outpoint=" ++ unknown_pool, 0)));
 }
 
 test "spends (0.40.0, VERIFY): /spends answers spentBy for a plain sats output a Swap spent — the taker's funding output fund:1, spent by swap_bsv_in, held by the chain state as the overlay's admission leaves it" {

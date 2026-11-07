@@ -38,6 +38,8 @@ export { ASSETS_SELECTOR, assetBasket, assetTag, colorProtocolID, type ColorRece
 
 /** The LP's position rows: one pool output per deploy (basket insertion after the deploy). */
 export const POOLS_BASKET = "amm-pools";
+/** The LP fee outputs a pool pays, filed on catch-up and spent when the LP collects. */
+export const FEES_BASKET = "openex fees";
 /** The active swap basket: token outputs the swap legs spend, keyed under `SWAP_PROTOCOL`. */
 export const SWAP_BASKET = "amm-swap";
 /** The exchange's own key protocol for `amm-swap` outputs (counterparty self, a fresh keyID per output). */

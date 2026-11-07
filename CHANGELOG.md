@@ -4,6 +4,33 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.46.0 (2026-11-07)
+
+- The LP wallet catches up from the pool output it holds, one internalize per hop. The cursor is that
+  outpoint (`listOutputs` of `amm-pools`). `GET /pools/history?outpoint=` starts strictly after that
+  record; the client does not read `next`. A hop files output 0 into `amm-pools` (tag `amm-pool`, the
+  held instructions plus the pool id) and, on a swap with an LP fee, output 2 into basket `openex fees`
+  with the key stored on the pool output. A hop that does not spend the held output stops. Output 0 that
+  is not a pool stops. A rescind files output 0 and no fee. A transaction that cannot be read stops
+  without throwing. Deploy events are not internalized.
+- Close runs that walk, then spends the output the wallet holds. The BEEF is `GET /tx?id=` of that row,
+  parents first. The page passes the pool id. The derived public key must equal the pool's LP key, for a
+  BRC-29 key or an `[1, "openex fees"]` key. Rebalance stays a close and a deploy: the new pool's key is
+  `[1, "openex fees"]`, counterparty self, key id 16 random bytes base64 with no prefix, filed with
+  `amm-pool-deploy`. An old pool keeps its BRC-29 key.
+- Collect runs the same walk for every held pool, then spends the whole `openex fees` basket. Satoshis go
+  to one BRC-29 address. Each token's sum goes to one `p color` output. The pool stays open. Fees already
+  in the basket stay there until collect.
+- The pages' manifest adds protocol `[1, "openex fees"]` (counterparty self) and basket `openex fees`.
+- amm-lookup: a rescinded output is stored by its outpoint in `pools`. The record keeps the validator key
+  (33 zero bytes means rescinded; the identity key stays). `swaps` on that output is the next count, and
+  the history key uses that number. A live read and the beat skip a zero key. A position read reports
+  rescinded from that key. The LP's Close of that output writes a close. `/pools/history?outpoint=` loads
+  the record and starts strictly after its `(admittedAt, swaps)`. Unknown outpoint is 404. `from` / `to` /
+  `pool` / `limit` / `after` stay.
+- bin/amm-lookup.wasm CHANGED (sha256 49b39f1e4a954922…). bin/amm-p2p.wasm CHANGED (sha256 0d517d85dff20819…).
+  amm-validator.wasm and amm-setup.wasm unchanged. `@dcasegr/amm-engine` 0.46.0 (unchanged in behaviour).
+
 ## 0.45.0 (2026-11-07)
 
 - A swap's BEEFs reference by txid what the token's topic admitted (David 2026-11-07; needs skein 0.3.3's door: a

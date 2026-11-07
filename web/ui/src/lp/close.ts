@@ -3,8 +3,8 @@
  * outputs free; skein-amm 0.13.0). One path (0.29.0, David Case 2026-11-02: "we should just use
  * create action directly"; 0.29.1: the page-built close and layout 1 gone; 0.29.3: a module plan):
  *
- *   1. The pool's current output and its BEEF: 0.34.0, `GET /@<token>/amm/pools/beef?lp=<its LP
- *      key>` (the pool's current output by its LP key, live or rescinded).
+ *   1. The pool output the wallet holds, and its BEEF (`GET /@<token>/amm/tx?id=` of that
+ *      output's transaction), after the wallet has caught up to it.
  *   2. The LP's one output (`PoolTemplate.planClose`): every token, one sat, to a NEW module
  *      receiving key of the user's own (`newReceivingKey`, sender the user's identity). The pool's
  *      sats go to the wallet's change: no payout output, no remittance.
@@ -21,11 +21,11 @@
  *      own submit. Nothing is taken in afterwards and nothing is kept in the browser.
  */
 import { Beef, PublicKey, Transaction, type WalletInterface } from "@bsv/sdk";
-import { PoolTemplate, type CallPlan } from "../pool/index.js";
+import { PoolTemplate, type CallPlan, type PoolUtxo } from "../pool/index.js";
 import { poolUtxoFrom, spendValid } from "../market/swapAction.js";
 import type { LookupOutput } from "../lib/overlay.js";
 import type { LpKeyRef } from "./positions.js";
-import { identityKeyOf, isBrc29Protocol } from "../wallet/brc29.js";
+import { identityKeyOf } from "../wallet/brc29.js";
 import { sdkTokenId } from "../lib/tokenId.js";
 import { newReceivingKey, transferPlanLabels } from "../wallet/color.js";
 import { inputIndexOf, runAppSignedAction } from "../wallet/action.js";
@@ -43,9 +43,11 @@ export interface CloseInput {
   /** `<txid>_0` (src/lib/tokenId.ts). */
   tokenId: string;
   meta?: { sym?: string; dec?: number };
-  /** The pool's current output (step 1). */
+  /** The pool output the wallet holds (step 1). */
   poolOutput: LookupOutput;
   lpKey: LpKeyRef;
+  /** The wallet's listed txid. Used when the BEEF is not atomic, and as the spend's txid. */
+  txid?: string;
 }
 
 export interface PreparedClose {
@@ -71,13 +73,25 @@ function describe(text: string): string {
   return text.length <= 50 ? text : `${text.slice(0, 49)}…`;
 }
 
+/** The pool output inside a BEEF: atomic (`/pools/beef`) or parents-first (`GET /tx?id=`). */
+function poolFromBeef(beefBytes: number[], outputIndex: number, txid?: string): PoolUtxo {
+  const beef = Beef.fromBinary(beefBytes);
+  if (beef.atomicTxid) return poolUtxoFrom({ beef: beefBytes, outputIndex });
+  if (!txid) throw new CloseShapeError("the transaction is not in the BEEF");
+  const found = beef.findTxid(txid) ?? beef.findTxid(txid.toLowerCase());
+  const tx = found?.tx ?? (found?.rawTx ? Transaction.fromBinary(found.rawTx) : undefined);
+  const out = tx?.outputs[outputIndex];
+  if (!tx || !out) throw new CloseShapeError("the transaction is not in the BEEF");
+  return { txid, vout: outputIndex, satoshis: out.satoshis ?? 0, script: out.lockingScript, sourceTransaction: tx };
+}
+
 /** Steps 2-3 (see the module comment): the wallet's action, broadcast by the wallet. */
 export async function prepareClose(i: CloseInput): Promise<PreparedClose> {
   const { wallet } = i;
-  const poolUtxo = poolUtxoFrom(i.poolOutput);
+  const poolUtxo = poolFromBeef(i.poolOutput.beef, i.poolOutput.outputIndex, i.txid);
   const pool = PoolTemplate.decode(poolUtxo.script);
   if (!pool) throw new CloseShapeError("the output is not a pool");
-  if (!isBrc29Protocol(i.lpKey.protocolID) || i.lpKey.counterparty !== "self") throw new CloseShapeError(`the LP key ${i.lpKey.keyID} is not a BRC-29 key to self`);
+  if (i.lpKey.counterparty !== "self") throw new CloseShapeError(`the wallet key ${i.lpKey.keyID} is not a key to self`);
   const lpArgs = { protocolID: i.lpKey.protocolID, keyID: i.lpKey.keyID, counterparty: i.lpKey.counterparty };
   const { publicKey: lpPub } = await wallet.getPublicKey({ ...lpArgs, forSelf: true });
   if (PublicKey.fromString(lpPub).toString() !== pool.state.lpPubKey) throw new CloseShapeError(`the wallet key ${i.lpKey.keyID} is not this pool's LP key`);
@@ -88,7 +102,8 @@ export async function prepareClose(i: CloseInput): Promise<PreparedClose> {
   const k = await newReceivingKey(wallet, sdkId, me);
   const tokenScript = tokenP2pkhScript(sdkId, pool.state.tokenReserve, k.publicKey);
   const plan = PoolTemplate.planClose({ pool: poolUtxo, outputs: [{ satoshis: 1n, script: tokenScript }] });
-  const poolOutpoint = `${poolUtxo.txid}.${poolUtxo.vout}`;
+  const spendTxid = i.txid ?? poolUtxo.txid;
+  const poolOutpoint = `${spendTxid}.${poolUtxo.vout}`;
   const lpSigner = async (sighash: number[]) => (await wallet.createSignature({ ...lpArgs, hashToDirectlySign: sighash })).signature;
 
   const signed = await runAppSignedAction(
@@ -103,7 +118,7 @@ export async function prepareClose(i: CloseInput): Promise<PreparedClose> {
     },
     async (tx) => {
       // The contract reads input 0 (the preimage is input 0's); the wallet places named inputs first.
-      if (inputIndexOf(tx, poolUtxo.txid, poolUtxo.vout) !== 0) throw new CloseShapeError("the wallet did not place the pool as input 0");
+      if (inputIndexOf(tx, spendTxid, poolUtxo.vout) !== 0) throw new CloseShapeError("the wallet did not place the pool as input 0");
       if (tx.outputs[0]?.lockingScript.toHex() !== tokenScript || tx.outputs[0]?.satoshis !== 1) throw new CloseShapeError("the wallet moved output 0 of the close");
       // Close's outputs are free: the call's preimage covers the wallet's outputs, change included.
       const callPlan = PoolTemplate.planClose({ pool: poolUtxo, outputs: tx.outputs.map((o) => ({ satoshis: BigInt(o.satoshis!), script: o.lockingScript.toHex() })) });

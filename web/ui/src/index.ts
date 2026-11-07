@@ -40,14 +40,20 @@ export { legDerivation } from "./market/swapAction.js";
 export { swapInstructions } from "./wallet/color.js";
 /** customInstructions of an `amm-swap` sats row (`sats: true`, its key; a change row's `order`). */
 export { swapSatsInstructions } from "./wallet/color.js";
-/** The key protocol of a pool's LP key (BRC-29, to self): the `amm-pools` row's protocolID. */
+/** The LP's fee rows (`openex fees`): filed on catch-up, spent when the LP collects. */
+export { FEES_BASKET } from "./wallet/color.js";
+/** The key protocol of a new pool's LP key (`[1, "openex fees"]`, to self). An older pool keeps its BRC-29 key. */
 export { LP_KEY_PROTOCOL } from "./lp/poolDeploy.js";
-/** The marker a deploy's pool output description ends with (` · amm-lp <hex>`): it names the LP keyID. */
+/** The marker an older pool output description ends with (` · amm-lp <hex>`). */
 export { LP_KEY_MARK } from "./lp/poolDeploy.js";
-/** A deploy's pool output description: the readable text, then `LP_KEY_MARK` and the LP keyID's suffix. */
+/** The marker a new pool output description ends with (` · openex fees <hex>`). */
+export { FEES_KEY_MARK } from "./lp/poolDeploy.js";
+/** A pool output description: the readable text, then the marker of the key it names. */
 export { lpKeyDescription } from "./lp/poolDeploy.js";
-/** The LP keyID a deploy's pool output description names, or null. */
+/** The LP keyID a pool output description names, or null. */
 export { lpKeyIdOfDescription } from "./lp/poolDeploy.js";
+/** The protocol a pool output description names, or null. */
+export { lpProtocolOfDescription } from "./lp/poolDeploy.js";
 /** The tag (`amm-pool`) of an `amm-pools` row. */
 export { POOL_TAG } from "./lp/poolDeploy.js";
 /** The `op` (`amm-pool`) in an `amm-pools` row's customInstructions. */

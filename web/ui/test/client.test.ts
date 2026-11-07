@@ -68,14 +68,18 @@ describe("the shared names (D10)", () => {
     expect(pkg.SWAP_KEY_MARK).toBe(" · amm-swap ");
     expect(pkg.swapKeyIdOfDescription(pkg.swapKeyDescription("TST for a swap", `amm-swap-${"0f".repeat(16)}`))).toBe(`amm-swap-${"0f".repeat(16)}`);
     expect(pkg.legDerivation(`${"cd".repeat(32)}.1`, "change").derivationPrefix).toBe("YW1tIHN3YXAgY2hhbmdl");
-    expect(pkg.LP_KEY_PROTOCOL).toEqual([2, "3241645161d8"]);
+    expect(pkg.LP_KEY_PROTOCOL).toEqual([1, "openex fees"]);
+    expect(pkg.FEES_BASKET).toBe("openex fees");
     expect(pkg.LP_KEY_MARK).toBe(" · amm-lp ");
+    expect(pkg.FEES_KEY_MARK).toBe(" · openex fees ");
+    expect(pkg.lpProtocolOfDescription(`AMM pool: TST / BSV · openex fees ${"ab".repeat(16)}`)).toEqual([1, "openex fees"]);
+    expect(pkg.lpProtocolOfDescription(`AMM pool: TST / BSV · amm-lp ${"ab".repeat(16)}`)).toEqual([2, "3241645161d8"]);
     expect(pkg.POOL_DEPLOY_LABEL).toBe("amm-pool-deploy");
     expect([pkg.POOL_TAG, pkg.POOL_OP]).toEqual(["amm-pool", "amm-pool"]);
     expect(pkg.LEG_PATIENCE_MS).toBe(15_000);
     expect("SWAP_TTL_MS" in pkg).toBe(false);
     expect(pkg.DEFAULT_FEE_RATE_SATS_PER_KB).toBe(100);
-    for (const fn of [pkg.transferPlanLabels, pkg.newReceivingKey, pkg.receiptOutput, pkg.swapInstructions, pkg.swapSatsInstructions, pkg.poolCustomInstructions, pkg.lpKeyDescription, pkg.lpKeyIdOfDescription, pkg.isPoolRow, pkg.createClient]) expect(typeof fn).toBe("function");
+    for (const fn of [pkg.transferPlanLabels, pkg.newReceivingKey, pkg.receiptOutput, pkg.swapInstructions, pkg.swapSatsInstructions, pkg.poolCustomInstructions, pkg.lpKeyDescription, pkg.lpKeyIdOfDescription, pkg.lpProtocolOfDescription, pkg.isPoolRow, pkg.createClient]) expect(typeof fn).toBe("function");
     expect(pkg.transferPlanLabels(T).some((l) => l.startsWith("p color plan"))).toBe(true);
   });
 

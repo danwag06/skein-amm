@@ -423,10 +423,10 @@ test "listing (0.13.0): a continuation is listed only when it is a Swap of a lis
     try testing.expectEqual(@as(usize, 1), all.freeform.array.len);
     try testing.expectEqualStrings(try opStr(a, hop.txid, 0), all.freeform.array[0].getText("outpoint").?);
 
-    // The record does not carry the ValidatorPubKey.
+    // The record carries the ValidatorPubKey (33 zero bytes means rescinded).
     const cid = (try svc.map("pools").prefixed(try w.store.nameKey(a, e.topic, &.{})))[0].value.cid;
     const rec = try svc.store.getValue(a, cid);
-    try testing.expect(rec.get("validatorPubKey") == null);
+    try testing.expectEqual(@as(usize, 33), (rec.getBytes("validatorPubKey") orelse return error.TestUnexpectedResult).len);
     try testing.expectEqualSlices(u8, &key33(vec.identity), rec.getBytes("validatorIdentityKey").?);
     try testing.expect(rec.get("claim") == null);
 }
@@ -472,7 +472,7 @@ test "listing (0.13.0): only a self-attesting pool is listed — not one without
     try testing.expectEqual(@as(usize, 0), try svc2.map("pools").count());
 }
 
-test "listing (0.13.0): the LP's Close and the validator's Rescind end it; a rejected one lists the pool again" {
+test "listing (0.13.0): the LP's Close and the validator's Rescind end the live listing; a rejected one lists the pool again" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -494,11 +494,12 @@ test "listing (0.13.0): the LP's Close and the validator's Rescind end it; a rej
         try testing.expectEqual(@as(usize, 1), (try idx.answer(a, &svc, &ch, by_validator)).freeform.array.len);
 
         // The Close: the pool spent, no continuation (the LP's tokens are not a pool). The
-        // Rescind: the pool written back, its key cleared: not listed.
+        // Rescind: the output stays in `pools` with a cleared validator key, skipped by a live read.
         const cl = try ltx(a, e.f.txid(nm), e.f.tx(nm));
         try idx.admitted(a, &svc, e.topic, cl, c.outs, &.{0});
         try idx.spent(a, &svc, e.topic, .{ .txid = sw2_txid, .vout = 0 }, cl);
-        try testing.expectEqual(@as(usize, 0), try svc.map("pools").count());
+        const stored: usize = if (std.mem.eql(u8, nm, "rescind")) 1 else 0;
+        try testing.expectEqual(stored, try svc.map("pools").count());
         try testing.expectEqual(@as(usize, 0), (try idx.answer(a, &svc, &ch, try e.q(a, &.{}))).freeform.array.len);
         try testing.expectEqual(@as(usize, 0), (try idx.answer(a, &svc, &ch, by_validator)).freeform.array.len);
 
@@ -546,9 +547,14 @@ test "beat (0.12.0): the body is this skein's per-token, per-validator totals of
     try testing.expectEqual(@as(u64, vec.pool1.tokens), t2.getUint("tokens").?);
     try testing.expect(!std.mem.eql(u8, kept1, (try svc.map("beat").link("body")).?));
 
-    // A Rescind of it (the validator's, say): the token leaves the body.
+    // The fixture Rescind spends the second Swap's output. Its record stays in `pools` with a
+    // cleared validator key, and the beat skips it.
+    try e.admit(a, &svc, "swap_tokens_in", null, &.{ 0, 2, 3, 4 }, &.{ 0, 1 });
+    try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_bsv_in"), .vout = 0 }, try ltx(a, e.f.txid("swap_tokens_in"), e.f.tx("swap_tokens_in")));
     const cl = try ltx(a, e.f.txid("rescind"), e.f.tx("rescind"));
-    try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_bsv_in"), .vout = 0 }, cl);
+    try idx.admitted(a, &svc, e.topic, cl, &.{0}, &.{0});
+    try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, cl);
+    try testing.expectEqual(@as(usize, 1), try svc.map("pools").count());
     try testing.expectEqual(@as(usize, 0), (try idx.beatValue(a, &svc)).get("tokens").?.map.len);
 }
 
@@ -922,16 +928,19 @@ test "queries (0.40.0): {poolIds} — a pool the validator rescinded is `rescind
     const rs = try ltx(a, e.f.txid("rescind"), e.f.tx("rescind"));
     try idx.admitted(a, &svc, e.topic, rs, &.{0}, &.{0});
     try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, rs);
-    try testing.expectEqual(@as(usize, 0), try svc.map("pools").count());
+    try testing.expectEqual(@as(usize, 1), try svc.map("pools").count());
     const q = try listQuery(a, e, "poolIds", &.{try poolIdText(a, e)});
     const r = (try idx.answer(a, &svc, &ch, q)).freeform.array[0];
     try testing.expectEqualStrings("rescinded", r.getText("status").?);
     try testing.expectEqualStrings(try opStr(a, e.f.txid("rescind"), 0), r.getText("outpoint").?);
     try testing.expectEqualStrings(try opStr(a, e.f.txid("rescind"), 0), r.get("current").?.getText("outpoint").?);
+    try testing.expectEqual(@as(u64, 3), r.get("current").?.getUint("swaps").?);
     try testing.expectEqual(@as(u64, 2), r.get("swaps").?.uint);
 
-    // The LP's Close of the rescinded pool, held by the chain state: closed.
-    for ([_][]const u8{ "fund", "token_deploy", "pool_deploy", "swap_bsv_in", "swap_tokens_in", "rescind", "close_rescinded" }) |n| _ = try ch.putTx(e.f.txid(n), e.f.raw(n));
+    // The LP's Close of the rescinded output: it leaves `pools`, so the position is closed.
+    const cr = try ltx(a, e.f.txid("close_rescinded"), e.f.tx("close_rescinded"));
+    try idx.admitted(a, &svc, e.topic, cr, &.{1}, &.{0});
+    try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("rescind"), .vout = 0 }, cr);
     const c = (try idx.answer(a, &svc, &ch, q)).freeform.array[0];
     try testing.expectEqualStrings("closed", c.getText("status").?);
     try testing.expect(c.get("outpoint") == null);
@@ -1368,7 +1377,7 @@ test "pool history (0.40.0): a close is written in `spent` when the spender cont
     try testing.expectEqual(@as(usize, 1), try svc.map("pools").count());
 }
 
-test "pool history (0.40.0): a Rescind writes its rescind event and the rescinded record under the pool's id (no close in `spent`); the LP's Close of it writes nothing; its rejection removes both" {
+test "pool history (0.40.0): a Rescind stores its output in `pools` with swaps the next count and that sequence; the LP's Close of it writes a close; its rejection removes both" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1382,20 +1391,29 @@ test "pool history (0.40.0): a Rescind writes its rescind event and the rescinde
     idx.now_ms = 3_000;
     try idx.admitted(a, &svc, e.topic, rs, &.{0}, &.{0});
     try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("swap_tokens_in"), .vout = 0 }, rs);
-    const r = try svc.store.getValue(a, (try svc.map("rescinded").link(try cat(a, &.{ tp, &pid }))).?);
+    const r = try recordAt(a, &svc, tp, "pools", e.f.txid("rescind"));
     try testing.expectEqualSlices(u8, &pid, r.getBytes("poolId").?);
-    try testing.expectEqual(@as(u64, 2), r.getUint("swaps").?);
+    try testing.expectEqual(@as(u64, 3), r.getUint("swaps").?);
+    try testing.expect(std.mem.allEqual(u8, r.getBytes("validatorPubKey").?, 0));
+    try testing.expectEqualSlices(u8, &key33(vec.identity), r.getBytes("validatorIdentityKey").?);
     const evs = try histOf(a, &svc, tp, null, null, pid, 500);
     try testing.expectEqualStrings("dssr", try kinds(a, evs));
+    try testing.expectEqual(@as(u64, 3), evs[3].seq);
     try testing.expectEqualSlices(u8, &w.store.outpointKey(e.f.txid("rescind"), 0), evs[3].rec.getBytes("outpoint").?);
     try testing.expectEqual(@as(usize, 1), try svc.map("closes").count());
-    // The LP's Close of the rescinded output: not a listed pool, no event.
+    // The scan after the spent Swap is the rescind only. After the rescind output, the page is empty.
+    const spent = try recordAt(a, &svc, tp, "spentPools", e.f.txid("swap_tokens_in"));
+    const after_swap = try idx.poolHistory(a, &svc, tp, null, null, null, 500, try idx.cursorOf(spent));
+    try testing.expectEqualStrings("r", try kinds(a, after_swap.events));
+    const after_rescind = try idx.poolHistory(a, &svc, tp, null, null, null, 500, try idx.cursorOf(r));
+    try testing.expectEqual(@as(usize, 0), after_rescind.events.len);
+    // The LP's Close of the rescinded output writes the close.
     const cr = try ltx(a, e.f.txid("close_rescinded"), e.f.tx("close_rescinded"));
     idx.now_ms = 4_000;
     try idx.admitted(a, &svc, e.topic, cr, &.{1}, &.{0});
     try idx.spent(a, &svc, e.topic, .{ .txid = e.f.txid("rescind"), .vout = 0 }, cr);
-    try testing.expectEqual(@as(usize, 4), (try histOf(a, &svc, tp, null, null, pid, 500)).len);
-    // A rejected Rescind (a fresh index): the rescind rows and the rescinded record go.
+    try testing.expectEqualStrings("dssrc", try kinds(a, try histOf(a, &svc, tp, null, null, pid, 500)));
+    // A rejected Rescind (a fresh index): the rescind rows go.
     var svc2 = try e.svc(a);
     try threeEvents(a, e, &svc2, 100, 1_000, 2_000);
     idx.now_ms = 3_000;

@@ -125,6 +125,7 @@ export const myPositions: AmmClient["myPositions"] = (...a: Parameters<AmmClient
 export const validatorTerms: AmmClient["validatorTerms"] = (...a: Parameters<AmmClient["validatorTerms"]>) => (client.validatorTerms as (...x: unknown[]) => ReturnType<AmmClient["validatorTerms"]>)(...a);
 export const deployPosition: AmmClient["deployPosition"] = (...a: Parameters<AmmClient["deployPosition"]>) => (client.deployPosition as (...x: unknown[]) => ReturnType<AmmClient["deployPosition"]>)(...a);
 export const closePosition: AmmClient["closePosition"] = (...a: Parameters<AmmClient["closePosition"]>) => (client.closePosition as (...x: unknown[]) => ReturnType<AmmClient["closePosition"]>)(...a);
+export const collectFees: AmmClient["collectFees"] = (...a: Parameters<AmmClient["collectFees"]>) => (client.collectFees as (...x: unknown[]) => ReturnType<AmmClient["collectFees"]>)(...a);
 export const rebalancePosition: AmmClient["rebalancePosition"] = (...a: Parameters<AmmClient["rebalancePosition"]>) => (client.rebalancePosition as (...x: unknown[]) => ReturnType<AmmClient["rebalancePosition"]>)(...a);
 export const myTokens: AmmClient["myTokens"] = (...a: Parameters<AmmClient["myTokens"]>) => (client.myTokens as (...x: unknown[]) => ReturnType<AmmClient["myTokens"]>)(...a);
 export const settleSwaps: AmmClient["settleSwaps"] = (...a: Parameters<AmmClient["settleSwaps"]>) => (client.settleSwaps as (...x: unknown[]) => ReturnType<AmmClient["settleSwaps"]>)(...a);

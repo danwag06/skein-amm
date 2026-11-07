@@ -31,7 +31,7 @@
  * | H4 | `GET <origin>/amm/stats?ids=` | `[H3]`, every enabled token's (the host's) |
  * | H5 | `GET <origin>/amm/positions?pool=` | `[{tokenId, …P4 row}]`, every enabled token's (the host's) |
  * | H7 | `GET /@<token>/amm/pools/at?t=<ms>` (0.40.0) | `[{poolId, outpoint, bsvReserve, tokenReserve, lpPubKey, …the three bps, validatorIdentityKey, at, swaps}]`: every pool listed at `t` |
- * | H8 | `GET /@<token>/amm/pools/history?from=&to=&pool=&limit=&after=` (0.40.0) | `{events: [PoolEvent], next}` oldest first; `next` → `after` |
+ * | H8 | `GET /@<token>/amm/pools/history?from=&to=&pool=&limit=&after=&outpoint=` (0.40.0) | `{events: [PoolEvent], next}` oldest first; `next` → `after`; `outpoint` starts strictly after that record |
  * | H9 | `GET <origin>/amm/spends?outpoint=a,b` (0.40.0, the host's) | `[{outpoint, tokenId?, spentBy?}]`: each enabled token's `/spends`, the first that names a spender |
  * | H6 | `GET /@<token>/amm/color/<token>/holders?limit=&skip=` | `{count, rows: [{address, balance}]}` largest first |
  * | E1 | `GET /@<token>/amm/events`, `GET <origin>/amm/events` (0.41.0, the host's) | Server-Sent Events, each `event: pool`, `data: {tokenId, …row}`: the AMM lookup's pool event (a deploy, swap, close or rescind: the H8 row; a `revert`), one token's or every enabled token's; nothing on connect, nothing replayed |
@@ -845,9 +845,9 @@ export function parsePoolEventMessage(x: unknown): PoolEventMessage | null {
   return row ? { tokenId: r.tokenId, ...row } : null;
 }
 
-/** H8: `GET <base>/pools/history?from=&to=&pool=&limit=&after=` → the page, oldest first. */
-export async function readPoolHistory(base: string, o: { from?: number; to?: number; pool?: string; limit?: number; after?: string } = {}, fetchFn?: FetchFn): Promise<PoolHistoryPage> {
-  const a = (await getJson(`${trim(base)}/pools/history${query({ from: o.from, to: o.to, pool: o.pool, limit: o.limit, after: o.after })}`, fetchFn)) as { events?: unknown; next?: unknown } | null;
+/** H8: `GET <base>/pools/history?from=&to=&pool=&limit=&after=&outpoint=` → the page, oldest first. `outpoint` starts strictly after that record. */
+export async function readPoolHistory(base: string, o: { from?: number; to?: number; pool?: string; limit?: number; after?: string; outpoint?: string } = {}, fetchFn?: FetchFn): Promise<PoolHistoryPage> {
+  const a = (await getJson(`${trim(base)}/pools/history${query({ from: o.from, to: o.to, pool: o.pool, limit: o.limit, after: o.after, outpoint: o.outpoint })}`, fetchFn)) as { events?: unknown; next?: unknown } | null;
   return {
     events: (Array.isArray(a?.events) ? a!.events : []).map(toPoolEvent).filter((e): e is PoolEvent => e !== null),
     next: typeof a?.next === "string" ? a.next : null,

@@ -521,7 +521,7 @@ describe("exchange.ts, wired", () => {
     expect(await myPositions()).toEqual([
       { outpoint: `${pd}.0`, poolId: PID, swaps: 2, tokenId: TOKEN, sym: "TST", dec: 0, sats: 0n, tokens: 0n, validator: { identityKey: SKEIN, live: false }, closed: true, feesEarnedSats: 60n, feesEarnedTokens: 150n },
     ]);
-    await expect(closePosition({ outpoint: `${s1}.0` })).rejects.toThrow(/No such position/);
+    await expect(closePosition({ poolId: `${s1}_0` })).rejects.toThrow(/No such position/);
     // The list was read once this page load.
     expect(inst.requests.filter((r) => r === "GET /amm/tokens")).toHaveLength(1);
     noLookup();
@@ -570,16 +570,17 @@ describe("exchange.ts, wired", () => {
     expect(await myPositions()).toEqual([]);
   });
 
-  it("closePosition (0.40.0): the pool's current output and its BEEF by its pool id (GET /pools/beef?pool=<id>)", async () => {
+  it("closePosition: history from the output the wallet holds (GET /pools/history?outpoint=), not /pools/beef", async () => {
     const pd = poolDeploy.id("hex");
     const ci = JSON.stringify({ id: TOKEN, op: "amm-pool", protocolID: [2, "3241645161d8"], keyID: "lp key", counterparty: "self", amm: { validatorIdentity: SKEIN } });
     connect({ pools: [{ outpoint: `${pd}.0`, satoshis: v.pool0.bsv, lockingScript: poolDeploy.outputs[0]!.lockingScript.toHex(), tags: ["amm-pool"], customInstructions: ci }] });
     inst.lpPools[PID] = { poolId: PID, lpPubKey: v.lp, status: "live", outpoint: `${pd}_0`, current: wirePool(pd, v.pool0), sats: 0, tokens: 0, swaps: 0 };
     await myPositions();
     const n = inst.requests.length;
-    // The fake wallet builds nothing: the close fails after the read, the read is what is checked.
-    await expect(closePosition({ outpoint: `${pd}.0` })).rejects.toThrow();
-    expect(since(n)).toEqual([`GET /@${TOKEN}/amm/pools/beef?pool=${PID}`]);
+    // The fake server has no history route: the catch-up stops on that read, before any BEEF.
+    await expect(closePosition({ poolId: PID })).rejects.toThrow();
+    expect(since(n)).toEqual([`GET /@${TOKEN}/amm/pools/history?limit=100&outpoint=${PID}`]);
+    expect(since(n).some((r) => r.includes("/pools/beef"))).toBe(false);
   });
 
   it("defaults (0.17.0): GET /defaults; root's {fn: defaults} to <app>/admin, swap's identity (D21: from the claim card) the recipient; bad values refused before anything is sent", async () => {

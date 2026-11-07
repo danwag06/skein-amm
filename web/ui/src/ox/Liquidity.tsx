@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { Id } from "../components/Id";
 import {
   closePosition,
+  collectFees,
   deployPosition,
   useMyPositions,
   useMyTokens,
@@ -34,7 +35,7 @@ function PositionCard({ p, onClosed }: { p: Position; onClosed: (msg: string, tx
     setBusy(true);
     setError(null);
     try {
-      const r = await closePosition({ outpoint: p.outpoint });
+      const r = await closePosition({ poolId: p.poolId });
       onClosed(`Closed ${pair}: ${fmtSats(r.sats)} sats and ${fmtAmount(r.tokens, p.dec)} ${p.sym} returned to your wallet.`, r.txid);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -260,6 +261,27 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
   const connected = session.status === "connected";
   const positions = useMyPositions(connected);
   const [closed, setClosed] = useState<{ msg: string; txid: string } | null>(null);
+  const [collected, setCollected] = useState<{ kind: "ok" | "bad"; text: string } | null>(null);
+  const [collecting, setCollecting] = useState(false);
+  async function collect() {
+    setCollecting(true);
+    setCollected(null);
+    try {
+      const r = await collectFees();
+      const text = !r.txid
+        ? "No fees to collect."
+        : r.sats > 0n && r.tokens.length > 0
+          ? `Collected ${fmtSats(r.sats)} sats and your token fees.`
+          : r.sats > 0n
+            ? `Collected ${fmtSats(r.sats)} sats.`
+            : "Collected your token fees.";
+      setCollected({ kind: "ok", text });
+    } catch (e) {
+      setCollected({ kind: "bad", text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setCollecting(false);
+    }
+  }
   // 0.32.0: the cards are the live positions; the per-token fees line counts the closed ones too.
   const live = positions.data?.filter((p) => !p.closed) ?? null;
   const byToken = positions.data ? feesByToken(positions.data) : [];
@@ -293,6 +315,12 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
             ))}
           </div>
         )}
+        <div className="row">
+          <button type="button" className="btn btn-outline" onClick={() => void collect()} disabled={collecting}>
+            Collect fees
+          </button>
+        </div>
+        {collected && <Notice kind={collected.kind}>{collected.text}</Notice>}
         {live === null ? (
           <p className="muted">Loading your positions…</p>
         ) : live.length === 0 ? (

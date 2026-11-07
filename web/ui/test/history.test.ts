@@ -113,6 +113,9 @@ describe("the history readers (H1–H6)", () => {
     const sp = await c.spendsAll(["aa.1", "cc.0"]);
     expect(sp).toEqual([{ outpoint: "aa.1", tokenId: T, spentBy: "bb".repeat(32) }, { outpoint: "cc.0" }]);
     expect(asked).toEqual([`/@${T}/amm/pools/at?t=1234`, `/@${T}/amm/pools/history?from=1&to=9&pool=${idOf(LP1)}&limit=2`, `/@${T}/amm/pools/history?after=${"ab".repeat(52)}`, "/amm/spends?outpoint=aa.1,cc.0"]);
+    const op = `${"cd".repeat(32)}_0`;
+    await c.poolHistory(T, { outpoint: op });
+    expect(asked.at(-1)).toBe(`/@${T}/amm/pools/history?outpoint=${op}`);
   });
 });
 

@@ -1,8 +1,8 @@
 /**
  * 0.34.0 (D9): the rows are read here; their pools' state and fees come from ONE `GET
  * /@<token>/amm/positions?lp=k1,k2` per token (src/client.ts `myPositions`), not from
- * `/spends` per row as below; the pool output's BEEF is read only when the LP acts (Close: `GET
- * /@<token>/amm/pools/beef?lp=<its key>`).
+ * `/spends` per row as below; the pool output's BEEF is read only when the LP acts (Close reads
+ * the output the wallet holds, `GET /tx?id=`).
  *
  * The connected wallet's positions (skein-amm 0.9.0, David Case 2026-10-09;
  * 0.12.0: the rows in the exchange's basket `amm-pools`, no claim): the pool
@@ -33,7 +33,7 @@ import { PoolTemplate } from "../pool/index.js";
 import { parseOutpoint, sdkTokenId, tokenIdOfWire, tokenIdText } from "../lib/tokenId.js";
 import { POOLS_BASKET } from "../wallet/color.js";
 import { POOL_TAG, isPoolRow } from "./poolRows.js";
-import { LP_KEY_PROTOCOL, lpKeyIdOfDescription, poolCustomInstructions, type BasketRow } from "./poolDeploy.js";
+import { lpKeyIdOfDescription, lpProtocolOfDescription, poolCustomInstructions, type BasketRow } from "./poolDeploy.js";
 
 /** The wallet key that is a pool's LpPubKey (a BRC-29 key to self, or a pre-BRC-29 1Sat key). */
 export interface LpKeyRef {
@@ -76,15 +76,16 @@ export async function historyPoolRows(wallet: WalletInterface): Promise<BasketRo
           const outpoint = `${a.txid}.${o.outputIndex}`;
           // 0.29.4: the LP keyID from the pool output's description (`… · amm-lp <hex>`), the pool from its script.
           const keyID = lpKeyIdOfDescription(o.outputDescription);
-          const pool = keyID && o.lockingScript ? PoolTemplate.decode(o.lockingScript) : null;
-          if (pool && keyID) {
+          const protocolID = lpProtocolOfDescription(o.outputDescription);
+          const pool = keyID && protocolID && o.lockingScript ? PoolTemplate.decode(o.lockingScript) : null;
+          if (pool && keyID && protocolID) {
             const tokenId = sdkTokenId(tokenIdOfWire(Utils.toArray(pool.args.assetId, "hex")));
             out.push({
               outpoint,
               satoshis: o.satoshis,
               lockingScript: o.lockingScript!,
               tags: [POOL_TAG],
-              customInstructions: poolCustomInstructions({ tokenId, protocolID: LP_KEY_PROTOCOL, keyID, args: pool.args, validatorIdentity: pool.state.validatorIdentity, ...(pool.state.nonce ? { nonce: pool.state.nonce } : {}) }),
+              customInstructions: poolCustomInstructions({ tokenId, protocolID, keyID, args: pool.args, validatorIdentity: pool.state.validatorIdentity, ...(pool.state.nonce ? { nonce: pool.state.nonce } : {}), poolId: outpoint.replace(".", "_") }),
             });
             continue;
           }
@@ -131,13 +132,15 @@ export function positionRowsOf(rows: BasketRow[]): PositionRow[] {
         protocolID?: WalletProtocol;
         keyID?: string;
         counterparty?: string;
+        poolId?: string;
         amm?: { validatorIdentity?: string };
       };
       if (!Array.isArray(ci.protocolID) || typeof ci.keyID !== "string" || typeof ci.id !== "string") continue;
       const tid = parseOutpoint(ci.id.replace("_", "."));
       const filed = r.lockingScript ? PoolTemplate.decode(r.lockingScript) : null;
+      const deploy = typeof ci.poolId === "string" ? parseOutpoint(ci.poolId) : null;
       out.push({
-        deployOutpoint: `${op.txid}.${op.vout}`,
+        deployOutpoint: deploy ? `${deploy.txid}.${deploy.vout}` : `${op.txid}.${op.vout}`,
         tokenId: tid ? tokenIdText(tid) : ci.id,
         ...(ci.sym ? { sym: ci.sym } : {}),
         ...(ci.dec !== undefined ? { dec: Number(ci.dec) } : {}),

@@ -27,7 +27,8 @@
  *   display: a page reads the route again on one.
  * - **Liquidity** (D9, D23; 0.40.0: by pool id): the wallet's pool rows and deploy history, then
  *   ONE `GET /@<token>/amm/positions?pool=` per token; a deploy the history has but the basket
- *   lacks is filed then; Close and Rebalance read their pool's BEEF by its id (`/pools/beef?pool=`);
+ *   lacks is filed then; Close walks history from the output the wallet holds, then reads that
+ *   output's BEEF (`GET /tx?id=`); Rebalance still reads `/pools/beef?pool=`;
  *   the deploy's terms `GET /@<token>/amm/terms`.
  * - **Your tokens** (D17, D18, D19, D24): the wallet's module and the swap basket; the token list
  *   once and ONE discovery `GET /@discovery/1color/tokens?ids=` for held tokens the list lacks; the
@@ -109,8 +110,11 @@ import { imageDataUrl } from "./lp/images.js";
 import { deployPool } from "./lp/poolDeploy.js";
 import { rebalancePool } from "./lp/rebalance.js";
 import { historyPoolRows, mergePoolRows, positionRowsOf, type PositionRow } from "./lp/positions.js";
+import { isPoolRow } from "./lp/poolRows.js";
+import { collectBasket, heldPoolRow, storedKey, syncPool, type CollectResult } from "./lp/sync.js";
 import { POOLS_BASKET, assetBasket, heldOutputs } from "./wallet/color.js";
 import { prepareClose, submitToOverlay } from "./lp/close.js";
+export type { CollectResult };
 import { ClientError, toClientError } from "./errors.js";
 
 // ---------------------------------------------------------------------------
@@ -336,7 +340,8 @@ export interface DeployResult {
 }
 
 export interface CloseRequest {
-  outpoint: string;
+  /** The pool's deploy outpoint, `<txid>_<vout>`. */
+  poolId: string;
 }
 
 export interface RebalanceRequest {
@@ -994,7 +999,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
   }
 
   /** H8 (0.40.0): the token's pool events in `from ≤ at < to`, oldest first (`pool` one pool's; forward paging: the page's `next` as `after`). */
-  async function poolHistory(tokenId: TokenId, o: { from?: number; to?: number; pool?: string; limit?: number; after?: string } = {}): Promise<PoolHistoryPage> {
+  async function poolHistory(tokenId: TokenId, o: { from?: number; to?: number; pool?: string; limit?: number; after?: string; outpoint?: string } = {}): Promise<PoolHistoryPage> {
     return readPoolHistory(tokenBase(tokenId, swapBase), o, ff);
   }
 
@@ -1458,34 +1463,89 @@ function makeClient(opts: ClientOptions, s: Shared) {
   }
 
   /**
-   * Closes a position (src/lp/close.ts): everything in the pool returns to the wallet (its own action
-   * pays the miner fee). 0.40.0: the pool's current output and its BEEF by its pool id (`GET
-   * /@<token>/amm/pools/beef?pool=<deploy outpoint>`); the page's submit at the host root (D19).
+   * Closes a position (src/lp/close.ts): the wallet catches up from the pool output it holds,
+   * then spends that output. Its BEEF is `GET /@<token>/amm/tx?id=` of the transaction the wallet
+   * lists. The page's submit at the host root (D19). The wallet pays the miner fee.
    */
   async function closePosition(req: CloseRequest): Promise<CloseResult> {
     const { wallet } = needWallet();
-    let row = loaded.get(req.outpoint);
-    if (!row) {
-      await myPositions();
-      row = loaded.get(req.outpoint);
-    }
-    if (!row) throw new Error("No such position");
-    const [meta, base] = await Promise.all([tokenMeta(), tokenBaseOf(row.tokenId)]);
-    const m = meta.get(row.tokenId);
-    const poolOutput = poolOutputOf(await readPoolsBeef(base, [row.deployOutpoint.replace(".", "_")], freshFetch), req.outpoint);
-    if (!poolOutput) throw new Error(`the pool is no longer at ${req.outpoint}: reload your positions`);
+    const rows = await basketRows(wallet, POOLS_BASKET);
+    const held = heldPoolRow(rows, req.poolId);
+    if (!held?.lockingScript) throw new Error("No such position");
+    const key = storedKey(held.customInstructions);
+    if (!key?.id) throw new Error("No such position");
+    if (!key.protocolID || !key.keyID) throw new Error("the pool output names no key");
+    const base = await tokenBaseOf(key.id);
+    const m = (await tokenMeta()).get(key.id);
+    await syncPool(wallet, req.poolId, {
+      history: (outpoint) => readPoolHistory(base, { outpoint, limit: 100 }, freshFetch),
+      readTx: (txid) => readTx(base, txid, freshFetch),
+    });
+    const again = heldPoolRow(await basketRows(wallet, POOLS_BASKET), req.poolId);
+    if (!again?.lockingScript) throw new Error("No such position");
+    const key2 = storedKey(again.customInstructions);
+    if (!key2) throw new Error("the pool output names no key");
+    const listed = /^([0-9a-fA-F]{64})[._](\d+)$/.exec(again.outpoint);
+    if (!listed) throw new Error("No such position");
+    const txid = listed[1]!;
+    const vout = Number(listed[2]);
+    const op = parseOutpoint(again.outpoint);
+    const beef = await readTx(base, op?.txid ?? txid.toLowerCase(), freshFetch);
+    if (!beef) throw new Error("the pool output's transaction is not on this exchange");
     const prepared = await prepareClose({
       wallet,
-      tokenId: row.tokenId,
-      meta: { ...(m?.sym ? { sym: m.sym } : {}), ...(m?.dec !== undefined ? { dec: m.dec } : {}) },
-      poolOutput,
-      lpKey: row.lpKey,
+      tokenId: key.id,
+      meta: m ? { sym: m.sym, dec: m.dec } : undefined,
+      poolOutput: { beef, outputIndex: vout },
+      lpKey: key2,
+      txid,
     });
     // The page's own submit (the wallet's module submitted at its overlay too; its failure does not undo the close).
     await submitToOverlay(swapBase, prepared.topic, prepared.beef, f).catch(() => undefined);
-    loaded.delete(req.outpoint);
+    const norm = (s: string) => {
+      const p = parseOutpoint(s);
+      return p ? `${p.txid}_${p.vout}` : s.toLowerCase();
+    };
+    const drop = new Set([norm(again.outpoint), norm(req.poolId)]);
+    for (const [k, v] of [...loaded]) {
+      if ([norm(k), norm(v.deployOutpoint)].some((x) => drop.has(x))) loaded.delete(k);
+    }
     emit();
     return { txid: prepared.txid, sats: prepared.sats, tokens: prepared.tokenAmount };
+  }
+
+  /**
+   * Collects the LP fees: the same catch-up over every pool the wallet holds, then one action
+   * spending the `openex fees` basket. Satoshis go to one BRC-29 address; each token's sum goes
+   * to one `p color` output. The pools stay open.
+   */
+  async function collectFees(): Promise<CollectResult> {
+    const { wallet } = needWallet();
+    const rows = await basketRows(wallet, POOLS_BASKET);
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (!isPoolRow(row)) continue;
+      let ci: { id?: string; poolId?: string } = {};
+      try {
+        ci = JSON.parse(row.customInstructions ?? "{}") as { id?: string; poolId?: string };
+      } catch {
+        continue;
+      }
+      if (typeof ci.id !== "string") continue;
+      const named = typeof ci.poolId === "string" ? ci.poolId : row.outpoint.replace(".", "_");
+      const parsed = parseOutpoint(named);
+      const id = parsed ? `${parsed.txid}_${parsed.vout}` : named.toLowerCase();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const base = await tokenBaseOf(ci.id);
+      await syncPool(wallet, id, {
+        history: (outpoint) => readPoolHistory(base, { outpoint, limit: 100 }, freshFetch),
+        readTx: (txid) => readTx(base, txid, freshFetch),
+      });
+    }
+    const r = await collectBasket(wallet);
+    if (r.txid) emit();
+    return r;
   }
 
   /**
@@ -1995,6 +2055,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     validatorTerms: guard(validatorTerms),
     deployPosition: guard(deployPosition),
     closePosition: guard(closePosition),
+    collectFees: guard(collectFees),
     rebalancePosition: guard(rebalancePosition),
     // your tokens
     myTokens: guard(myTokens),

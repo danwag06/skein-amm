@@ -37,7 +37,7 @@ import { poolUtxoFrom, spendValid } from "../market/swapAction.js";
 import type { LookupOutput } from "../lib/overlay.js";
 import type { AuthFetchLike } from "../market/relay.js";
 import type { LpKeyRef } from "./positions.js";
-import { identityKeyOf, isBrc29Protocol } from "../wallet/brc29.js";
+import { identityKeyOf } from "../wallet/brc29.js";
 import { sdkTokenId } from "../lib/tokenId.js";
 import { POOLS_BASKET, newReceivingKey, transferPlanLabels, type HeldOutput } from "../wallet/color.js";
 import { inputIndexOf, runAppSignedAction } from "../wallet/action.js";
@@ -117,7 +117,7 @@ export async function rebalancePool(i: RebalanceInput): Promise<RebalancedPool> 
   const poolUtxo = poolUtxoFrom(i.poolOutput);
   const old = PoolTemplate.decode(poolUtxo.script);
   if (!old) throw new RebalanceShapeError("the output is not a pool");
-  if (!isBrc29Protocol(i.lpKey.protocolID) || i.lpKey.counterparty !== "self") throw new RebalanceShapeError(`the LP key ${i.lpKey.keyID} is not a BRC-29 key to self`);
+  if (i.lpKey.counterparty !== "self") throw new RebalanceShapeError(`the wallet key ${i.lpKey.keyID} is not a key to self`);
   const lpArgs = { protocolID: i.lpKey.protocolID, keyID: i.lpKey.keyID, counterparty: i.lpKey.counterparty };
   const { publicKey: lpPub } = await wallet.getPublicKey({ ...lpArgs, forSelf: true });
   if (PublicKey.fromString(lpPub).toString() !== old.state.lpPubKey) throw new RebalanceShapeError(`the wallet key ${i.lpKey.keyID} is not this pool's LP key`);
@@ -192,7 +192,7 @@ export async function rebalancePool(i: RebalanceInput): Promise<RebalancedPool> 
       outputIndex: 0,
       basket: POOLS_BASKET,
       tags: [POOL_TAG],
-      customInstructions: poolCustomInstructions({ tokenId: sdkId, ...meta, protocolID: lpKey.protocolID, keyID: lpKey.keyID, args: plan.args, validatorIdentity: plan.state.validatorIdentity, nonce: affirmation.nonce }),
+      customInstructions: poolCustomInstructions({ tokenId: sdkId, ...meta, protocolID: lpKey.protocolID, keyID: lpKey.keyID, args: plan.args, validatorIdentity: plan.state.validatorIdentity, nonce: affirmation.nonce, poolId: `${signed.txid}_0` }),
     },
     filed: false,
     submitted: "not submitted",
