@@ -7,8 +7,8 @@
  *      `GET <origin>/amm/spends?outpoint=a,b` (each enabled token's `/spends`, the first naming a
  *      spender);
  *   2. a spender: its transaction, `GET /@<token>/amm/tx?id=` (the BEEF as admitted, every input's
- *      source with it); the payout key tried with the spent row's `order` (when it has one) and with
- *      the transaction's own key input (`legDerivation`; its first token input on a sell, its first
+ *      source with it); the payout key tried with the spent row's `order` (when it has one), with the
+ *      spent row's own outpoint (0.44.4: a first leg's key input), and with the transaction's own key input (`legDerivation`; its first token input on a sell, its first
  *      sats input on a buy);
  *   3. a match → the leg's take-in (`legTakeInOf`: the payout, the taker's own commission, the
  *      change — kept in `amm-swap` with the order, or the last leg's to the wallet), ONE
@@ -153,7 +153,10 @@ export async function resolveFromOverlay(wallet: WalletInterface, reads: { spend
         const tx = Transaction.fromAtomicBEEF(beef);
         const op = parseOutpoint(s.outpoint);
         const row = op ? byOutpoint.get(`${op.txid}.${op.vout}`) : undefined;
-        const orders = [...new Set([row ? orderOf(row) : undefined, ownKeyInputOf(tx) ?? undefined].filter((x): x is string => typeof x === "string"))];
+        // The spent row's own outpoint is a candidate too (0.44.4): a row written by `stage` carries no `order`, and a
+        // mined swap served without its inputs' sources names no key input; on a first leg the staged row IS the key input.
+        const own = op ? `${op.txid}.${op.vout}` : undefined;
+        const orders = [...new Set([row ? orderOf(row) : undefined, own, ownKeyInputOf(tx) ?? undefined].filter((x): x is string => typeof x === "string"))];
         let matched = false;
         for (const order of orders) {
           const outputs = await legTakeInOf(wallet, tx, s.tokenId, order);

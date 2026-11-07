@@ -4,6 +4,15 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.44.4 (2026-11-07)
+
+- The pages' overlay pass (`resolveFromOverlay`) also tries the spent `amm-swap` row's own outpoint as the order key,
+  after the row's `order` and before the transaction's own key input. A row written by `stage` carries no `order`, and a
+  mined swap served as subject + BUMP has no input sources, so `ownKeyInputOf` named nothing and a swap's FIRST leg was
+  reported stuck ("the spending transaction names no order key"); on a first leg the staged row IS the key input
+  (`legDerivation`). A wrong candidate costs nothing (`legTakeInOf` answers null). Nothing else in the pass changed.
+  bin/amm-p2p.wasm and amm-validator.wasm unchanged. `@dcasegr/amm-engine` 0.44.4 (unchanged in behaviour).
+
 ## 0.44.3 (2026-11-07)
 
 - amm-p2p `/tx?id=<txid>`: 0.44.2's route change REVERTED. The route serves what 0.44.1 served (`beefFor`: a mined

@@ -10,7 +10,7 @@
  */
 import { colorReceiptInstructions } from "@1sat/actions";
 import { colorProtocolID } from "@bsv/color-permission-module";
-import { BigNumber, ECDSA, Beef, Hash, LockingScript, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
+import { BigNumber, ECDSA, Beef, Hash, LockingScript, MerklePath, P2PKH, PrivateKey, PublicKey, Transaction, UnlockingScript, Utils, type CreateActionArgs, type WalletInterface } from "@bsv/sdk";
 import { computeSwap, type Leg, type PoolState } from "@dcasegr/amm-engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BRC29, brc29Side, isBrc29 } from "./brc29Wallet";
@@ -862,6 +862,48 @@ describe("resolve from the overlay (0.40.0): every amm-swap row's spender (ONE /
       { outputIndex: 1, protocol: "basket insertion", insertionRemittance: { basket: `p color ${TOKEN_ID.slice(0, 64)}v0`, customInstructions: colorReceiptInstructions(prepared.payout.receipt) } },
       { outputIndex: 5, protocol: "basket insertion", insertionRemittance: { basket: "amm-swap", customInstructions: prepared.satsChange.customInstructions } },
     ]);
+  });
+
+  /** A swap as the host serves a MINED one: the subject and its BUMP, no input sources. */
+  const minedOf = (tx: Transaction): Transaction => {
+    const bare = Transaction.fromBinary(tx.toBinary());
+    bare.merklePath = new MerklePath(1, [[{ offset: 0, hash: bare.id("hex"), txid: true }]]);
+    return bare;
+  };
+  const minedReads = (mined: Transaction) => ({
+    spendsAll: async (ops: string[]) => ops.map((outpoint) => ({ outpoint, tokenId: TOKEN_ID, spentBy: mined.id("hex") })),
+    tx: async (_t: string, txid: string) => (txid === mined.id("hex") ? mined.toAtomicBEEF(false) : null),
+  });
+
+  it("0.44.4: a first leg (sats in), MINED (subject + BUMP, no sources), whose staged row has no `order`: the row's own outpoint is the order key — taken in", async () => {
+    const w = fakeWallet();
+    const { prepared, vkey } = await satsIn(w, v.commissionPkh);
+    const mined = minedOf(await validatorSigns(prepared, prepared.swap.toBinary(), vkey));
+    expect(ownKeyInputOf(Transaction.fromAtomicBEEF(mined.toAtomicBEEF(false)))).toBeNull();
+    const rows = rowsOf(prepared);
+    expect(JSON.parse(rows[0]!.customInstructions).order).toBeUndefined();
+    const r = await resolveFromOverlay(withRows(w, rows), minedReads(mined));
+    expect(r.stuck).toEqual([]);
+    expect(r.taken.map((t) => t.txid)).toEqual([mined.id("hex")]);
+    if (prepared.payout.kind !== "color") throw new Error("expected a receipt");
+    const ia = w.calls.find((c) => c.method === "internalizeAction")!.args as { outputs: Array<{ outputIndex: number }> };
+    expect(ia.outputs[0]).toEqual({ outputIndex: 1, protocol: "basket insertion", insertionRemittance: { basket: `p color ${TOKEN_ID.slice(0, 64)}v0`, customInstructions: colorReceiptInstructions(prepared.payout.receipt) } });
+  });
+
+  it("0.44.4: a later leg, MINED, still taken in by the row's `order`; a mined swap paying another wallet is still not taken in", async () => {
+    const order = `${"0d".repeat(32)}.2`;
+    const w = fakeWallet({ fundingVout: 2 });
+    const { prepared, vkey } = await tokensIn(w, v.commissionPkh, { order, last: true, extra: 2_000 });
+    const mined = minedOf(await validatorSigns(prepared, prepared.swap.toBinary(), vkey));
+    const rows = rowsOf(prepared).map((r, n) => (n === 0 ? { ...r, customInstructions: JSON.stringify({ ...JSON.parse(r.customInstructions), order }) } : r));
+    expect((await resolveFromOverlay(withRows(w, rows), minedReads(mined))).taken.map((t) => t.txid)).toEqual([mined.id("hex")]);
+    const stranger = brc29Side(key(79));
+    const other = fakeWallet({ fundingVout: 2 });
+    const strangerWallet = { ...withRows(other, rows), getPublicKey: async (a: { identityKey?: boolean }) => ({ publicKey: a.identityKey ? stranger.identityKey : stranger.publicKey(a as never) }) } as unknown as WalletInterface;
+    const s = await resolveFromOverlay(strangerWallet, minedReads(mined));
+    expect(s.taken).toEqual([]);
+    expect(s.stuck.map((x) => x.error)).toEqual(["no output of the spending transaction pays this wallet's keys"]);
+    expect(other.calls.some((c) => c.method === "internalizeAction")).toBe(false);
   });
 
   it("a second leg (tokens in) landed: the payout tried with the row's `order` — the order's key, not the leg's own input", async () => {
