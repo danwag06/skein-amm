@@ -31,6 +31,7 @@ const decodeOneColorAmount = (b: number[]) => decodeOneColor(b)?.amount;
 import { type SignedFetch } from "../src/lib/overlay";
 import {
   POOL_TAG,
+  LP_KEY_PROTOCOL,
   lpKeyDescription,
   lpKeyIdOfDescription,
   assetIdHex,
@@ -476,7 +477,7 @@ describe("close (0.13.0; 0.29.3 one path, a module plan): the tokens to a module
 
   it("signs a pool locked to an openex fees key, and a parents-first BEEF of the output the wallet holds", async () => {
     const feesId = Utils.toBase64(Array.from({ length: 16 }, (_, n) => n + 1));
-    const feesRef = { protocolID: [1, "openex fees"] as const, keyID: feesId, counterparty: "self" };
+    const feesRef = { protocolID: LP_KEY_PROTOCOL, keyID: feesId, counterparty: "self" };
     const feesPub = side.publicKey({ ...feesRef, forSelf: true });
     const feesTx = new Transaction();
     feesTx.addInput({ sourceTXID: "46".repeat(32), sourceOutputIndex: 0, unlockingScript: new UnlockingScript(), sequence: 0xffffffff });

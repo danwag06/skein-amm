@@ -4,6 +4,10 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.46.1 (2026-11-07)
+
+- The page build typechecks. `syncPool` names the cursor it compares, and the openex fees close test uses `LP_KEY_PROTOCOL`. The programs are 0.46.0's. `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.46.1.
+
 ## 0.46.0 (2026-11-07)
 
 - The LP wallet catches up from the pool output it holds, one internalize per hop. The cursor is that

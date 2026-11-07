@@ -205,7 +205,7 @@ export async function syncPool(wallet: WalletInterface, poolId: string, io: Sync
   for (;;) {
     const page = await io.history(cursor);
     if (page.events.length === 0) break;
-    const start = cursor;
+    const start: string = cursor;
     for (const event of page.events) {
       const next = await apply(event);
       if (next === "stop") return;
