@@ -1,4 +1,4 @@
-/* Open Exchange. Light first, dark under prefers-color-scheme with the same tokens.
+/* Open Exchange. Light by default; dark only when the header switch sets <html data-theme="dark">.
    Two faces: Instrument Sans for the interface, IBM Plex Mono for numbers, ids and
    addresses. Both self-hosted (SIL OFL 1.1, fonts/OFL-*.txt), latin subset. */
 @font-face{font-family:"Instrument Sans";font-style:normal;font-weight:400;font-display:swap;src:url(./fonts/instrument-sans-latin-400-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
@@ -8,7 +8,7 @@
 
 /* ---- tokens */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
   /* palette, light */
   --bg: #F6F5F1;          /* page */
@@ -50,30 +50,29 @@
   --ok: var(--up); --bad: var(--down);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #131210;
-    --surface: #1B1A17;
-    --elevated: #23211E;
-    --sunken: #161513;
-    --border: #2F2D29;
-    --border-strong: #46433D;
-    --text: #EEECE6;
-    --text-2: #C9C6BD;
-    --muted: #9E9A90;     /* 6.1:1 on surface */
-    --accent: #D9693A;
-    --accent-hover: #E57B4D;
-    --accent-active: #C75B2E;
-    --on-accent: #1B1A17; /* 5.6:1 on the accent */
-    --ring: rgba(217, 105, 58, 0.45);
-    --up: #4CC38A;
-    --down: #F2806F;
-    --warn: #E2B04A;
-    --up-soft: rgba(76, 195, 138, 0.12); --down-soft: rgba(242, 128, 111, 0.12); --warn-soft: rgba(226, 176, 74, 0.12); --neutral-soft: rgba(238, 236, 230, 0.07);
-    --shadow-sm: none;
-    --shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
-    --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131210;
+  --surface: #1B1A17;
+  --elevated: #23211E;
+  --sunken: #161513;
+  --border: #2F2D29;
+  --border-strong: #46433D;
+  --text: #EEECE6;
+  --text-2: #C9C6BD;
+  --muted: #9E9A90;     /* 6.1:1 on surface */
+  --accent: #D9693A;
+  --accent-hover: #E57B4D;
+  --accent-active: #C75B2E;
+  --on-accent: #1B1A17; /* 5.6:1 on the accent */
+  --ring: rgba(217, 105, 58, 0.45);
+  --up: #4CC38A;
+  --down: #F2806F;
+  --warn: #E2B04A;
+  --up-soft: rgba(76, 195, 138, 0.12); --down-soft: rgba(242, 128, 111, 0.12); --warn-soft: rgba(226, 176, 74, 0.12); --neutral-soft: rgba(238, 236, 230, 0.07);
+  --shadow-sm: none;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
 /* ---- base */
@@ -246,6 +245,13 @@ button.id-text code { border-bottom: 1px dotted var(--border-strong); }
 .wallet-pop { position: absolute; right: 0; top: calc(100% + var(--s2)); z-index: 30; width: min(320px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: var(--s3);
   background: var(--elevated); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s4); box-shadow: var(--shadow-pop); }
 .wallet-pop .id { font-size: var(--t-xs); }
+
+.theme-toggle { margin-left: auto; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); cursor: pointer; }
+.theme-toggle:hover { color: var(--text); background: var(--sunken); }
+.theme-toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); border-radius: 50%; }
+.theme-toggle svg { width: 18px; height: 18px; }
+.theme-toggle + .wallet { margin-left: 0; }
 
 /* ---- footer: a quiet frame */
 .foot { border-top: 1px solid var(--border); margin-top: auto; }

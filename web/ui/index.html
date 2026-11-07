@@ -4,9 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Open Exchange</title>
-    <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#1B1A17" media="(prefers-color-scheme: dark)" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#FFFFFF" />
+    <meta name="color-scheme" content="light" />
+    <script>
+      // The theme before first paint: light unless the header switch stored "dark" (key "ox-theme").
+      (function () {
+        var t = "light";
+        try { if (localStorage.getItem("ox-theme") === "dark") t = "dark"; } catch (e) {}
+        document.documentElement.setAttribute("data-theme", t);
+        if (t === "dark") {
+          document.querySelector('meta[name="theme-color"]').setAttribute("content", "#1B1A17");
+          document.querySelector('meta[name="color-scheme"]').setAttribute("content", "dark");
+        }
+      })();
+    </script>
     <link rel="manifest" href="./manifest.json" />
     <link rel="icon" href="data:," />
   </head>

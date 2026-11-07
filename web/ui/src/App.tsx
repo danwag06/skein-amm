@@ -13,7 +13,7 @@ import { AppWalletProvider } from "./wallet/AppWalletProvider";
 import { Id } from "./components/Id";
 import { SITE_HREF, useClaimStatus, useHostedTokens, useIsRoot, useSession, type Session } from "./data/exchange";
 import { routeHref, useRoute, type Page, type Route } from "./ox/route";
-import { LiveDot } from "./ox/bits";
+import { LiveDot, ThemeToggle } from "./ox/bits";
 import { Landing } from "./ox/Landing";
 import { SwapPage } from "./ox/Swap";
 import { Liquidity } from "./ox/Liquidity";
@@ -130,6 +130,7 @@ function Shell() {
             Open Exchange
           </a>
           {connected && <Nav route={route} connected={connected} root={root} />}
+          <ThemeToggle />
           <div className="wallet">
             <Wallet session={session} />
           </div>

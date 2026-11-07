@@ -1,5 +1,5 @@
 /** Small shared pieces of the Open Exchange pages. */
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Id } from "../components/Id";
 import { type Session, type TokenId } from "../data/exchange";
 
@@ -59,5 +59,53 @@ export function LiveDot({ live, label }: { live: boolean; label?: string }) {
       <span className={`dot ${live ? "dot-on" : "dot-off"}`} aria-hidden="true" />
       {label ?? (live ? "live" : "offline")}
     </span>
+  );
+}
+
+type Theme = "light" | "dark";
+/** localStorage key for the header's theme switch; index.html reads it before first paint. */
+export const THEME_KEY = "ox-theme";
+
+function currentTheme(): Theme {
+  try {
+    return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+}
+
+/** The header's light/dark switch: sets `data-theme` on <html> and remembers the choice. Light by default. */
+export function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(currentTheme);
+  const next: Theme = theme === "dark" ? "light" : "dark";
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      aria-label={`Switch to ${next} theme`}
+      title={`Switch to ${next} theme`}
+      onClick={() => {
+        document.documentElement.setAttribute("data-theme", next);
+        document.querySelector('meta[name="theme-color"]')?.setAttribute("content", next === "dark" ? "#1B1A17" : "#FFFFFF");
+        document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", next);
+        try {
+          localStorage.setItem(THEME_KEY, next);
+        } catch {
+          /* storage blocked: the choice lasts for this page only */
+        }
+        setTheme(next);
+      }}
+    >
+      {theme === "dark" ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+        </svg>
+      )}
+    </button>
   );
 }
