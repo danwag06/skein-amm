@@ -4,6 +4,18 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.44.3 (2026-11-07)
+
+- amm-p2p `/tx?id=<txid>`: 0.44.2's route change REVERTED. The route serves what 0.44.1 served (`beefFor`: a mined
+  transaction with its BUMP, an unmined one with its ancestry). bin/amm-p2p.wasm and amm-validator.wasm are byte-identical
+  to 0.44.1.
+- Kept from 0.44.2: the pages' overlay pass reports the rows it could not take in (`resolveFromOverlay` → `{taken, stuck}`,
+  the `stuck` progress, `SwapResult.stuck`, listed on the Swap page).
+- `@dcasegr/amm-client` on `@1sat/actions` 0.1.5 (exact), which brings the color module 0.2.2
+  (`@bsv/color-permission-module` = `npm:@bopen-io/color-permission-module@0.2.2`); the client's peer stays `^0.1.0`.
+  The pages' tree pins the same alias (dependency + override) so one copy, 0.2.2, resolves. `@1sat/connect` /
+  `@1sat/react` stay 0.1.2. `@dcasegr/amm-engine` 0.44.3 (unchanged in behaviour).
+
 ## 0.44.2 (2026-11-07)
 
 - amm-p2p `/tx?id=<txid>` serves the transaction as an Atomic BEEF with EVERY input's source transaction in it, mined or

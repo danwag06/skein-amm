@@ -14,13 +14,13 @@
     "serve": "bash serve.sh"
   },
   "dependencies": {
-    "@1sat/actions": "0.1.3",
+    "@1sat/actions": "0.1.5",
     "@1sat/connect": "0.1.2",
     "@1sat/react": "0.1.2",
     "@1sat/templates": "0.1.1",
     "@1sat/types": "0.1.1",
     "@dcasegr/amm-engine": "file:../engine",
-    "@bsv/color-permission-module": "^0.1.0",
+    "@bsv/color-permission-module": "npm:@bopen-io/color-permission-module@0.2.2",
     "@bsv/sdk": "^4.0.0",
     "@bsv/templates": "^2.1.0",
     "@ipld/dag-cbor": "^10.0.2",
@@ -41,7 +41,7 @@
   "overrides": {
     "@bsv/sdk": "^4.0.0",
     "@bsv/templates": "^2.1.0",
-    "@bsv/color-permission-module": "^0.1.0",
+    "@bsv/color-permission-module": "npm:@bopen-io/color-permission-module@0.2.2",
     "@bsv/wallet-toolbox-client": "^2.15.0"
   }
 }

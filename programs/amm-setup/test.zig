@@ -198,7 +198,7 @@ test "the manifest (0.22.0): the program amm-setup, the event route deploy (kern
     var parsed = try std.json.parseFromSlice(std.json.Value, a, manifest, .{});
     defer parsed.deinit();
     const m = parsed.value.object;
-    try testing.expectEqualStrings("0.44.2", m.get("version").?.string);
+    try testing.expectEqualStrings("0.44.3", m.get("version").?.string);
     try testing.expectEqualStrings("bin/amm-setup.wasm", m.get("programs").?.object.get("amm-setup").?.string);
     try testing.expectEqualStrings("amm-setup.token", m.get("filters").?.object.get("token").?.string);
     try testing.expectEqual(@as(usize, 0), m.get("config").?.object.get("overlay").?.object.count());

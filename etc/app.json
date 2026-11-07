@@ -1,7 +1,7 @@
 {
   "kind": "app",
   "name": "amm",
-  "version": "0.44.2",
+  "version": "0.44.3",
   "programs": {
     "overlay": "bin/overlay.wasm",
     "color-topic": "bin/color-topic.wasm",
