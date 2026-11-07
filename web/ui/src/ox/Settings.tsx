@@ -54,6 +54,10 @@ import {
   type TermsInput,
 } from "../data/exchange";
 import { NeedWallet, Notice, TokenName } from "./bits";
+import { fmtSats } from "./format";
+
+/** Whole sats with thousands separators, for display. */
+const groupSats = (n: number): string => (Number.isSafeInteger(n) ? fmtSats(BigInt(n)) : String(n));
 
 /** The claim card's sentence (0.26.0). */
 export const CLAIM_TEXT = "Nobody has claimed this exchange yet. The wallet that claims it becomes its admin: it enables tokens and sets terms.";
@@ -419,8 +423,8 @@ export function priceSats(text: string): number | null | undefined {
 }
 
 /** What the price record says (0.42.0). */
-export function enablePriceText(sats: number | undefined): string {
-  return sats ? `Anyone with a wallet can enable a token for ${sats} sats. Only you can disable it.` : "Off: only you enable tokens.";
+export function enablePriceText(sats: number | undefined, fmt: (n: number) => string = String): string {
+  return sats ? `Anyone with a wallet can enable a token for ${fmt(sats)} sats. Only you can disable it.` : "Off: only you enable tokens.";
 }
 
 /** The price to enable a token (0.42.0, root only): one field; empty turns it off. */
@@ -450,7 +454,7 @@ function EnablePriceCard({ defaults }: { defaults: Data<Defaults> }) {
       {defaults.data === null ? (
         <p className={defaults.error ? "bad" : "muted loading"}>{defaults.error ? `Could not read the defaults: ${defaults.error}` : "Reading the defaults…"}</p>
       ) : (
-        <p className="fg2">{enablePriceText(defaults.data.enablePriceSats)}</p>
+        <p className="fg2">{enablePriceText(defaults.data.enablePriceSats, groupSats)}</p>
       )}
       <div className="row row-wrap">
         <div className="field">
@@ -471,8 +475,8 @@ function EnablePriceCard({ defaults }: { defaults: Data<Defaults> }) {
 }
 
 /** The exchange's wallet line (0.42.0). */
-export function exchangeWalletText(w: ExchangeWallet): string {
-  return `Exchange wallet: ${w.sats} sats`;
+export function exchangeWalletText(w: ExchangeWallet, fmt: (n: number) => string = String): string {
+  return `Exchange wallet: ${fmt(w.sats)} sats`;
 }
 
 /** What the Withdraw button says once sent (0.42.0). */
@@ -495,7 +499,7 @@ function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
       {wallet.data === null ? (
         <p className={wallet.error ? "bad" : "muted loading"}>{wallet.error ? `Could not read the exchange's wallet: ${wallet.error}` : "Reading the exchange's wallet…"}</p>
       ) : (
-        <p className="fg2">{exchangeWalletText(wallet.data)}</p>
+        <p className="fg2">{exchangeWalletText(wallet.data, groupSats)}</p>
       )}
       <div className="row row-wrap">
         <button
@@ -698,7 +702,7 @@ function EnabledRow({ t }: { t: RegisteredToken }) {
           confirm ? (
             <span className="row row-wrap end">
               <span className="small fg2">Stop {t.sym}&apos;s instance?</span>
-              <button type="button" className="btn btn-primary" disabled={busy} onClick={() => run(() => disableToken(t.tokenId))}>
+              <button type="button" className="btn btn-danger" disabled={busy} onClick={() => run(() => disableToken(t.tokenId))}>
                 {busy ? "Disabling…" : "Disable"}
               </button>
               <button type="button" className="btn btn-outline" disabled={busy} onClick={() => setConfirm(false)}>

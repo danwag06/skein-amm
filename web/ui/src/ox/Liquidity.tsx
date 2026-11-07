@@ -217,18 +217,13 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
         </div>
         <div className="field">
           <label htmlFor="dep-sats">Sats</label>
-          <div className="affix">
-            <input id="dep-sats" inputMode="numeric" value={satsText} onChange={(e) => typed("sats", e.target.value)} aria-invalid={satsBad || undefined} />
-            <span className="affix-unit" aria-hidden="true">
-              sats
-            </span>
-          </div>
+          <input id="dep-sats" inputMode="numeric" value={satsText} onChange={(e) => typed("sats", e.target.value)} aria-invalid={satsBad || undefined} />
         </div>
       </div>
       <p className="fg2 small price-line">
         Opening price <span className="num">{opening === null ? "—" : `${fmtPrice(opening)} sats per ${token?.sym ?? "token"}`}</span>
         {" · market price now "}
-        <span className="num">{market === null ? "no pools yet" : fmtPrice(market)}</span>
+        <span className="num">{market === null ? "no pools yet" : `${fmtPrice(market)} sats per ${token?.sym ?? "token"}`}</span>
         {off !== null && Math.abs(off) >= 0.01 && (
           <span className="warn"> · {Math.abs(off * 100).toFixed(1)}% {off > 0 ? "above" : "below"} the market</span>
         )}
@@ -322,7 +317,7 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
           <div className="fees-summary" aria-label="Fees earned per token">
             {byToken.map((t) => (
               <p key={t.tokenId} className="fg2 small num">
-                {t.sym}: {t.positions} positions · fees earned {fmtSats(t.sats)} sats · {fmtAmount(t.tokens, t.dec)} {t.sym}
+                {t.sym}: {t.positions} position{t.positions === 1 ? "" : "s"} · fees earned {fmtSats(t.sats)} sats · {fmtAmount(t.tokens, t.dec)} {t.sym}
               </p>
             ))}
           </div>

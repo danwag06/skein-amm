@@ -147,6 +147,11 @@ code { font-family: var(--mono); }
 .btn-outline { background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); box-shadow: var(--shadow-sm); }
 .btn-outline:hover:not(:disabled) { background: var(--sunken); border-color: var(--text-2); color: var(--text); }
 .btn-outline:active:not(:disabled) { background: var(--border); }
+.btn-danger { background: var(--surface); border: 1px solid var(--down); color: var(--down); }
+.btn-danger:hover:not(:disabled) { background: var(--down-soft); }
+.btn-danger:active:not(:disabled) { background: var(--down-soft); border-color: var(--text); }
+/* while a token's Disable confirm is open, its Edit steps aside */
+.reg-row > .row:has(> .row .btn-danger) > button[aria-label^="Edit "] { display: none; }
 .btn-lg { font-size: var(--t-lg); min-height: 48px; width: 100%; }
 .btn-link { background: none; border: 0; padding: 0 2px; margin-left: var(--s1); color: var(--text-2); font: inherit; font-family: var(--body); font-size: var(--t-xs);
   font-weight: 500; text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; cursor: pointer; position: relative; border-radius: 3px; }
