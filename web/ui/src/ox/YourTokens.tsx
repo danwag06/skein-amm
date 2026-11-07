@@ -16,8 +16,8 @@ import { fmtAmount, fmtSats, parseInput } from "./format";
 import { NeedWallet, Notice, TokenName } from "./bits";
 
 function Status({ t }: { t: WalletToken }) {
-  if (t.onExchange) return <span className="ok small">On this exchange</span>;
-  return <span className="muted small">Not on this exchange</span>;
+  if (t.onExchange) return <span className="ok small pill pill-enabled">On this exchange</span>;
+  return <span className="muted small pill pill-disabled">Not on this exchange</span>;
 }
 
 function SwapBasket({ t, onStart }: { t: WalletToken; onStart?: () => void }) {
@@ -145,7 +145,12 @@ export function SendFormView({ t, s, set, onSubmit, onCancel }: { t: WalletToken
         </div>
         <div className="field">
           <label htmlFor={id("amount")}>Amount</label>
-          <input id={id("amount")} inputMode="decimal" value={s.amount} disabled={s.busy} onChange={(e) => set({ amount: e.target.value })} />
+          <div className="affix">
+            <input id={id("amount")} inputMode="decimal" value={s.amount} disabled={s.busy} onChange={(e) => set({ amount: e.target.value })} />
+            <span className="affix-unit" aria-hidden="true">
+              {t.sym}
+            </span>
+          </div>
         </div>
         <div className="field">
           <label htmlFor={id("memo")}>Memo</label>
@@ -235,7 +240,7 @@ function StagedSats({ sats }: { sats: number }) {
   const [error, setError] = useState<string | null>(null);
   if (sats === 0) return null;
   return (
-    <p className="muted small">
+    <p className="muted small basket-line">
       {fmtSats(BigInt(sats))} sats in the swap basket{" "}
       <button
         type="button"
@@ -292,7 +297,7 @@ export function YourTokens({ session }: { session: Session }) {
               <span />
             </div>
             {mine.data === null ? (
-              <p className="empty">Loading your tokens…</p>
+              <p className="empty loading">Loading your tokens…</p>
             ) : mine.data.length === 0 ? (
               <p className="empty">Your wallet holds no 1Color tokens.</p>
             ) : (

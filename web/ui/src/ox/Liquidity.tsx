@@ -94,7 +94,7 @@ function PositionCard({ p, onClosed }: { p: Position; onClosed: (msg: string, tx
         {p.rescinded && (
           <>
             <dt>Status</dt>
-            <dd className="fg2">Rescinded by its validator: no swaps. Close it to take everything back.</dd>
+            <dd className="fg2 pos-status">Rescinded by its validator: no swaps. Close it to take everything back.</dd>
           </>
         )}
       </dl>
@@ -203,14 +203,26 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
       <div className="two">
         <div className="field">
           <label htmlFor="dep-tokens">Tokens</label>
-          <input id="dep-tokens" inputMode="decimal" value={tokensText} onChange={(e) => typed("tokens", e.target.value)} aria-invalid={tokensBad || undefined} aria-describedby="dep-tokens-help" />
+          <div className="affix">
+            <input id="dep-tokens" inputMode="decimal" value={tokensText} onChange={(e) => typed("tokens", e.target.value)} aria-invalid={tokensBad || undefined} aria-describedby="dep-tokens-help" />
+            {token && (
+              <span className="affix-unit" aria-hidden="true">
+                {token.sym}
+              </span>
+            )}
+          </div>
           <span id="dep-tokens-help" className={`help ${tokensBad ? "bad" : ""}`}>
             {token ? `Wallet: ${fmtAmount(token.balance, token.dec)} ${token.sym}` : " "}
           </span>
         </div>
         <div className="field">
           <label htmlFor="dep-sats">Sats</label>
-          <input id="dep-sats" inputMode="numeric" value={satsText} onChange={(e) => typed("sats", e.target.value)} aria-invalid={satsBad || undefined} />
+          <div className="affix">
+            <input id="dep-sats" inputMode="numeric" value={satsText} onChange={(e) => typed("sats", e.target.value)} aria-invalid={satsBad || undefined} />
+            <span className="affix-unit" aria-hidden="true">
+              sats
+            </span>
+          </div>
         </div>
       </div>
       <p className="fg2 small price-line">
@@ -237,7 +249,7 @@ function DeployForm({ hosted }: { hosted: HostedToken[] | null }) {
             </span>
           </>
         ) : (
-          <span className="muted">Reading the validator…</span>
+          <span className="muted loading">Reading the validator…</span>
         )}
       </div>
       {error && <Notice kind="bad">The deploy failed: {error}</Notice>}
@@ -307,7 +319,7 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
         )}
         {positions.error && <Notice kind="bad">Could not read your positions: {positions.error}</Notice>}
         {byToken.length > 0 && (
-          <div aria-label="Fees earned per token">
+          <div className="fees-summary" aria-label="Fees earned per token">
             {byToken.map((t) => (
               <p key={t.tokenId} className="fg2 small num">
                 {t.sym}: {t.positions} positions · fees earned {fmtSats(t.sats)} sats · {fmtAmount(t.tokens, t.dec)} {t.sym}
@@ -322,9 +334,9 @@ export function Liquidity({ session, hosted }: { session: Session; hosted: Hoste
         </div>
         {collected && <Notice kind={collected.kind}>{collected.text}</Notice>}
         {live === null ? (
-          <p className="muted">Loading your positions…</p>
+          <p className="muted loading">Loading your positions…</p>
         ) : live.length === 0 ? (
-          <p className="muted">You have no positions on this exchange.</p>
+          <p className="muted empty-card">You have no positions on this exchange.</p>
         ) : (
           <div className="cards">
             {live.map((p) => (

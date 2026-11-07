@@ -75,7 +75,7 @@ function PickToken({ tokens }: { tokens: HostedToken[] | null }) {
       <section className="panel">
         <h2 className="h2">Pick a token</h2>
         {open === null ? (
-          <p className="muted">Loading the tokens…</p>
+          <p className="muted loading">Loading the tokens…</p>
         ) : open.length === 0 ? (
           <p className="muted">No token on this exchange has an open pool.</p>
         ) : (

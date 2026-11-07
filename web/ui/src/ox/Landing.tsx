@@ -92,7 +92,7 @@ export function Landing({ session, tokens, error }: { session: Session; tokens: 
           <span />
         </div>
         {shown === null ? (
-          <p className="empty">Loading the tokens…</p>
+          <p className="empty loading">Loading the tokens…</p>
         ) : shown.length === 0 ? (
           <>
             <p className="empty">{tokens && tokens.length > 0 ? `No token matches “${q.trim()}”.` : "This exchange hosts no tokens yet."}</p>

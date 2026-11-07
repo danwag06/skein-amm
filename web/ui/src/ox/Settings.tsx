@@ -181,7 +181,7 @@ function EnableCard({ discovery }: { discovery: Data<Discovery> }) {
         Enable a token
       </h2>
       {list.data === null ? (
-        <p className="muted">{list.error ? `Could not read the tokens to enable: ${list.error}` : "Loading…"}</p>
+        <p className={list.error ? "bad" : "muted loading"}>{list.error ? `Could not read the tokens to enable: ${list.error}` : "Loading…"}</p>
       ) : (
         <EnableList rows={list.data} discoveryOff={discovery.data?.on === false} busy={busy} run={run} onSent={(id, r) => setDone(enableSentText(id, r))} />
       )}
@@ -303,7 +303,7 @@ function DefaultTermsCard({ defaults }: { defaults: Data<Defaults> }) {
         Default validator terms
       </h2>
       {t === undefined ? (
-        <p className="muted">{terms.error ? `Could not read the defaults: ${terms.error}` : "Reading the defaults…"}</p>
+        <p className={terms.error ? "bad" : "muted loading"}>{terms.error ? `Could not read the defaults: ${terms.error}` : "Reading the defaults…"}</p>
       ) : t ? (
         <p className="fg2">
           {tokenTermsText(t)}. A token enabled from now on starts validating at these terms.
@@ -368,7 +368,7 @@ function DefaultMarketCard({ defaults }: { defaults: Data<Defaults> }) {
         Default market minimum
       </h2>
       {m === null ? (
-        <p className="muted">{market.error ? `Could not read the defaults: ${market.error}` : "Reading the defaults…"}</p>
+        <p className={market.error ? "bad" : "muted loading"}>{market.error ? `Could not read the defaults: ${market.error}` : "Reading the defaults…"}</p>
       ) : m > 0 ? (
         <p className="fg2">Minimum commission {m} bps. A token enabled from now on lists only pools at or above it on the Swap page.</p>
       ) : (
@@ -448,7 +448,7 @@ function EnablePriceCard({ defaults }: { defaults: Data<Defaults> }) {
         Price to enable a token
       </h2>
       {defaults.data === null ? (
-        <p className="muted">{defaults.error ? `Could not read the defaults: ${defaults.error}` : "Reading the defaults…"}</p>
+        <p className={defaults.error ? "bad" : "muted loading"}>{defaults.error ? `Could not read the defaults: ${defaults.error}` : "Reading the defaults…"}</p>
       ) : (
         <p className="fg2">{enablePriceText(defaults.data.enablePriceSats)}</p>
       )}
@@ -493,7 +493,7 @@ function ExchangeWalletCard({ wallet }: { wallet: Data<ExchangeWallet> }) {
         Exchange wallet
       </h2>
       {wallet.data === null ? (
-        <p className="muted">{wallet.error ? `Could not read the exchange's wallet: ${wallet.error}` : "Reading the exchange's wallet…"}</p>
+        <p className={wallet.error ? "bad" : "muted loading"}>{wallet.error ? `Could not read the exchange's wallet: ${wallet.error}` : "Reading the exchange's wallet…"}</p>
       ) : (
         <p className="fg2">{exchangeWalletText(wallet.data)}</p>
       )}
@@ -559,7 +559,7 @@ function DiscoveryCard({ discovery }: { discovery: Data<Discovery> }) {
         </label>
       </div>
       {d === null ? (
-        <p className="muted">{discovery.error ? `Could not read discovery: ${discovery.error}` : "Reading discovery…"}</p>
+        <p className={discovery.error ? "bad" : "muted loading"}>{discovery.error ? `Could not read discovery: ${discovery.error}` : "Reading discovery…"}</p>
       ) : (
         <p className="fg2">{discoveryText(d)}</p>
       )}
@@ -772,7 +772,7 @@ export function Settings({ session, root }: { session: Session; root: boolean })
               Enabled
             </h2>
             {reg.data === null ? (
-              <p className="muted">Loading…</p>
+              <p className="muted loading">Loading…</p>
             ) : reg.data.length === 0 ? (
               <p className="muted">No token is enabled.</p>
             ) : (
