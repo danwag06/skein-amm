@@ -1,7 +1,7 @@
 //! Views over the chain state (the chain app's `chain/state`, skein-sdk
 //! `chain.state.State`, read only) and the app's overlay state
 //! (`<app>/state`, skein-overlay's `State`: which topic admitted what) for the
-//! proofs-by-block direct call and catch-up: no VM imports, so the tests run
+//! proofs-by-block direct call (0.44.1: the catch-up pass gone): no VM imports, so the tests run
 //! them over an in-memory store.
 const std = @import("std");
 const w = @import("chain");
@@ -19,15 +19,6 @@ const fns = struct {
     fn heightOf(ctx: *anyopaque, hash: [32]u8) anyerror!?u32 {
         return stOf(ctx).ch.chain().heightOf(hash);
     }
-    fn status(ctx: *anyopaque, txid: [32]u8) anyerror!proofs.TxStatus {
-        const ch = stOf(ctx).ch;
-        if (!(try ch.holds(txid))) return .unknown;
-        return switch (try ch.status(txid)) {
-            .proven => .proven,
-            .unproven => .unproven,
-            .rejected => .rejected,
-        };
-    }
     fn inTopic(ctx: *anyopaque, topic: []const u8, txid: [32]u8) anyerror!bool {
         return stOf(ctx).isApplied(topic, txid);
     }
@@ -44,9 +35,4 @@ const fns = struct {
 
 pub fn held(st: *State) proofs.Held {
     return .{ .ctx = st, .heightOfFn = fns.heightOf, .provenAtFn = fns.provenAt, .inTopicFn = fns.inTopic, .proofForFn = fns.proofFor };
-}
-
-/// A transaction's settlement here (the chain state's).
-pub fn status(st: *State, txid: [32]u8) !proofs.TxStatus {
-    return fns.status(st, txid);
 }

@@ -2,8 +2,8 @@
 //! direct call (a libp2p stream) on `/amm/proofs/1.0.0`, request
 //! `{blockHash, topic?}` → `{bump}` (the BUMP of every transaction of that
 //! block this node holds a proof for, restricted to the topic when given,
-//! merged into one) or `{missing: true}`; and the catch-up plan that asks
-//! for it. The push half (a BUMP on `<topic>-proof`) is skein's overlay
+//! merged into one) or `{missing: true}`. 0.44.1: the catch-up pass that
+//! asked for it is gone; the codec of both halves is kept with the serving side. The push half (a BUMP on `<topic>-proof`) is skein's overlay
 //! engine's (skein#74); the pull half is a placeholder until #74's sync
 //! walk-through (README.md).
 const std = @import("std");
@@ -16,8 +16,6 @@ const MerklePath = w.merkle.MerklePath;
 
 // ---------------------------------------------------------------- what this node holds
 
-/// A transaction's settlement here (unknown: not held).
-pub const TxStatus = enum { unknown, unproven, proven, rejected };
 
 /// The level-0 hashes of a BUMP (the transactions it can prove, flagged or not).
 pub fn leaves(a: Allocator, p: MerklePath) ![]const [32]u8 {
@@ -115,19 +113,4 @@ pub fn serve(a: Allocator, held: Held, request: []const u8) ![]u8 {
     const r = decodeRequest(a, request) catch return encodeReply(a, null);
     const built = try blockBump(a, held, r.topic, r.block_hash);
     return encodeReply(a, if (built) |b| b.bump else null);
-}
-
-// ---------------------------------------------------------------- the catch-up pass
-
-/// The heights a catch-up pass asks for: after the cursor, up to `batch`, not
-/// past the tip. With no cursor yet, the pass starts `window` below the tip.
-/// With nothing unsettled in the topic the cursor just follows the tip.
-pub const Plan = struct { from: u32, to: u32, cursor: u32 };
-
-pub fn catchupPlan(cursor: ?u32, tip: u32, window: u32, batch: u32, unsettled: bool) ?Plan {
-    const start = if (cursor) |c| c else tip -| window;
-    if (!unsettled) return if (start == tip and cursor != null) null else .{ .from = tip + 1, .to = tip, .cursor = tip };
-    if (start >= tip) return null;
-    const to = @min(tip, start + @max(batch, 1));
-    return .{ .from = start + 1, .to = to, .cursor = to };
 }

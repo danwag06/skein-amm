@@ -16,7 +16,7 @@ topic per token, registered by root at runtime.
 | `amm-lookup` | `programs/amm-lookup` | `ls_amm_<assetId>` (0.21.0; `ls_amm` before, its index still `<app>/ls_amm`): the listed pools (below, "The listing"), per token; its beat on `ls_amm_<assetId>-live`, the prices ("Prices") |
 | `amm-validator` | `programs/amm-validator` | the validator, for every registered token (always, 0.8.1): `swap` (a libp2p direct call; it submits by message to its own overlay), `affirm` (0.11.0; 0.13.0: it picks the nonce; called in-VM by `amm.pool.affirm`), root's `rescind` (0.13.0; 0.11.0–0.12.x: `close`) |
 | `amm-setup` | `programs/amm-setup` | the token's setup (0.22.0): the deploy event in `amm/deploy` (`kernel.beef`) → the head `amm/token`, the token's topic and lookups registered with the engine by call (skein-overlay 0.18.0), the deploy submitted when the seed did not take it; the read `/token` ("The token's setup", below) |
-| `amm-p2p` | `programs/amm-p2p` | the relay (`amm.swap/1`; `amm.pool/1`: `terms`, `affirm`), the read `/spends` and (0.34.0) the public read API, the pages (`www/` from the app's tree); the catch-up utility, unscheduled |
+| `amm-p2p` | `programs/amm-p2p` | `amm.swap/1` terms (0.44.0: the relay is the open-exchange host's); `amm.pool/1`: `terms`, `affirm`; the read `/spends` and (0.34.0) the public read API, the pages (`www/` from the app's tree); the catch-up utility, unscheduled |
 | | `src/pool.zig` | the pool library (module `pool`), over `1color`'s parser and rules |
 | | `pool/Pool.runar.go` | the contract |
 | | `web/ui` → `www/` | the AMM pages; `www/color/` the 1Color pages |
@@ -627,10 +627,7 @@ the overlay sync protocol, answered by the engine's filter `sync` (0.14.0);
 `/skein/overlay/beef/1.0.0`, the engine's receive row, the BEEFs the host
 fetches (0.14.1; 0.24.1: the host's own entry, never served to peers).
 
-**Box `amm/amm-p2p`** (also): the cron provider's ticks, `{kind: "amm-p2p-tick",
-job: "catchup"}` — a utility nothing schedules (0.6.0). amm-p2p takes no
-start or stop: the manifest has none, and the owner's `{kind:
-"amm-p2p-start" | "amm-p2p-stop"}` is refused (`BadMessage`).
+**Box `amm/amm-p2p`** (also, until 0.44.0): the cron provider's ticks for the catch-up pass — gone in 0.44.1 (no tick, no pass, no `config.amm.ammP2p`).
 
 **Market and validator, always** (0.6.0, shruggr/skein#120; 0.8.1,
 skein-overlay 0.12.0). David, 2026-10-09: "every skein is marketplace AND
@@ -921,8 +918,8 @@ yet").
   nothing.
 - **Catch-up and proofs by block.** Never specified; sync is the host's
   announce-then-fetch, pull and tail reconcile (skein-overlay 0.20.0). The `/amm/proofs/1.0.0` row is gone and no
-  start schedules the catch-up pass; the code stays as a utility
-  (`proofsByBlock`, `catchup`).
+  start schedules a catch-up pass; 0.44.1: the pass is gone, the serving side
+  (`proofsByBlock`) stays as a utility.
 - **A setting changed after a register.** The roles' events are emitted at
   `register` / `deregister` only (the
   intents stand in the log; root's switch is gone, 0.8.1): a market window or a beat changed by a

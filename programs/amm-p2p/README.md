@@ -3,11 +3,14 @@
 The AMM app's **functions** (interfaces `amm.swap/1`: `terms`; `amm.pool/1`: `terms`, `affirm`), its **read routes**, the **market record** and the app's pages, with the proofs-by-block direct call and the catch-up pass as utilities nothing routes or schedules (#2, the pull half of proof sync), as one [skein](https://github.com/shruggr/skein) program (Zig 0.16.0, wasm32-wasi), the `amm-p2p` program of the `amm` app (`etc/app.json`). 0.44.0: **no swap relay** here — the open-exchange host relays (below). The design notes cited below are amm-poc's docs/notes.md.
 
 ```
-zig build test-amm-p2p   # from the repo root: the direct call's request and reply, the catch-up plan, the names,
-                         # the catch-up tick, the libp2p provider's bodies and answers (stream.zig); amm.swap/1 by
-                         # the manifest (terms only); the affirmation's body and answer; the commission key; the reads,
-                         # natively
+zig build test-amm-p2p   # from the repo root: the proofs-by-block direct call's serving side, the names, the
+                         # direct call's shapes (stream.zig); amm.swap/1 by the manifest (terms only); the
+                         # affirmation's body and answer; the commission key; the reads, natively
 ```
+
+## 0.44.1 (no catch-up pass, David Case 2026-11-06)
+
+This section supersedes what the rest of this file says where they differ. The **catch-up pass** — the pull half of proof sync, a cron-ticked job (`{kind: "amm-p2p-tick", job: "catchup"}` in box `amm/amm-p2p`) that dialled configured peers on `/amm/proofs/1.0.0` with its own reply deadline, a placeholder from before the overlay sync that nothing scheduled and no install configured peers for — is **gone, whole**: the job and its tick (src/schedule.zig), its config (`config.amm.ammP2p` / genesis `defaults.ammP2p`: `topics`, `peers`, `window`, `batch`, `replyTimeoutMs`), its cursor state under `amm/p2p` (a record an earlier version wrote is not read), the provider bodies it sent (`dial`, `send`, `close` and their answers, stream.zig), the plan (`proofs.catchupPlan`) and its tests. What it shared and what stays: the **serving side of proofs by block** (`proofsByBlock`, a direct-call handler no row routes: proofs.zig's codec and `serve`, views.zig's `held`, stream.zig's `inbound` / `directAnswer`). This program received no gossip of its own (the overlay engine's), so nothing else changed. The program now steps only on messages in its box (`{fn, args}` calls and root's `market`).
 
 ## 0.44.0 (the host is the relay, David Case 2026-11-06)
 
@@ -158,12 +161,11 @@ What is left:
 | file | what |
 |---|---|
 | `src/names.zig` | Topic, protocol, box and schedule names; parses `tm_color_<txid>_0` and `tm_color_<txid>_0-live` itself. |
-| `src/stream.zig` | The direct call's shapes (0.44.0; was libp2p.zig): the handler's argument, the direct-call answer, the libp2p provider's bodies and its answers to a dial (the catch-up pass's). |
-| `src/schedule.zig` | The catch-up tick's kind and job (0.6.0: nothing schedules it). Pure. |
-| `src/proofs.zig` | Proofs by block: one BUMP per block (merge), the request and reply, the catch-up plan. Pure. |
+| `src/stream.zig` | The direct call's shapes (0.44.0; 0.44.1: the provider's bodies gone): the handler's argument, the direct-call answer, the peer ID. |
+| `src/proofs.zig` | Proofs by block: one BUMP per block (merge), the request and reply (0.44.1: no catch-up plan). Pure. |
 | `src/views.zig` | The views over the chain state (`chain/state`) and the app's overlay state (`<app>/state`). No VM imports. |
 | `src/interface.zig` | (0.44.0) The functions' shapes: `amm.swap.terms` (the commission key's protocol, `terms`), `amm.pool.terms` (`poolTerms`), the affirmation (`affirmBody`, `affirmNonce`, `affirmAnswer`, the signed package `package`), the answer messages. Pure. |
-| `src/main.zig` | The program: the route handlers, the steps (the catch-up tick, the app's box), the app dispatch (skein-sdk `app`), the signer (`wallet`), `emit`, `await` and `deadline` imports (the catch-up pass's). |
+| `src/main.zig` | The program: the route handlers, the steps (the app's box), the app dispatch (skein-sdk `app`), the signer (`wallet`), `emit`. |
 | `test.zig` | Tests. |
 
 Dependencies (`build.zig`): skein-overlay 0.6.0 by URL + hash (its `sk` VM helpers, and its engine sources as the module `skein_overlay`, as amm-validator takes them), skein-sdk 0.5.1 through it (`chain`, `wallet`, `app`, `sk`, `cbor`, `dagjson`, `message`), skein-1color 0.4.0 (`1color`) and `pool`. The tests read `etc/app.json` (the functions' declarations).
@@ -265,29 +267,6 @@ http /call   {transport: "http", address: "/call", sender: "*", program: "amm-p2
 
 The `/call` route admits the caller as a message would be (skein-sdk 0.3.0 `app.admitted`: a `mailbox` row in the call input's `dispatch` for (caller, `amm`) or (anyone, `amm`)); an open row (sender `*`) has no caller, so the box must be open to anyone.
 
-## Scheduling (skein #69)
-
-Genesis `jobs` are gone; a schedule is a message to the cron provider, emitted from a step (docs/MESSAGES.md "Scheduling: the waker and the cron provider (#69)"). The program asks for one schedule per job, named so a repeat replaces it:
-
-```
-to the cron provider (address book role "cron"), box "cron":
-  {fn: "tick", every: heartbeatSeconds·1000, box: "amm-p2p", body: {kind: "amm-p2p-tick", job: "heartbeat"}, name: "amm-p2p-heartbeat"}
-  {fn: "tick", every: catchupSeconds·1000,   box: "amm-p2p", body: {kind: "amm-p2p-tick", job: "catchup"},   name: "amm-p2p-catchup"}
-each tick, from the cron provider into box "amm-p2p":
-  {kind: "amm-p2p-tick", job, name, due}
-```
-
-A tick launches a thread of this program (its sender must be the cron provider's key). The provider's answers to the requests (`{replyTo, name, next}` or `{replyTo, error}`) land in box `cron` and are recorded; nothing awaits them. The reference host keeps schedules in host.db and ticks each `every` schedule once at a host start, so a schedule survives restarts.
-
-**The first request.** The schedule must originate in a step, and nothing in skein steps a program at install or at instance start (APPS.md §3: install is three owner messages, none addressed to the app; #69 removed the genesis jobs). So the program asks when it receives, in any box (`amm-p2p`; the manifest's `start` goes into box `amm`, where the owner's row is the engine's: README "Calls"),
-
-```
-{kind: "amm-p2p-start", jobs?: ["heartbeat" | "catchup"]}      (default: catchup, plus heartbeat when ammP2p.peerId is set)
-{kind: "amm-p2p-stop",  jobs?: […]}                              emits {fn: "stop", name} for each
-```
-
-from the owner (`in.owner`) or the cron provider — the latter so `skein-host event <agent> amm-p2p '{"kind":"amm-p2p-start"}'` works. Anything else in the box from another sender errors the step. Until someone sends it once, no heartbeat and no catch-up run.
-
 ## Configuration (a genesis-wired node)
 
 The program also runs wired by a genesis, with no app record (amm-poc's deploy). Installed as an app, its configuration is the manifest's `config.amm`.
@@ -315,6 +294,3 @@ The end-to-end runs below are amm-poc's (its deploy/README.md); this port is tes
 - **The SDK's dispatch helper answers in the step** (`app.serve`: the `/call` route answers at once, a message is answered at the end of its step). A function whose answer depends on later steps (a peer's reply) is outside it, so this program runs its own `/call` and message wrappers around `app.run` (the same checks, codes and answer shapes) with one addition: `amm.swap.submit` waits on its relay thread.
 - **No app record under a genesis-wired node**: the declarations come from `defaults.ammProvides` and the state is the head `amm/app`'s root itself (above).
 
-- **No first step.** The schedule cannot start itself (above): an install-time or start-time step for an app is not in skein's contract.
-- **Overlapping passes.** Each catch-up tick launches its own thread; a pass still resting when the next tick comes runs beside it (both ask, the first answer proves, the second finds nothing new). With the defaults a pass is bounded by `batch` × 3 peers × `replyTimeoutMs` = 9 min < `catchupSeconds`.
-- **Interval and threshold** default to 30 s / 90 s, configurable.

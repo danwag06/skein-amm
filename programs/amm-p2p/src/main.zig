@@ -6,9 +6,10 @@
 //! `<topic>-admit`, proofs on `<topic>-proof` — is skein's overlay engine's
 //! (skein#74), not this program's.
 //!
-//! The bodies and plans are in proofs.zig and schedule.zig (pure, tested
-//! natively); the direct call's shapes are stream.zig, the functions' interface.zig. This file wires
-//! them to the VM.
+//! The proofs-by-block bodies are in proofs.zig (pure, tested natively); the direct call's shapes
+//! are stream.zig, the functions' interface.zig. This file wires them to the VM. 0.44.1 (David Case
+//! 2026-11-06): the catch-up pass (a cron-ticked pull of proofs from configured peers, with its own
+//! reply deadline, from before the overlay sync) is gone with its tick, config and cursor.
 //!
 //! **Market and validator** (0.6.0, shruggr/skein#120, David 2026-10-06 evening) are the overlay
 //! engine's, not this program's: "a skein runs as a market and/or a validator by two settings in
@@ -56,23 +57,13 @@
 //!   message {fn: "market", args} in box `amm/amm-p2p`  root's market record (0.16.0, market.zig; `roles.root`
 //!                                                     gates it): {minCommissionBps} sets, null clears, the head
 //!                                                     `amm/market`; answered to root in that box
-//!   message {kind: "amm-p2p-tick", job: "catchup", name, due}   from the cron provider (skein#69): a catch-up
-//!                                                     pass (a thread resting on the libp2p provider's answers
-//!                                                     to its direct calls). A utility: nothing schedules it
-//!                                                     (0.6.0: the start that did is gone)
 //!
-//! State under the head `amm/p2p` (`interface.p2p_head`): {kind: "amm-p2p-state", maps: {cursor}} (the
-//! catch-up cursor; a record 0.5.0 or earlier wrote also held `beacons`, `subscriptions`,
-//! `validated`, `liveness`, which are not read and dropped at the next write).
-//! 0.44.0: nothing of this program's is kept under the head `amm/app` (the relay's `swaps` map,
+//! Nothing of this program's is kept in state (0.44.1: the catch-up cursor under `amm/p2p` is gone; a
+//! record an earlier version wrote is not read). 0.44.0: nothing under the head `amm/app` (the relay's `swaps` map,
 //! `{kind: "amm-app-state", swaps}`, is gone; a record an earlier version wrote is not read).
 //!
-//! Config: the installed app record's `config.amm` (`ammP2p`: the catch-up's `topics`, `peers`,
-//! `window`, `batch`, `replyTimeoutMs`, all optional), else genesis `defaults.ammP2p`, a JSON
-//! object in a string (0.16.0: no `commission` / `defaults.ammCommission`: the commission key is
-//! the instance's own, derived, `commissionKey`); the topics
-//! (`ammP2p.topics`, else every `tm_color_<txid>_0` the overlay serves, declared or registered with the
-//! engine, as the engine reads its configuration: skein-overlay `engine_vm.configured`); the
+//! Config: none of its own (0.44.1: `config.amm.ammP2p` / genesis `defaults.ammP2p`, the catch-up's,
+//! gone; 0.16.0: no `commission`, the commission key is the instance's own, `commissionKey`); the
 //! functions' declarations: the app record's `provides`, else genesis `defaults.ammProvides`
 //! (JSON) (README.md).
 const std = @import("std");
@@ -82,7 +73,6 @@ const vm = @import("overlay_sk");
 const wire = @import("wallet").wire;
 const names = @import("names.zig");
 const stream = @import("stream.zig");
-const schedule = @import("schedule.zig");
 const proofs = @import("proofs.zig");
 const views = @import("views.zig");
 const iface = @import("interface.zig");
@@ -98,7 +88,6 @@ const dagjson = @import("dagjson");
 
 const cbor = w.cbor;
 const Value = cbor.Value;
-const Map = w.store.Map;
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
@@ -124,127 +113,7 @@ fn run(a: Allocator) anyerror!void {
     return step(a, in);
 }
 
-// ---------------------------------------------------------------- config
-
-const Config = struct {
-    topics: []const []const u8,
-    window: u32 = 12,
-    batch: u32 = 6,
-    /// Catch-up peers: base58 peer IDs or multiaddrs with /p2p/<id>, as `dial` takes them.
-    peers: []const []const u8 = &.{},
-    /// How long catch-up waits on a direct call's answer (ms).
-    reply_timeout_ms: u64 = 30_000,
-};
-
-/// A configuration section: the installed app record's `config.amm.<key>`
-/// (as JSON text), else the genesis default `<genesis>` (JSON text).
-fn configText(a: Allocator, in: Value, key: []const u8, genesis: []const u8) !?[]const u8 {
-    if (try appRecord(a)) |rec| if (rec.get("config")) |c| if (c.get(iface.app_name)) |amm| if (amm.get(key)) |v| return try jsonOf(a, v);
-    const d = in.get("defaults") orelse return null;
-    return d.getText(genesis);
-}
-
-/// A configuration value (maps, lists, text, numbers, booleans) as JSON text.
-fn jsonOf(a: Allocator, v: Value) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(a);
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-    try writeJson(&jw, v);
-    return out.written();
-}
-
-fn writeJson(jw: *std.json.Stringify, v: Value) !void {
-    switch (v) {
-        .map => |es| {
-            try jw.beginObject();
-            for (es) |e| {
-                try jw.objectField(e.key);
-                try writeJson(jw, e.value);
-            }
-            try jw.endObject();
-        },
-        .array => |xs| {
-            try jw.beginArray();
-            for (xs) |x| try writeJson(jw, x);
-            try jw.endArray();
-        },
-        .text => |t| try jw.write(t),
-        .boolean => |b| try jw.write(b),
-        .uint => |n| try jw.write(n),
-        .nint => |n| try jw.write(-1 - @as(i128, n)),
-        .null => try jw.write(null),
-        else => return error.BadConfig,
-    }
-}
-
-fn config(a: Allocator, in: Value) !Config {
-    var cfg: Config = .{ .topics = &.{} };
-    if (try configText(a, in, "ammP2p", "ammP2p")) |text| {
-        const j = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return error.BadConfig;
-        if (j != .object) return error.BadConfig;
-        const o = j.object;
-        inline for (.{ .{ "window", "window" }, .{ "batch", "batch" }, .{ "replyTimeoutMs", "reply_timeout_ms" } }) |f| {
-            if (o.get(f[0])) |v| @field(cfg, f[1]) = if (v == .integer and v.integer > 0) @intCast(v.integer) else return error.BadConfig;
-        }
-        if (o.get("topics")) |v| cfg.topics = try strings(a, v);
-        if (o.get("peers")) |v| cfg.peers = try strings(a, v);
-    }
-    if (cfg.topics.len == 0) {
-        // Every token topic `tm_color_<txid>_0` the overlay serves now: the ones registered with the
-        // engine (its head `<app>/topics`) and any `config.overlay.topics` names.
-        const cin = overlay_in orelse in;
-        var out: std.ArrayList([]const u8) = .empty;
-        for (ov.calls.servedTopics(a, cin) catch return cfg) |t| if (names.parse(t)) |n| if (n.kind == .overlay) try out.append(a, t);
-        cfg.topics = out.items;
-    }
-    return cfg;
-}
-
-fn strings(a: Allocator, v: std.json.Value) ![]const []const u8 {
-    if (v != .array) return error.BadConfig;
-    const out = try a.alloc([]const u8, v.array.items.len);
-    for (v.array.items, out) |x, *o| o.* = if (x == .string) x.string else return error.BadConfig;
-    return out;
-}
-
-// ---------------------------------------------------------------- this program's state
-
-const state_head = iface.p2p_head;
-
-const State = struct {
-    s: w.store.Store,
-    /// The catch-up cursor: served topic `tm_color_<txid>_0` → the last block height settled.
-    cursor: Map,
-
-    fn load(a: Allocator, s: w.store.Store) !State {
-        const maps = try w.store.Maps.create(a, s);
-        var st: State = .{ .s = s, .cursor = maps.map(null) };
-        const c = (try vm.head(a, state_head)) orelse return st;
-        const rec = try s.getValue(a, c);
-        if (!eql(u8, rec.getText("kind") orelse "", "amm-p2p-state")) return error.BadState;
-        const m = rec.get("maps") orelse return error.BadState;
-        st.cursor = maps.map(m.getCid("cursor"));
-        return st;
-    }
-
-    /// Save and advance the head when anything changed: → the state record's CID, or null.
-    fn commit(self: *State, a: Allocator) !?[]const u8 {
-        if (!self.cursor.dirty) return null;
-        try self.cursor.flush();
-        const c = try self.s.putValue(a, .{ .map = try a.dupe(cbor.Entry, &.{
-            .{ .key = "kind", .value = .{ .text = "amm-p2p-state" } },
-            .{ .key = "maps", .value = .{ .map = try a.dupe(cbor.Entry, &.{
-                .{ .key = "cursor", .value = if (self.cursor.root) |r| .{ .cid = r } else .null },
-            }) } },
-        }) });
-        try vm.advance(state_head, c);
-        return c;
-    }
-};
-
-fn intOf(v: ?w.store.MValue) u32 {
-    const x = v orelse return 0;
-    return if (x == .int and x.int >= 0 and x.int <= std.math.maxInt(u32)) @intCast(x.int) else 0;
-}
+// ---------------------------------------------------------------- the overlay state
 
 /// The app's overlay state (`<app>/state`) over the chain app's (`chain/state`, read only), as the
 /// step or call sees them (skein-overlay `engine_vm.load`).
@@ -402,14 +271,7 @@ fn proofsByBlock(a: Allocator, in: Value, arg: Value) !Value {
     return stream.directAnswer(a, try proofs.serve(a, views.held(try loadState(a, in)), msg.body));
 }
 
-// ---------------------------------------------------------------- outbound: emit to a provider
-
-/// The key of this host's provider `name` (`libp2p`, `cron`): the address book's entry at (`local`,
-/// `name`) (skein-sdk 0.7 `sk.peerAt`; the book has no roles, shruggr/skein#126).
-fn providerKey(a: Allocator, name: []const u8) ![]const u8 {
-    const k = (try sk.peerAt(a, "local", name)) orelse return error.NoProvider;
-    return if (k.len == 33) k else error.NoProvider;
-}
+// ---------------------------------------------------------------- outbound: emit
 
 /// Emit `body` to `to` in `box` (docs/MESSAGES.md "emit"): → the message's CID. It goes out when the step ends without error.
 fn emit(a: Allocator, to: []const u8, box: []const u8, body: Value) ![]const u8 {
@@ -419,10 +281,6 @@ fn emit(a: Allocator, to: []const u8, box: []const u8, body: Value) ![]const u8 
         .{ .key = "body", .value = .{ .bytes = try cbor.encode(a, body) } },
     }) });
     return vm.result(a, vm.sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
-}
-
-fn toLibp2p(a: Allocator, r: stream.Request) ![]const u8 {
-    return emit(a, try providerKey(a, "libp2p"), r.box, r.body);
 }
 
 fn walletCall(a: Allocator, frame: []const u8) ![]const u8 {
@@ -459,43 +317,10 @@ fn step(a: Allocator, in: Value) !void {
             if (body.get("fn") != null) return appMessage(a, in, args, body);
         }
     }
-    const at: u64 = in.getUint("at") orelse return error.BadInput;
-    var st = try State.load(a, s);
-    var fields: std.ArrayList(cbor.Entry) = .empty;
-    var op: []const u8 = undefined;
-
-    const reply = in.get("reply");
-    const resumed = (reply != null and reply.? == .map) or (in.getBool("woke") orelse false);
-    if (resumed) {
-        // A catch-up pass's thread, stepped by the libp2p provider's answer or its deadline.
-        op = "catchup";
-        try catchup(a, in, &st, at, &fields);
-    } else if (args.getCid("event") != null) {
-        // No event is this program's since 0.4.0 (0.3.x's accepted heartbeats, `amm-live`, are gone).
-        return error.BadEvent;
-    } else if (args.getCid("body")) |bc| {
-        const body = try s.getValue(a, bc);
-        const sender = args.getBytes("sender") orelse return error.BadInput;
-        // 0.6.0: no `validate` / `unvalidate` (the engine's `register` drives the validator role) and
-        // no start or stop (the engine's `register` drives the beacons and the market's liveness).
-        op = body.getText("kind") orelse return error.BadMessage;
-        if (!eql(u8, op, schedule.tick_kind)) return error.BadMessage;
-        if (!eql(u8, sender, try providerKey(a, "cron"))) return error.NotTheCronProvider;
-        const job = try schedule.jobOf(body);
-        try fields.append(a, .{ .key = "job", .value = .{ .text = @tagName(job) } });
-        switch (job) {
-            .catchup => try catchup(a, in, &st, at, &fields),
-        }
-    } else return error.BadInput;
-
-    if (try st.commit(a)) |c| try fields.append(a, .{ .key = "state", .value = .{ .cid = c } });
-    var es: std.ArrayList(cbor.Entry) = .empty;
-    try es.appendSlice(a, &.{
-        .{ .key = "kind", .value = .{ .text = "amm-p2p-result" } },
-        .{ .key = "op", .value = .{ .text = op } },
-    });
-    try es.appendSlice(a, fields.items);
-    _ = try vm.finish(a, s, .{ .map = es.items });
+    // 0.44.1 (David Case 2026-11-06): nothing else steps this program. The catch-up pass (a cron-ticked
+    // pull of proofs by block, a placeholder from before the overlay sync, with its own reply deadline)
+    // is gone, and with it the tick, its config and the cursor under `amm/p2p`.
+    return error.BadInput;
 }
 
 /// Whether this call is a filter's: the input's `filter: true` (skein docs/APPS.md §2 "Filters").
@@ -517,243 +342,6 @@ fn servePages(a: Allocator, arg: Value) !Value {
     const req = try toSdk(a, arg);
     const m = try app.manifestOf(a, iface.app_name);
     return fromSdk(a, try files.serve(a, req, scbor.Value.cidOf(m.get("tree")), files.rowOptions(req)));
-}
-
-// ---------------------------------------------------------------- catch-up (the pull half, placeholder)
-
-/// The peers to ask, as `dial` takes them: the configured ones (`ammP2p.peers`). Since 0.4.0 no
-/// validator map adds the ones heard from (liveness is the runtime's, #138).
-fn catchupPeers(cfg: Config) []const []const u8 {
-    return cfg.peers;
-}
-
-/// Where a catch-up pass is: the topic (index into the configured topics),
-/// the block being asked for and the last of the pass's batch, the peers and
-/// which one is being asked, the dial message whose answers the thread
-/// awaits (the libp2p provider answers a dial with `{stream}`, then each
-/// frame read, all naming the dial), the direct call once open, and the
-/// deadline. Carried from step to step in the thread's result record
-/// (`catchup`).
-const Pass = struct {
-    topic: u32,
-    height: u32,
-    to: u32,
-    peers: []const []const u8,
-    peer: u32 = 0,
-    dial: ?[]const u8 = null,
-    stream: ?u64 = null,
-    until: u64 = 0,
-
-    fn value(p: Pass, a: Allocator) !Value {
-        const ps = try a.alloc(Value, p.peers.len);
-        for (p.peers, ps) |x, *o| o.* = .{ .text = x };
-        return .{ .map = try a.dupe(cbor.Entry, &.{
-            .{ .key = "topic", .value = .{ .uint = p.topic } },
-            .{ .key = "height", .value = .{ .uint = p.height } },
-            .{ .key = "to", .value = .{ .uint = p.to } },
-            .{ .key = "peers", .value = .{ .array = ps } },
-            .{ .key = "peer", .value = .{ .uint = p.peer } },
-            .{ .key = "dial", .value = if (p.dial) |c| .{ .cid = c } else .null },
-            .{ .key = "stream", .value = if (p.stream) |x| .{ .uint = x } else .null },
-            .{ .key = "until", .value = .{ .uint = p.until } },
-        }) };
-    }
-
-    fn of(a: Allocator, v: Value) !Pass {
-        const pv = v.getArray("peers") orelse return error.BadPass;
-        const ps = try a.alloc([]const u8, pv.len);
-        for (pv, ps) |x, *o| o.* = if (x == .text) x.text else return error.BadPass;
-        return .{
-            .topic = @intCast(v.getUint("topic") orelse return error.BadPass),
-            .height = @intCast(v.getUint("height") orelse return error.BadPass),
-            .to = @intCast(v.getUint("to") orelse return error.BadPass),
-            .peers = ps,
-            .peer = @intCast(v.getUint("peer") orelse 0),
-            .dial = v.getCid("dial"),
-            .stream = v.getUint("stream"),
-            .until = v.getUint("until") orelse 0,
-        };
-    }
-
-    fn nextPeer(p: *Pass) void {
-        p.peer += 1;
-        p.dial = null;
-        p.stream = null;
-    }
-
-    fn nextBlock(p: *Pass) void {
-        p.height += 1;
-        p.peer = 0;
-        p.dial = null;
-        p.stream = null;
-    }
-};
-
-/// The pass the thread's last step left, from its result record (the
-/// update's stdout is the record's CID in hex, vm.finish).
-fn resumedPass(a: Allocator, in: Value) !?Pass {
-    const s = vm.store();
-    const tip = in.getCid("tip") orelse return null;
-    const u = try s.getValue(a, tip);
-    const res = u.get("result") orelse return null;
-    const out = std.mem.trim(u8, res.getBytes("stdout") orelse return null, " \n");
-    if (out.len == 0 or out.len % 2 != 0) return null;
-    const cid = try a.alloc(u8, out.len / 2);
-    _ = std.fmt.hexToBytes(cid, out) catch return null;
-    const rec = s.getValue(a, cid) catch return null;
-    return Pass.of(a, rec.get("catchup") orelse return null) catch null;
-}
-
-/// Rest the thread on the dial's answers until the pass's deadline.
-fn rest(a: Allocator, p: Pass, fields: *std.ArrayList(cbor.Entry)) !void {
-    try vm.awaitRecord(p.dial.?);
-    try vm.deadline(@intCast(p.until));
-    try fields.append(a, .{ .key = "catchup", .value = try p.value(a) });
-}
-
-/// One catch-up step. Started by a tick (no pass yet), or stepped again by
-/// the libp2p provider's answer to the pass's dial (`{stream}`, a frame,
-/// its end, an error) or by the deadline: take what came, then ask on, one
-/// block and one peer at a time, while the topics have unsettled
-/// transactions; rest on the next dial, or end the pass.
-fn catchup(a: Allocator, in: Value, st: *State, at: u64, fields: *std.ArrayList(cbor.Entry)) !void {
-    const cfg = try config(a, in);
-    const st0 = try loadState(a, in);
-    st0.now = @intCast(at);
-    const ch = st0.ch;
-    var proven: u64 = 0;
-    var settled: u64 = 0;
-    defer fields.append(a, .{ .key = "proven", .value = .{ .uint = settled + proven } }) catch {};
-    var cur: ?Pass = try resumedPass(a, in);
-    var next_topic: u32 = if (cur) |p| p.topic + 1 else 0;
-
-    const reply: ?Value = if (in.get("reply")) |r| (if (r == .map) r else null) else null;
-    if (cur) |*p| if (p.dial) |dial| {
-        if (reply) |r| {
-            const reply_to = r.getCid("replyTo") orelse "";
-            const box = r.getText("box") orelse "";
-            const body = try vm.store().getValue(a, r.getCid("body") orelse return error.BadInput);
-            if (!eql(u8, reply_to, dial)) {
-                // Not this dial's answer (a late one): rest again.
-                if (at < p.until) return rest(a, p.*, fields);
-                p.nextPeer();
-            } else switch (stream.dialAnswer(box, body) catch stream.DialAnswer{ .closed = "BadAnswer" }) {
-                .opened => |sid| {
-                    // The direct call is open: send the request, rest on its reply frame.
-                    p.stream = sid;
-                    if (p.topic >= cfg.topics.len) return error.TopicsChanged;
-                    const hdr = (try ch.chain().at(p.height)) orelse return error.NoHeader;
-                    _ = try toLibp2p(a, try stream.send(a, sid, try proofs.encodeRequest(a, .{ .block_hash = hdr.hash, .topic = cfg.topics[p.topic] })));
-                    if (at < p.until) return rest(a, p.*, fields);
-                    _ = try toLibp2p(a, try stream.close(a, sid));
-                    p.nextPeer();
-                },
-                .frame => |frame| {
-                    if (p.stream) |sid| _ = try toLibp2p(a, try stream.close(a, sid));
-                    if (try takeReply(a, st0, p.height, frame)) |k| {
-                        proven += k;
-                        p.nextBlock();
-                    } else p.nextPeer();
-                },
-                .closed => p.nextPeer(),
-            }
-        } else {
-            // The deadline: no answer in time.
-            if (p.stream) |sid| _ = try toLibp2p(a, try stream.close(a, sid));
-            p.nextPeer();
-        }
-    };
-
-    const tip = (try ch.chain().tip()) orelse return finishCatchup(proven);
-    while (true) {
-        if (cur == null) {
-            // The next topic with a plan; a topic with nothing unsettled has its cursor follow the tip.
-            while (next_topic < cfg.topics.len) : (next_topic += 1) {
-                const topic = cfg.topics[next_topic];
-                const ck = try w.store.nameKey(a, topic, &.{});
-                const cursor: ?u32 = if (try st.cursor.get(ck)) |v| intOf(v) else null;
-                const plan = proofs.catchupPlan(cursor, tip, cfg.window, cfg.batch, try unsettled(st0, topic)) orelse continue;
-                if (plan.from > plan.to) {
-                    try st.cursor.put(ck, .{ .int = plan.cursor });
-                    continue;
-                }
-                cur = .{ .topic = next_topic, .height = plan.from, .to = plan.to, .peers = catchupPeers(cfg) };
-                next_topic += 1;
-                break;
-            }
-            if (cur == null) break;
-        }
-        const p = &cur.?;
-        if (p.topic >= cfg.topics.len) {
-            cur = null;
-            continue;
-        }
-        if (p.height > p.to) {
-            try st.cursor.put(try w.store.nameKey(a, cfg.topics[p.topic], &.{}), .{ .int = p.to });
-            cur = null;
-            continue;
-        }
-        if (p.peer >= @min(p.peers.len, 3)) {
-            p.nextBlock();
-            continue;
-        }
-        if ((try ch.chain().at(p.height)) == null) {
-            p.nextBlock();
-            continue;
-        }
-        // Dial the peer on the proofs protocol and rest on the provider's answers.
-        try finishCatchup(proven);
-        settled += proven;
-        proven = 0;
-        p.dial = try toLibp2p(a, try stream.dial(a, p.peers[p.peer], names.proofs_protocol));
-        p.stream = null;
-        p.until = at + cfg.reply_timeout_ms;
-        return rest(a, p.*, fields);
-    }
-    return finishCatchup(proven);
-}
-
-/// Settle what the pass proved. STOP (shruggr/skein#120, skein-amm docs/AMM.md "Not built"): in
-/// amm-poc the pass applied each proof to the chain core under the head `wallet` (the transitional
-/// `wallet` grant), called the `rejected` hooks and advanced that head here. Since skein #79 the
-/// chain state is the chain app's alone (`chain/state`); a program of this app writes only `amm/…`
-/// and has no way to record a proof it fetched. Nothing is recorded; `takeReply` stops first.
-fn finishCatchup(proven: u64) !void {
-    if (proven == 0) return;
-    return error.CatchupCannotRecordProofs;
-}
-
-/// Whether the topic has transactions not yet proven (the chain state's `unproven` index joined to
-/// the topic's `applied`, the overlay's).
-fn unsettled(st: *ov.state.State, topic: []const u8) !bool {
-    for (try st.ch.map("unproven").prefixed("")) |kv| {
-        if (kv.key.len == 32 and try st.isApplied(topic, kv.key[0..32].*)) return true;
-    }
-    return false;
-}
-
-/// A proofs-by-block reply for the block at `height`: checked against the
-/// header → how many held unproven transactions it proves, or null when the
-/// reply is missing or does not check (ask the next peer). STOP: recording
-/// them is not possible here (`finishCatchup`): a reply that proves any is
-/// an error of the pass, `CatchupCannotRecordProofs`.
-fn takeReply(a: Allocator, st: *ov.state.State, height: u32, reply: []const u8) !?u64 {
-    const bump = (proofs.decodeReply(a, reply) catch return null) orelse return null;
-    const root = switch (try proofs.rootOf(a, bump)) {
-        .root => |r| r,
-        .bad => return null,
-    };
-    const hdr = (try st.ch.chain().at(height)) orelse return null;
-    if (!eql(u8, &root, &(try w.header.Header.parse(&hdr.raw)).merkle_root)) return null;
-    const p = w.merkle.MerklePath.parse(a, bump) catch return null;
-    if (p.block_height != height) return null;
-    var n: u64 = 0;
-    for (try proofs.leaves(a, p)) |t| {
-        if ((try views.status(st, t)) != .unproven) continue;
-        n += 1;
-    }
-    if (n > 0) return error.CatchupCannotRecordProofs;
-    return n;
 }
 
 // ---------------------------------------------------------------- the app: amm.swap/1 and amm.pool/1

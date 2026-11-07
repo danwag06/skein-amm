@@ -33,10 +33,6 @@ pub const app_name = "amm";
 /// The app's root head (skein-sdk 0.3.0 `app.headOf`, shruggr/skein#77: an
 /// app's heads are `<app>/…`, its root `<app>/app`).
 pub const app_head = app_name ++ "/app";
-/// This program's own state (the catch-up cursor; 0.6.0),
-/// under the app's name too: under #77 an installed app advances only heads
-/// named `<app>/…`.
-pub const p2p_head = app_name ++ "/p2p";
 pub const fn_terms = "amm.swap.terms";
 /// The validator's terms (0.9.0): what a pool here must carry.
 pub const fn_pool_terms = "amm.pool.terms";

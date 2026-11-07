@@ -1,13 +1,11 @@
-//! amm-p2p natively: the relay naming its validator (dialled, or this node's
-//! own, called in-VM), the handler's answer; the proofs-by-block direct
-//! call and the catch-up plan; the names, the cron provider's tick and the
-//! libp2p provider's bodies and answers — over an in-memory store. The VM wiring (main.zig) is wasm32-wasi only.
+//! amm-p2p natively: the proofs-by-block direct call (its serving side), the names, the direct
+//! call's shapes, amm.swap/1 terms, the affirmation, the commission key, the reads — over an
+//! in-memory store (0.44.0: no relay; 0.44.1: no catch-up pass). The VM wiring (main.zig) is wasm32-wasi only.
 const std = @import("std");
 const w = @import("chain");
 const wire = @import("wallet").wire;
 const names = @import("src/names.zig");
 const stream = @import("src/stream.zig");
-const schedule = @import("src/schedule.zig");
 const proofs = @import("src/proofs.zig");
 /// js-libp2p's peer ID of the generator point's key (skein src/host/p2p.ts `peerIdOf` of the private key 1).
 const PEER_ID_OF_G = "16Uiu2HAm3cuhhRL2msUuLF62KRSfneFDx94RsuouyW25Ho42cFMq";
@@ -22,7 +20,6 @@ const eql = std.mem.eql;
 
 comptime {
     _ = &views.held;
-    _ = &views.status;
 }
 
 fn expectTag(o: anytype, comptime tag: []const u8, reason: ?[]const u8) !void {
@@ -139,25 +136,6 @@ test "proofs by block: the direct call's request and reply; one BUMP per block" 
     try testing.expect((try proofs.decodeReply(a, try proofs.serve(a, f.held(), "junk"))) == null);
 }
 
-test "catch-up plan" {
-    // Nothing unsettled: the cursor follows the tip, nothing asked.
-    const idle = proofs.catchupPlan(90, 100, 12, 6, false).?;
-    try testing.expect(idle.from > idle.to);
-    try testing.expectEqual(@as(u32, 100), idle.cursor);
-    try testing.expect(proofs.catchupPlan(100, 100, 12, 6, false) == null);
-    // Unsettled: after the cursor, a batch at a time, not past the tip.
-    const p = proofs.catchupPlan(90, 100, 12, 6, true).?;
-    try testing.expectEqual(@as(u32, 91), p.from);
-    try testing.expectEqual(@as(u32, 96), p.to);
-    try testing.expectEqual(@as(u32, 96), p.cursor);
-    const q = proofs.catchupPlan(96, 100, 12, 6, true).?;
-    try testing.expectEqual(@as(u32, 100), q.to);
-    try testing.expect(proofs.catchupPlan(100, 100, 12, 6, true) == null);
-    // No cursor yet: a window below the tip.
-    try testing.expectEqual(@as(u32, 89), proofs.catchupPlan(null, 100, 12, 6, true).?.from);
-
-}
-
 test "names: tm_color_<txid>_0 and tm_color_<txid>_0-live (BRC-207), parsed here" {
     const o = "tm_color_" ++ "ab" ** 32 ++ "_0";
     const t = names.parse(o).?;
@@ -191,32 +169,6 @@ test "names: tm_color_<txid>_0 and tm_color_<txid>_0-live (BRC-207), parsed here
     try testing.expectEqualStrings("/amm/proofs/1.0.0", names.proofs_protocol);
 }
 
-test "the catch-up tick (skein#69, a utility since 0.6.0): the cron provider's tick read back; no heartbeat job" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    // A tick as the provider sends it: {...body, kind, name, due}.
-    const tick: Value = .{ .map = try a.dupe(cbor.Entry, &.{
-        .{ .key = "kind", .value = .{ .text = "amm-p2p-tick" } },
-        .{ .key = "job", .value = .{ .text = "catchup" } },
-        .{ .key = "name", .value = .{ .text = "amm-p2p-catchup" } },
-        .{ .key = "due", .value = .{ .uint = 1_790_000_000_000 } },
-    }) };
-    try testing.expectEqual(schedule.Job.catchup, try schedule.jobOf(tick));
-    try testing.expectError(error.NotATick, schedule.jobOf(.{ .map = &.{} }));
-    for ([_][]const u8{ "proofs", "heartbeat" }) |job| {
-        const bad: Value = .{ .map = try a.dupe(cbor.Entry, &.{
-            .{ .key = "kind", .value = .{ .text = "amm-p2p-tick" } },
-            .{ .key = "job", .value = .{ .text = job } },
-        }) };
-        try testing.expectError(error.BadTick, schedule.jobOf(bad));
-    }
-    try testing.expectEqualStrings("amm/amm-p2p", names.own_box);
-}
-
-// selfPeerId (main.zig) asks the signer for [2, "skein instance"] / `libp2p:<handle>` / self and
-// takes this multihash of it; the host derives its node's key the same way from the instance's root
-// (skein 387e057, src/host/signer.ts `peerKey`), so this is the node's peer ID (the relay's `isSelf`).
 test "the peer ID of a compressed secp256k1 key: the identity multihash of its protobuf PublicKey (js-libp2p's, 16Uiu2…)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -230,7 +182,7 @@ test "the peer ID of a compressed secp256k1 key: the identity multihash of its p
     try testing.expectEqualStrings(PEER_ID_OF_G, try stream.peerIdText(a, id));
 }
 
-test "the direct call's shapes (stream.zig, 0.44.0: was stream.zig): the handler's argument, the direct call's answer, the provider's bodies and answers" {
+test "the direct call's shapes (stream.zig, 0.44.0): the handler's argument, the direct call's answer (0.44.1: no provider bodies)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -253,25 +205,8 @@ test "the direct call's shapes (stream.zig, 0.44.0: was stream.zig): the handler
     const da = readBack(a, try stream.directAnswer(a, "reply"));
     try testing.expectEqualSlices(u8, "reply", da.getBytes("body").?);
 
-    // Outbound: the provider's boxes and bodies; `dial` takes the peer as text.
-    const text = try stream.peerIdText(a, pid);
-    const d = try stream.dial(a, text, names.proofs_protocol);
-    try testing.expectEqualStrings("dial", d.box);
-    try testing.expectEqualStrings(text, readBack(a, d.body).getText("peer").?);
-    try testing.expectEqual(@as(u64, 3), readBack(a, (try stream.send(a, 3, "q")).body).getUint("stream").?);
-    try testing.expectEqualStrings("close", (try stream.close(a, 3)).box);
-
-    // The dial's answers: {stream} (box dial), a frame, its end, an error.
-    const m = struct {
-        fn of(al: Allocator, es: []const cbor.Entry) Value {
-            return .{ .map = al.dupe(cbor.Entry, es) catch @panic("OOM") };
-        }
-    };
-    try testing.expectEqual(@as(u64, 7), (try stream.dialAnswer("dial", m.of(a, &.{.{ .key = "stream", .value = .{ .uint = 7 } }}))).opened);
-    try testing.expectEqualSlices(u8, "r", (try stream.dialAnswer("frame", m.of(a, &.{ .{ .key = "stream", .value = .{ .uint = 7 } }, .{ .key = "body", .value = .{ .bytes = "r" } } }))).frame);
-    try testing.expect((try stream.dialAnswer("frame", m.of(a, &.{ .{ .key = "stream", .value = .{ .uint = 7 } }, .{ .key = "closed", .value = .{ .boolean = true } } }))) == .closed);
-    try testing.expectEqualStrings("refused", (try stream.dialAnswer("dial", m.of(a, &.{.{ .key = "error", .value = .{ .text = "refused" } }}))).closed);
-    try testing.expectError(error.BadAnswer, stream.dialAnswer("send", m.of(a, &.{})));
+    // The peer ID as text (base58btc), as amm.pool.terms answers it.
+    try testing.expect((try stream.peerIdText(a, pid)).len > 0);
 }
 
 // ================================================================ amm.swap/1 (0.44.0: terms only; the host relays)
@@ -437,11 +372,6 @@ test "the app's root head is <app>/app (skein-sdk 0.3.0 app.headOf)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectEqualStrings(try app.headOf(arena.allocator(), iface.app_name), iface.app_head);
-}
-
-test "this program's state head is under the app's name, amm/p2p (#77: an app advances only <app>/…)" {
-    try std.testing.expectEqualStrings("amm/p2p", iface.p2p_head);
-    try std.testing.expect(std.mem.startsWith(u8, iface.p2p_head, iface.app_name ++ "/"));
 }
 
 // ================================================================ the affirmation (amm.pool/1, 0.11.0)
