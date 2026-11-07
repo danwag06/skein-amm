@@ -692,6 +692,9 @@ const ReadEnv = struct {
     ch: w.state.State,
     token: []const u8,
     topic: []const u8,
+    /// The header chain's tip (hash, height) after the fixtures' blocks: the next block builds on it.
+    tip: [32]u8 = undefined,
+    height: u32 = 0,
 
     fn init(a: Allocator) !*ReadEnv {
         const e = try a.create(ReadEnv);
@@ -726,6 +729,8 @@ const ReadEnv = struct {
             prev = w.header.hash(&hd);
             try e.ch.putProof(txid, try w.merkle.MerklePath.parse(a, try soloPath(a, height, txid)));
         }
+        e.tip = prev;
+        e.height = height;
         const pd = unhex(a, vec.pool_deploy);
         const s1 = unhex(a, vec.swap_bsv_in);
         const s2 = unhex(a, vec.swap_tokens_in);
@@ -916,6 +921,64 @@ test "read API (0.34.0): P9 /tx — the transaction's BEEF; immutable only when 
     try testing.expectEqualStrings("public, max-age=31536000, immutable", h.get("headers").?.getText("cache-control").?);
     try testing.expectEqualStrings("application/octet-stream", h.getText("type").?);
     try testing.expectEqualStrings("public, max-age=5", reads.Cache.state.header());
+}
+
+/// The door's check over a served BEEF (skein door.zig `spv`: `chain.spv.verify`, nothing known): the
+/// fixtures' blocks hold one transaction each, so a block's root is its transaction's txid.
+fn doorVerify(a: Allocator, e: *ReadEnv, bytes: []const u8) !w.spv.Result {
+    const Ctx = struct {
+        e: *ReadEnv,
+        a: Allocator,
+        fn rootAt(ptr: *anyopaque, height: u32) anyerror!?[32]u8 {
+            const c: *@This() = @ptrCast(@alignCast(ptr));
+            for ([_][]const u8{ vec.fund, vec.token_deploy, vec.pool_deploy, vec.swap_bsv_in, vec.swap_tokens_in }) |h| {
+                const id = w.beef.txidOf(unhex(c.a, h));
+                if (try c.e.ch.proofFor(id)) |p| if (p.block_height == height) return id;
+            }
+            return null;
+        }
+        fn knownRaw(_: *anyopaque, _: Allocator, _: [32]u8) anyerror!?[]const u8 {
+            return null;
+        }
+    };
+    var ctx = Ctx{ .e = e, .a = a };
+    return w.spv.verify(a, try w.beef.parse(a, bytes), .{ .ptr = &ctx, .rootAtFn = Ctx.rootAt, .knownRawFn = Ctx.knownRaw });
+}
+
+fn expectEverySource(a: Allocator, b: w.beef.Beef, raw: []const u8) !void {
+    const tx = try Transaction.parse(a, raw);
+    for (tx.inputs) |in| try testing.expect(b.find(in.previous_outpoint.txid.bytes) != null);
+}
+
+test "read API (0.44.2): P9 /tx serves every input's source — the swap unmined (sources with their ancestry) and mined (BUMP alone from beefOf, sources added); each passes the door's check" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const e = try ReadEnv.init(a);
+    defer e.deinit();
+    const raw = unhex(a, vec.swap_tokens_in);
+    const s2 = w.beef.txidOf(raw);
+    // Unmined: the sources are the pool's transaction (itself unmined, with its own ancestry) and the funding.
+    const b1 = try w.beef.parse(a, (try reads.txBeef(a, &e.ch, s2)).?);
+    try testing.expectEqualSlices(u8, &s2, &b1.subject().?);
+    try expectEverySource(a, b1, raw);
+    _ = try doorVerify(a, e, try w.beef.serialize(a, b1));
+    // Mined: beefOf is the transaction and its BUMP only; the served BEEF still has every source, and the
+    // transaction itself carries no BUMP (an Atomic BEEF cannot carry a proven subject's sources).
+    const hd = mineHeader(e.tip, s2, 1_700_100_000);
+    _ = try e.ch.addHeaders(&.{&hd});
+    try e.ch.putProof(s2, try w.merkle.MerklePath.parse(a, try soloPath(a, e.height + 1, s2)));
+    try testing.expectEqual(w.state.Status.proven, try e.ch.status(s2));
+    const bare = try w.beef.parse(a, (try e.ch.beefOf(s2)).?);
+    try testing.expectEqual(@as(usize, 1), bare.entries.len);
+    const b2 = try w.beef.parse(a, (try reads.txBeef(a, &e.ch, s2)).?);
+    try testing.expectEqualSlices(u8, &s2, &b2.subject().?);
+    try testing.expect(b2.entries.len > 1);
+    try testing.expect(b2.find(s2).?.bump == null);
+    try expectEverySource(a, b2, raw);
+    _ = try doorVerify(a, e, try w.beef.serialize(a, b2));
+    // Unknown: none.
+    try testing.expect((try reads.txBeef(a, &e.ch, .{0x77} ** 32)) == null);
 }
 
 test "read API (0.34.0): P7 /terms — the validator's terms with its identity and peer, and the market's; no terms, validator null" {
