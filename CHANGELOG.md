@@ -4,6 +4,15 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.44.1 (2026-11-06)
+
+- amm-p2p: the catch-up pass is gone, whole (David Case): the cron-ticked `amm-p2p-tick` job `catchup` — a pull of
+  proofs by block from configured peers with its own reply deadline, a placeholder from before the overlay sync that
+  nothing scheduled — with its tick, its config (`config.amm.ammP2p` / `defaults.ammP2p`), its cursor under
+  `amm/p2p`, the provider bodies it sent and its tests. The serving side of proofs by block (`proofsByBlock`) stays.
+  amm-p2p now steps only on messages in its box. amm-validator unchanged.
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.44.1 (no code change; the client on the engine 0.44.1).
+
 ## 0.44.0 (2026-11-06)
 
 The host is the relay (agent-env plans/host-relay-build-2026-11-06.md; David Case: "the instance logs FACTS, never
