@@ -4,6 +4,19 @@ Released versions of skein-amm. 0.10.0 is the first entry here; the notes
 on earlier versions are below as the README carried them at 0.9.1, in the
 names of their time, and each release commit names what changed.
 
+## 0.44.2 (2026-11-07)
+
+- amm-p2p `/tx?id=<txid>` serves the transaction as an Atomic BEEF with EVERY input's source transaction in it, mined or
+  not (`reads.txBeef`: the chain state's `beefOfMany` over the sources — a mined source with its BUMP, an unmined one
+  with its ancestry back to proven ones — then the transaction itself without a BUMP: an Atomic BEEF cannot carry a
+  proven subject's sources, the SDK's reader rejects them as unrelated data). Before, a mined transaction came with its BUMP alone, and the
+  color module refused it at internalize (BRC-207, "input N lacks its source"). 404 when the chain lacks an input's
+  source. amm-validator unchanged (its wasm is byte-identical to 0.44.1).
+- The pages' overlay pass no longer swallows a failed take-in: `resolveFromOverlay` answers `{taken, stuck}`; `executeSwap`
+  reports each stuck row (`{outpoint, spentBy, error}`) as a `stuck` progress and in `SwapResult.stuck`. No retry, no
+  state: the next pass tries again.
+- `@dcasegr/amm-engine` and `@dcasegr/amm-client` 0.44.2 (the engine unchanged in behaviour; the client on the engine 0.44.2).
+
 ## 0.44.1 (2026-11-06)
 
 - amm-p2p: the catch-up pass is gone, whole (David Case): the cron-ticked `amm-p2p-tick` job `catchup` — a pull of
