@@ -350,6 +350,18 @@ function SwapForm({ session, token }: { session: Session; token: HostedToken }) 
                 </p>
               )}
               <LegList legs={result.legs} payDec={payDec} recvDec={recvDec} payUnit={payUnit} recvUnit={recvUnit} />
+              {result.stuck && result.stuck.length > 0 && (
+                <div>
+                  <p>A row in the swap basket was spent, and the wallet could not take that transaction in:</p>
+                  <ul>
+                    {result.stuck.map((r) => (
+                      <li key={r.outpoint}>
+                        <Id value={r.outpoint} kind="outpoint" label="swap basket row" /> spent by <Id value={r.spentBy} kind="txid" label="transaction id" />: {r.error}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {result.returned &&
                 ("txid" in result.returned ? (
                   <p>

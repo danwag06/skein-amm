@@ -101,7 +101,7 @@ import type { AuthFetchLike, FetchLike as RelayFetch } from "./market/relay.js";
 import { prepareSwap, selectLegInputs, type PlanLegInput, type PreparedSwap } from "./market/swapAction.js";
 import { fileStagedToken, moveBack, moveBackSats, stage, swapHoldingBeef, swapHoldings, swapSatsHoldings, swapSatsTotal, swapTotals, unfiledStagedTokens, type MovedBack } from "./market/activeSwap.js";
 import { relaySwap, swapIdOf, type SwapOutcome } from "./market/swapFlow.js";
-import { resolveFromOverlay, type ResolvedLeg } from "./wallet/swapPayouts.js";
+import { resolveFromOverlay, type Resolved, type ResolvedLeg, type StuckRow } from "./wallet/swapPayouts.js";
 import { formatAmount } from "./lp/amounts.js";
 import { basketRows } from "./lp/wallet.js";
 import { buildInventory, decodeTokenRow, deployIcon } from "./lp/inventory.js";
@@ -250,6 +250,11 @@ export interface SwapResult {
   totalOut: bigint;
   /** The swap amount not filled. */
   unfilled: bigint;
+  /**
+   * 0.44.2: the swap-basket rows whose spender the overlay pass could not take in (still spendable in the wallet),
+   * as the last pass left them: the row, the spending transaction, the error. Absent: none.
+   */
+  stuck?: StuckRow[];
   /** What went back to the wallet when the swap stopped early (the Move back's), or why it did not. */
   returned?: { txid: string; tokens: bigint } | { error: string };
 }
@@ -678,6 +683,7 @@ export type SwapProgress =
   | { phase: "relaying"; leg: string; amountIn: bigint; amountOut: bigint; filled: LegResult[] }
   | { phase: "repricing"; leg: string; amountIn: bigint; amountOut: bigint; filled: LegResult[] }
   | { phase: "returning"; filled: LegResult[] }
+  | { phase: "stuck"; rows: StuckRow[] }
   | { phase: "done"; result: SwapResult }
   | { phase: "failed"; result?: SwapResult; error?: ClientError | Error };
 
@@ -1083,7 +1089,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
   }
 
   /** The overlay pass over the swap basket (item 5, src/wallet/swapPayouts.ts): ONE `/amm/spends`, each spender's `/tx`, this wallet's legs taken in. */
-  function resolve(wallet: WalletInterface): Promise<ResolvedLeg[]> {
+  function resolve(wallet: WalletInterface): Promise<Resolved> {
     return resolveFromOverlay(wallet, { spendsAll: (ops) => readSpendsAll(swapBase, ops, freshFetch), tx: (tokenId, txid) => readTx(tokenBase(tokenId, swapBase), txid, freshFetch) });
   }
 
@@ -1163,8 +1169,13 @@ function makeClient(opts: ClientOptions, s: Shared) {
     let order: string | undefined;
     /** Legs sent with no answer yet: what they spend, to account a later take-in by the overlay pass. */
     const pending: { prepared: PreparedSwap; leg: Leg; poolId: string }[] = [];
-    const accountResolved = (taken: ResolvedLeg[]) => {
-      for (const t of taken) {
+    let stuck: StuckRow[] = [];
+    /** Takes the pass's result in: the legs it took in accounted; the rows it could not take in remembered (0.44.2) and shown. */
+    const accountResolved = (r: Resolved) => {
+      const before = JSON.stringify(stuck);
+      stuck = r.stuck;
+      if (stuck.length > 0 && JSON.stringify(stuck) !== before) progress({ phase: "stuck", rows: stuck });
+      for (const t of r.taken) {
         const i = pending.findIndex((x) => x.prepared.satsInputs.some((r) => t.inputs.includes(r.outpoint)));
         if (i < 0) continue;
         const [x] = pending.splice(i, 1);
@@ -1279,6 +1290,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
 
     // 3. The end.
     const out: SwapResult = { status: filledIn >= quote.request.amountIn ? "filled" : legs.length > 0 ? "partial" : "failed", stop: why, legs, totalIn: filledIn, totalOut: filledOut, unfilled: quote.request.amountIn - filledIn };
+    if (stuck.length > 0) out.stuck = stuck;
     if (why !== "filled" && pending.length === 0) {
       const left = (await swapSatsHoldings(wallet)).length + (await swapHoldings(wallet, tokenId)).length;
       if (left > 0) {
@@ -1577,7 +1589,7 @@ function makeClient(opts: ClientOptions, s: Shared) {
     } catch {
       /* the next load */
     }
-    const taken = (await resolve(boundWallet)).map((t) => t.txid);
+    const taken = (await resolve(boundWallet)).taken.map((t) => t.txid);
     if (filed || taken.length > 0) emit();
     return taken;
   }

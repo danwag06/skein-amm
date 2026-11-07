@@ -12,7 +12,7 @@ import { Beef } from "@bsv/sdk";
 import { computeSwap, type PoolState } from "@dcasegr/amm-engine";
 import type { PreparedSwap, SatsInput, TokenInput } from "../src/market/swapAction";
 import type { SwapOutcome } from "../src/market/swapFlow";
-import type { ResolvedLeg } from "../src/wallet/swapPayouts";
+import type { ResolvedLeg, StuckRow } from "../src/wallet/swapPayouts";
 import { PEER } from "./liveRead";
 
 const ORIGIN = "http://alice.localhost:8300";
@@ -29,6 +29,7 @@ const prepared: { satsPerKb: number; order?: string; last: boolean; pool: string
 const staged: unknown[] = [];
 const movedBack: string[] = [];
 let resolved: ResolvedLeg[][] = [];
+let resolvedStuck: StuckRow[][] = [];
 let resolveCalls = 0;
 let spentRead: (ops: string[]) => { outpoint: string; spentBy?: string; tokenId?: string }[];
 let haveSats = 0;
@@ -76,7 +77,7 @@ vi.mock("../src/market/activeSwap", async (orig) => ({
 }));
 vi.mock("../src/wallet/swapPayouts", async (orig) => ({
   ...(await orig<typeof import("../src/wallet/swapPayouts")>()),
-  resolveFromOverlay: vi.fn(async () => (resolveCalls++, resolved.shift() ?? [])),
+  resolveFromOverlay: vi.fn(async () => ({ taken: (resolveCalls++, resolved.shift() ?? []), stuck: resolvedStuck.shift() ?? [] })),
 }));
 vi.mock("../src/lib/overlay", async (orig) => {
   const real = await orig<typeof import("../src/lib/overlay")>();
@@ -128,6 +129,7 @@ beforeEach(() => {
   staged.length = 0;
   movedBack.length = 0;
   resolved = [];
+  resolvedStuck = [];
   resolveCalls = 0;
   spentRead = (ops) => ops.map((outpoint) => ({ outpoint }));
   haveSats = 0;
@@ -273,6 +275,22 @@ describe("executeSwap (0.40.0): one swap at a time, legs one at a time", () => {
     expect(relayed).toHaveLength(3);
     expect(relayed[2]!.pool).not.toBe(relayed[0]!.pool);
     expect(r.legs.map((l) => l.txid)).toEqual(["f3".repeat(32)]);
+  });
+
+  it("0.44.2: a staged row the pass could not take in is reported — a `stuck` progress and the result's `stuck` — and the swap goes on", async () => {
+    const c = client();
+    const q = buy(c);
+    const row: StuckRow = { outpoint: satsRow.outpoint, spentBy: "f1".repeat(32), error: "BRC-207: transaction input 0 lacks its source or unlocking script" };
+    resolvedStuck = [[row]];
+    outcomes.push(accepted("f4".repeat(32)));
+    const seen: unknown[] = [];
+    const r = await c.executeSwap(q, { onProgress: (x) => seen.push(x) });
+    expect(r.stuck).toEqual([row]);
+    expect(seen).toContainEqual({ phase: "stuck", rows: [row] });
+    expect(r.legs.map((l) => l.txid)).toEqual(["f4".repeat(32)]);
+    // None stuck: no field.
+    outcomes.push(accepted("f5".repeat(32)));
+    expect((await c.executeSwap(q)).stuck).toBeUndefined();
   });
 
   it("the staged rows cannot cover the leg: stop fees; cancelled: stop cancelled before the next leg; both move the rows back", async () => {

@@ -17,8 +17,10 @@
  *   4. again, until no row has a spender the wallet lacks (a take-in's change rows may be spent by
  *      a later leg whose page was lost).
  *
- * Any failed read or take-in: nothing, the next pass tries again. 0.34.0's pool-outpoint grouping
- * of staged rows is gone.
+ * Any failed read: nothing, the next pass tries again. A row whose spender the pass could not take in
+ * (no transaction served, or the wallet refused it) is REPORTED (`stuck`, 0.44.2): it stays spendable,
+ * the next pass tries again, and a swap that starts with one says which row, which spender, the error.
+ * 0.34.0's pool-outpoint grouping of staged rows is gone.
  */
 import { Transaction, type InternalizeOutput, type WalletInterface, type WalletOutput } from "@bsv/sdk";
 import { WALLET_PAYMENT, brc29PublicKey, identityKeyOf, p2pkhHexOf } from "./brc29.js";
@@ -108,19 +110,34 @@ export interface ResolvedLeg {
   payout: { satoshis: number; tokens?: bigint };
 }
 
-/** The pass (see the module comment): → the legs taken in. Never throws. */
-export async function resolveFromOverlay(wallet: WalletInterface, reads: { spendsAll: (outpoints: string[]) => Promise<SpendAll[]>; tx: FetchTx }): Promise<ResolvedLeg[]> {
+/** A row (`<txid>.<vout>`) whose spender the pass could not take in: the spender and why (0.44.2). */
+export interface StuckRow {
+  outpoint: string;
+  spentBy: string;
+  error: string;
+}
+
+/** What the pass did: the legs taken in, and the rows whose spender it could not take in. */
+export interface Resolved {
+  taken: ResolvedLeg[];
+  stuck: StuckRow[];
+}
+
+/** The pass (see the module comment): → the legs taken in and the rows left stuck. Never throws. */
+export async function resolveFromOverlay(wallet: WalletInterface, reads: { spendsAll: (outpoints: string[]) => Promise<SpendAll[]>; tx: FetchTx }): Promise<Resolved> {
   const taken: ResolvedLeg[] = [];
+  const stuck: StuckRow[] = [];
+  const done = (): Resolved => ({ taken, stuck });
   const tried = new Set<string>();
   for (let round = 0; round < 64; round++) {
     let rows: WalletOutput[];
     let spends: SpendAll[];
     try {
       rows = await basketRows(wallet, SWAP_BASKET);
-      if (rows.length === 0) return taken;
+      if (rows.length === 0) return done();
       spends = await reads.spendsAll(rows.map((r) => r.outpoint.replace("_", ".")));
     } catch {
-      return taken;
+      return done();
     }
     const byOutpoint = new Map(rows.map((r) => [r.outpoint.replace("_", "."), r]));
     let took = false;
@@ -129,15 +146,21 @@ export async function resolveFromOverlay(wallet: WalletInterface, reads: { spend
       tried.add(s.spentBy);
       try {
         const beef = await reads.tx(s.tokenId, s.spentBy);
-        if (!beef) continue;
+        if (!beef) {
+          stuck.push({ outpoint: s.outpoint, spentBy: s.spentBy, error: "the host served no transaction for the spender" });
+          continue;
+        }
         const tx = Transaction.fromAtomicBEEF(beef);
         const op = parseOutpoint(s.outpoint);
         const row = op ? byOutpoint.get(`${op.txid}.${op.vout}`) : undefined;
         const orders = [...new Set([row ? orderOf(row) : undefined, ownKeyInputOf(tx) ?? undefined].filter((x): x is string => typeof x === "string"))];
+        let matched = false;
         for (const order of orders) {
           const outputs = await legTakeInOf(wallet, tx, s.tokenId, order);
           if (!outputs) continue;
+          matched = true;
           const r = await wallet.internalizeAction({ tx: beef, outputs, description: "AMM swap payout", labels: ["amm-swap"] });
+          if (!r.accepted) stuck.push({ outpoint: s.outpoint, spentBy: s.spentBy, error: "the wallet did not accept the take-in" });
           if (r.accepted) {
             const out1 = tx.outputs[1]!;
             const t = decodeOneColor(out1.lockingScript.toBinary());
@@ -151,11 +174,15 @@ export async function resolveFromOverlay(wallet: WalletInterface, reads: { spend
           }
           break;
         }
-      } catch {
-        /* the next pass */
+        // A spent row of this basket is this wallet's own; no output of its spender paying a key the row or the
+        // transaction names is a take-in that could not be made (0.44.2: said, not skipped).
+        if (!matched) stuck.push({ outpoint: s.outpoint, spentBy: s.spentBy, error: orders.length === 0 ? "the spending transaction names no order key (its inputs' sources are missing)" : "no output of the spending transaction pays this wallet's keys" });
+      } catch (e) {
+        // Reported, not swallowed (0.44.2); the row stays, the next pass tries again.
+        stuck.push({ outpoint: s.outpoint, spentBy: s.spentBy, error: e instanceof Error ? e.message : String(e) });
       }
     }
-    if (!took) return taken;
+    if (!took) return done();
   }
-  return taken;
+  return done();
 }

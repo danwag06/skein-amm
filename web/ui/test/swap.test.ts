@@ -852,7 +852,7 @@ describe("resolve from the overlay (0.40.0): every amm-swap row's spender (ONE /
     const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
     expect(ownKeyInputOf(final)).toBe(prepared.order);
     const asked: string[] = [];
-    const taken = await resolveFromOverlay(withRows(w, rowsOf(prepared)), readsOf(final, asked));
+    const { taken } = await resolveFromOverlay(withRows(w, rowsOf(prepared)), readsOf(final, asked));
     expect(taken.map((t) => t.txid)).toEqual([final.id("hex")]);
     // Then again: the take-in left no row with a spender, so nothing more is read.
     expect(asked).toEqual([`spends ${prepared.satsInputs[0]!.outpoint}`, `tx ${TOKEN_ID} ${final.id("hex")}`]);
@@ -870,7 +870,7 @@ describe("resolve from the overlay (0.40.0): every amm-swap row's spender (ONE /
     const { prepared, vkey } = await tokensIn(w, v.commissionPkh, { order, last: true, extra: 2_000 });
     const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
     const rows = rowsOf(prepared).map((r, n) => (n === 0 ? { ...r, customInstructions: JSON.stringify({ ...JSON.parse(r.customInstructions), order }) } : r));
-    expect((await resolveFromOverlay(withRows(w, rows), readsOf(final))).map((t) => t.txid)).toEqual([final.id("hex")]);
+    expect((await resolveFromOverlay(withRows(w, rows), readsOf(final))).taken.map((t) => t.txid)).toEqual([final.id("hex")]);
     if (prepared.payout.kind !== "brc29" || prepared.satsChange?.kind !== "brc29") throw new Error("expected wallet payments");
     const ia = w.calls.find((c) => c.method === "internalizeAction")!.args as { outputs: unknown[] };
     expect(ia.outputs).toEqual([
@@ -885,16 +885,35 @@ describe("resolve from the overlay (0.40.0): every amm-swap row's spender (ONE /
     const stranger = brc29Side(key(77));
     const other = fakeWallet({ fundingVout: 2 });
     const strangerWallet = { ...withRows(other, rowsOf(prepared)), getPublicKey: async (a: { identityKey?: boolean }) => ({ publicKey: a.identityKey ? stranger.identityKey : stranger.publicKey(a as never) }) } as unknown as WalletInterface;
-    expect(await resolveFromOverlay(strangerWallet, readsOf(final))).toEqual([]);
+    const strangers = await resolveFromOverlay(strangerWallet, readsOf(final));
+    expect(strangers.taken).toEqual([]);
+    expect(strangers.stuck).toEqual([{ outpoint: expect.any(String), spentBy: final.id("hex"), error: "no output of the spending transaction pays this wallet's keys" }]);
     expect(other.calls.some((c) => c.method === "internalizeAction")).toBe(false);
     const asked: string[] = [];
     const w = fakeWallet({ fundingVout: 2 });
-    expect(await resolveFromOverlay(withRows(w, rowsOf(prepared)), readsOf(null, asked))).toEqual([]);
+    expect(await resolveFromOverlay(withRows(w, rowsOf(prepared)), readsOf(null, asked))).toMatchObject({ taken: [] });
     expect(asked).toHaveLength(1);
-    expect(await resolveFromOverlay(withRows(w, rowsOf(prepared)), { spendsAll: async () => { throw new Error("down"); }, tx: async () => null })).toEqual([]);
-    expect(await resolveFromOverlay(withRows(w, []), readsOf(final, asked))).toEqual([]);
+    expect(await resolveFromOverlay(withRows(w, rowsOf(prepared)), { spendsAll: async () => { throw new Error("down"); }, tx: async () => null })).toEqual({ taken: [], stuck: [] });
+    expect(await resolveFromOverlay(withRows(w, []), readsOf(final, asked))).toEqual({ taken: [], stuck: [] });
     expect(asked).toHaveLength(1); // no rows: no read
     expect(w.calls.some((c) => c.method === "internalizeAction")).toBe(false);
+  });
+
+  it("0.44.2: a take-in the wallet refuses is reported — the row, its spender, the error — and takes nothing; the other rows go on", async () => {
+    const { prepared, vkey } = await tokensIn();
+    const final = await validatorSigns(prepared, prepared.swap.toBinary(), vkey);
+    const w = fakeWallet({ fundingVout: 2 });
+    const refusing = withRows(w, rowsOf(prepared));
+    (refusing as unknown as { internalizeAction: unknown }).internalizeAction = async () => {
+      throw new Error("BRC-207: transaction input 0 lacks its source or unlocking script");
+    };
+    const r = await resolveFromOverlay(refusing, readsOf(final));
+    expect(r.taken).toEqual([]);
+    expect(r.stuck).toEqual([{ outpoint: expect.any(String), spentBy: final.id("hex"), error: "BRC-207: transaction input 0 lacks its source or unlocking script" }]);
+    // The host serving nothing for the spender is reported too.
+    const none = await resolveFromOverlay(withRows(fakeWallet({ fundingVout: 2 }), rowsOf(prepared)), { ...readsOf(final), tx: async () => null });
+    expect(none.stuck).toHaveLength(1);
+    expect(none.stuck[0]!.spentBy).toBe(final.id("hex"));
   });
 
   it("legTakeInOf: an output of another's swap is no match; this wallet's under another order is none", async () => {
